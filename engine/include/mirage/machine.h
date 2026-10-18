@@ -1,9 +1,12 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <span>
 #include <vector>
 
+#include "mirage/acia6850.h"
 #include "mirage/bus.h"
 #include "mirage/cpu6809.h"
 #include "mirage/panel.h"
@@ -12,8 +15,8 @@
 namespace mirage {
 
 // The whole Mirage: 6809 + RAM + banked sample RAM + boot ROM + I/O decode.
-// The VIA and front panel are wired in; the other I/O devices are stubs for
-// now (reads $FF, writes ignored); later tasks plug the ACIA, FDC, DOC and
+// The VIA, ACIA (MIDI) and front panel are wired in; the other I/O devices
+// are stubs for now (reads $FF, writes ignored); later tasks plug the ACIA, FDC, DOC and
 // filter chips into ioRead/ioWrite/tickDevices.
 class Machine : private Bus {
  public:
@@ -41,6 +44,13 @@ class Machine : private Bus {
   void setKey(PanelKey key, bool down) { panel_.setKey(key, down); }
   DisplayState display() const { return panel_.display(cycles_); }
 
+  // MIDI. Queued bytes reach the ACIA one per MIDI byte time (320 us) of
+  // emulated time, whatever the ACIA's divide setting. The queue is unbounded
+  // (host side); an OS that reads too slowly gets OVRN as on hardware. powerOn()
+  // discards queued bytes. Bytes the OS transmits are passed to onMidiOut.
+  void queueMidi(std::span<const uint8_t> bytes);
+  std::function<void(uint8_t)> onMidiOut;
+
   std::vector<uint8_t> saveState() const;
   void loadState(std::span<const uint8_t> data);  // throws StateError; unchanged on failure
 
@@ -53,6 +63,8 @@ class Machine : private Bus {
   // The CPU IRQ line is the OR of the VIA, WD1772 DRQ and DOC IRQ outputs.
   // Call after anything that can change one of them.
   void updateIrq();
+  // The CPU FIRQ line is the ACIA IRQ output.
+  void updateFirq();
 
   std::array<uint8_t, kBootRomSize> rom_{};
   std::array<uint8_t, 0x4000> ram_{};   // $8000-$BFFF
@@ -64,6 +76,9 @@ class Machine : private Bus {
   Cpu6809 cpu_;
   Via6522 via_;
   Panel panel_;
+  Acia6850 acia_;
+  std::deque<uint8_t> midiIn_;
+  uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives
 };
 
 }  // namespace mirage

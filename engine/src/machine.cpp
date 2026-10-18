@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "mirage/clocks.h"
 #include "mirage/state_io.h"
 
 namespace mirage {
@@ -11,6 +12,10 @@ namespace {
 constexpr uint16_t kSampleWindowEnd = 0x8000;  // $0000-$7FFF
 constexpr uint16_t kRamBase = 0x8000, kExpBase = 0xC000, kIoBase = 0xE000, kRomBase = 0xF000;
 constexpr uint32_t kQuarter = 0x8000;
+// E cycles per MIDI byte on the wire (640 at 2 MHz).
+constexpr uint64_t kMidiByteCycles = uint64_t(kMidiByteSeconds * kCpuClockHz + 0.5);
+// A save file with more queued MIDI bytes than this is treated as corrupt.
+constexpr uint32_t kMaxMidiQueue = 1u << 24;
 }  // namespace
 
 Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
@@ -27,6 +32,9 @@ Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
   // and PB7 are wired by later tasks.
   via_.portBPins = [] { return uint8_t(0); };
   via_.portBOut = [this](uint8_t b) { bank_ = uint8_t(b & 3); };
+  acia_.onTransmit = [this](uint8_t b) {
+    if (onMidiOut) onMidiOut(b);
+  };
 }
 
 void Machine::powerOn() {
@@ -37,6 +45,10 @@ void Machine::powerOn() {
   cycles_ = 0;
   credit_ = 0;
   via_.reset();
+  acia_.reset();
+  midiIn_.clear();
+  nextMidiCycle_ = 0;
+  updateFirq();
   panel_.clearDisplay();
   cpu_.powerOn();
 }
@@ -82,7 +94,11 @@ void Machine::write(uint16_t addr, uint8_t value) {
 // I/O decode for $E000-$EFFF. Each branch is where a later task plugs in its
 // device; unmapped addresses read $FF.
 uint8_t Machine::ioRead(uint16_t addr) {
-  if (addr >= 0xE100 && addr <= 0xE101) return 0xFF;  // 6850 ACIA
+  if (addr >= 0xE100 && addr <= 0xE101) {  // 6850 ACIA
+    const uint8_t v = acia_.read(uint8_t(addr & 1));
+    updateFirq();  // a data read clears RDRF/OVRN
+    return v;
+  }
   if (addr >= 0xE200 && addr <= 0xE2FF) {  // 6522 VIA, register = addr & 15
     const uint8_t v = via_.read(uint8_t(addr & 15));
     updateIrq();  // reading T1C-L, T2C-L, ORx or SR clears flags
@@ -95,7 +111,11 @@ uint8_t Machine::ioRead(uint16_t addr) {
 }
 
 void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
-  if (addr >= 0xE100 && addr <= 0xE101) return;  // 6850 ACIA
+  if (addr >= 0xE100 && addr <= 0xE101) {        // 6850 ACIA
+    acia_.write(uint8_t(addr & 1), value);
+    updateFirq();
+    return;
+  }
   if (addr >= 0xE200 && addr <= 0xE2FF) {        // 6522 VIA
     via_.write(uint8_t(addr & 15), value);
     updateIrq();
@@ -109,11 +129,28 @@ void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
 void Machine::tickDevices(uint32_t cycles) {
   via_.tick(cycles);  // Phi2 = the CPU E clock
   updateIrq();
+  // cycles_ already includes this step. One tick is a single instruction, far
+  // shorter than a MIDI byte, so at most one byte falls due.
+  if (!midiIn_.empty() && cycles_ >= nextMidiCycle_) {
+    acia_.receiveByte(midiIn_.front());
+    midiIn_.pop_front();
+    nextMidiCycle_ += kMidiByteCycles;
+    updateFirq();
+  }
+}
+
+void Machine::queueMidi(std::span<const uint8_t> bytes) {
+  if (bytes.empty()) return;
+  // Into an idle line: the first byte finishes one byte time from now.
+  if (midiIn_.empty()) nextMidiCycle_ = cycles_ + kMidiByteCycles;
+  midiIn_.insert(midiIn_.end(), bytes.begin(), bytes.end());
 }
 
 void Machine::updateIrq() {
   cpu_.setIrq(via_.irq());  // | WD1772 DRQ | DOC IRQ (Tasks 8 and 10)
 }
+
+void Machine::updateFirq() { cpu_.setFirq(acia_.irq()); }
 
 std::vector<uint8_t> Machine::saveState() const {
   StateWriter w;
@@ -126,6 +163,10 @@ std::vector<uint8_t> Machine::saveState() const {
   w.bytes(sample_);
   cpu_.save(w);
   via_.save(w);
+  acia_.save(w);
+  w.u64(nextMidiCycle_);
+  w.u32(uint32_t(midiIn_.size()));
+  for (uint8_t b : midiIn_) w.u8(b);
   panel_.save(w);
   return w.take();
 }
@@ -149,9 +190,17 @@ void Machine::loadState(std::span<const uint8_t> data) {
   cpu_.save(before);
   via_.save(before);
   panel_.save(before);
+  acia_.save(before);
+  uint64_t nextMidi = 0;
+  std::deque<uint8_t> midi;
   try {
     cpu_.load(r);
     via_.load(r);
+    acia_.load(r);
+    nextMidi = r.u64();
+    const uint32_t n = r.u32();
+    if (n > kMaxMidiQueue) throw StateError("machine: bad MIDI queue");
+    for (uint32_t i = 0; i < n; ++i) midi.push_back(r.u8());  // a short file throws here
     panel_.load(r);
     if (!r.atEnd()) throw StateError("machine: trailing data");
   } catch (...) {
@@ -160,6 +209,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     cpu_.load(back);
     via_.load(back);
     panel_.load(back);
+    acia_.load(back);
     throw;
   }
   bank_ = bank;
@@ -168,6 +218,10 @@ void Machine::loadState(std::span<const uint8_t> data) {
   ram_ = ram;
   exp_ = exp;
   sample_ = sample;
+  nextMidiCycle_ = nextMidi;
+  midiIn_ = std::move(midi);
+  updateIrq();
+  updateFirq();
 }
 
 }  // namespace mirage
