@@ -4,5 +4,6 @@ add_library(mirage_engine STATIC
   src/opcodes6809.cpp
   src/cpu6809.cpp
   src/cpu6809_ops.cpp
+  src/machine.cpp
 )
 target_include_directories(mirage_engine PUBLIC include)
