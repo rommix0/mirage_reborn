@@ -2,6 +2,7 @@ include(Catch)
 
 add_executable(mirage_tests
   test_state_io.cpp
+  test_disk_image.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine Catch2::Catch2WithMain)
 target_compile_definitions(mirage_tests PRIVATE
