@@ -1,6 +1,7 @@
 include(Catch)
 
 add_executable(mirage_tests
+  non_interactive.cpp
   test_state_io.cpp
   test_disk_image.cpp
   test_cpu6809.cpp
@@ -9,6 +10,7 @@ add_executable(mirage_tests
   test_acia6850.cpp
   test_wd1772.cpp
   test_doc5503.cpp
+  test_voice_filter.cpp
   test_machine_map.cpp
   test_disasm6809.cpp
   test_boot.cpp

@@ -19,6 +19,7 @@
 #include "mirage/disk_image.h"
 #include "mirage/machine.h"
 #include "mirage/panel.h"
+#include "non_interactive.h"
 #include "run_options.h"
 
 #ifndef MIRAGE_ASSET_ROOT
@@ -205,6 +206,7 @@ int run(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  cli::makeNonInteractive();
   if (argc >= 2 && std::string_view(argv[1]) == "disasm") return disasm(argc - 2, argv + 2);
   if (argc >= 2 && std::string_view(argv[1]) == "run") return run(argc - 2, argv + 2);
   return usage();

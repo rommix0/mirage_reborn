@@ -35,6 +35,11 @@ namespace mirage {
 // nothing is recorded (setting IE later raises nothing). An oscillator is in
 // the FIFO at most once.
 //
+// A/D ($E2): a read returns the result of the previous conversion and starts a
+// new one, sampling adcRead() (the analog input) at that moment. A conversion
+// takes 26 input clocks; a read before it completes loses it (the result keeps
+// the older value) and starts another. Power-on result $80.
+//
 // Output: running oscillators add (byte - 128) * volume to their channel
 // (CA & 7, the Mirage has 8). An odd oscillator in mode 10 is amplitude
 // modulated: its volume is the even partner's last wave byte.
@@ -53,7 +58,7 @@ class Doc5503 {
   int enabledOscillators() const;
   double sampleRate() const;  // 8e6 / (8 * (enabled + 2))
 
-  std::function<uint8_t()> adcRead;  // a read of $E2 calls this
+  std::function<uint8_t()> adcRead;  // the A/D input, sampled when a conversion starts
   // Emitted once per full scan: per-channel sums of (sample-128)*volume,
   // channels 0..7 = CA & 7.
   std::function<void(const std::array<int32_t, kChannels>&)> onFrame;
@@ -82,6 +87,10 @@ class Doc5503 {
   uint32_t clockRem_ = 0;      // input clocks into the current slot (0-7)
   int slot_ = 0;               // position in the scan
   std::array<int32_t, kChannels> frame_{};
+  uint64_t clock_ = 0;  // input clocks since reset
+  uint64_t adcStart_ = 0;  // clock_ when the conversion in progress started
+  uint8_t adcResult_ = 0x80, adcSample_ = 0x80;
+  bool adcBusy_ = false;
 };
 
 }  // namespace mirage

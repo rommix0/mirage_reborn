@@ -9,6 +9,7 @@ add_library(mirage_engine STATIC
   src/acia6850.cpp
   src/wd1772.cpp
   src/doc5503.cpp
+  src/voice_filter.cpp
   src/machine.cpp
   src/disasm6809.cpp
 )

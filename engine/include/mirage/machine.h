@@ -15,14 +15,17 @@
 #include "mirage/doc5503.h"
 #include "mirage/panel.h"
 #include "mirage/via6522.h"
+#include "mirage/voice_filter.h"
 #include "mirage/wd1772.h"
 
 namespace mirage {
 
 // The whole Mirage: 6809 + RAM + banked sample RAM + boot ROM + I/O decode.
-// The VIA, ACIA (MIDI), WD1772 floppy controller, DOC 5503 and front panel are
-// wired in; the filter CV latches are a stub for now (reads $FF, writes ignored)
-// until Task 11 plugs them into ioRead/ioWrite/tickDevices.
+// The VIA, ACIA (MIDI), WD1772 floppy controller, DOC 5503, the voice filters
+// with their CV path ($E400-$E41F, write only) and the front panel are wired
+// in. The analog chain (docs/hardware/filters.md): each DOC channel goes
+// through its own filter, the filter outputs are summed, and the DOC A/D reads
+// the input the VIA PB2-3 mux selects.
 class Machine : private Bus {
  public:
   static constexpr uint32_t kBootRomSize = 0x1000;
@@ -71,10 +74,17 @@ class Machine : private Bus {
   bool driveActive() const { return wd_.motor(); }
   Wd1772& fdc() { return wd_; }  // diagnostics: sectorsRead(), diskChanged()
   // The DOC sees all 128 KB of sample RAM and is clocked by the 8 MHz master
-  // clock. Its onFrame callback is the host's audio tap (not saved).
+  // clock. Its onFrame and adcRead callbacks belong to the Machine (they drive
+  // the filters and the A/D mux); do not replace them.
   Doc5503& doc() { return doc_; }
+  const FilterBank& filters() const { return filters_; }
+  // Host audio tap (not saved): the filtered voice mix, once per DOC scan at
+  // doc().sampleRate(). One full-volume oscillator through an open filter
+  // peaks at about 1.0.
+  std::function<void(float)> onMix;
 
-  // The saved state includes the FDC, the DOC and the inserted disk (or "no disk").
+  // The saved state includes the FDC, the DOC (with its A/D conversion), the
+  // filter bank and the inserted disk (or "no disk").
   std::vector<uint8_t> saveState() const;
   void loadState(std::span<const uint8_t> data);  // throws StateError; unchanged on failure
 
@@ -105,6 +115,7 @@ class Machine : private Bus {
   Acia6850 acia_;
   Wd1772 wd_;
   Doc5503 doc_;
+  FilterBank filters_;
   uint32_t masterRem_ = 0;  // master clocks owed to the DOC, x kCpuClockHz
   std::optional<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
   std::deque<uint8_t> midiIn_;

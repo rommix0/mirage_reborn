@@ -13,6 +13,8 @@ inline constexpr uint32_t kFdcBitRate = 250'000;
 inline constexpr uint32_t kFdcByteCycles = kCpuClockHz * 8 / kFdcBitRate;
 inline constexpr uint32_t kDiskRpm = 300;
 inline constexpr uint32_t kDiskIndexCycles = kCpuClockHz * 60 / kDiskRpm;
+// DOC A/D readings of the wheels at rest (A/D mux 2 and 3). The OS takes its
+// pitch-wheel centre from whatever it reads at boot (filters.md 4).
 inline constexpr uint8_t kPitchWheelRest = 0x80;
 inline constexpr uint8_t kModWheelRest = 0x00;
 

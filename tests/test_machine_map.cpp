@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "asset_paths.h"
+#include "mirage/clocks.h"
 #include "mirage/machine.h"
 
 using namespace mirage;
@@ -138,7 +139,7 @@ TEST_CASE("machine bank uses only PB1:PB0 of port B") {
   CHECK(m.sampleRam(0x10000) == 0x42);  // quarter 2
 }
 
-TEST_CASE("machine unmapped and not-yet-wired I/O reads $FF and ignores writes") {
+TEST_CASE("machine unmapped and write-only I/O reads $FF") {
   // LDA #$00; STA $E050; LDA $E050; STA $8000; STA $E400; LDA $E400; STA $8001
   auto rom = romWith({0x86, 0x00, 0xB7, 0xE0, 0x50, 0xB6, 0xE0, 0x50, 0xB7, 0x80, 0x00,
                       0xB7, 0xE4, 0x00, 0xB6, 0xE4, 0x00, 0xB7, 0x80, 0x01});
@@ -146,7 +147,7 @@ TEST_CASE("machine unmapped and not-yet-wired I/O reads $FF and ignores writes")
   m.powerOn();
   m.runCycles(40);
   CHECK(m.peek(0x8000) == 0xFF);  // unmapped $E000-$EFFF
-  CHECK(m.peek(0x8001) == 0xFF);  // filter CV latches until Task 11
+  CHECK(m.peek(0x8001) == 0xFF);  // filter CV latches are write only
   for (uint16_t a : std::initializer_list<uint16_t>{0xE000, 0xE100, 0xE200, 0xE41F, 0xE800, 0xEC00, 0xECEF, 0xEFFF})
     CHECK(m.peek(a) == 0xFF);
 }
@@ -250,8 +251,9 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   CHECK(m.saveState() == before);
 
   // The DOC section follows the VIA: tag, OER, clock, slot, last OIR,
-  // 32 x 11 oscillator bytes, 8 channel sums, FIFO count (0 here), then the
-  // machine's DOC clock remainder (u32).
+  // 32 x 11 oscillator bytes, 8 channel sums, FIFO count (0 here), the A/D
+  // (clock u64, start u64, result, sample, busy), then the machine's DOC clock
+  // remainder (u32) and the filter bank.
   const std::array<uint8_t, 4> docTag = {'5', 'C', 'O', 'D'};  // fourcc("DOC5") as a LE u32
   const auto docAt =
       size_t(std::search(snap.begin(), snap.end(), docTag.begin(), docTag.end()) - snap.begin());
@@ -263,9 +265,21 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   CHECK_THROWS_AS(m.loadState(badDocFifo), StateError);
   CHECK(m.saveState() == before);
 
+  auto badDocAdc = snap;
+  badDocAdc[fifoCountAt + 19] = 0xFF;  // A/D busy flag > 1
+  CHECK_THROWS_AS(m.loadState(badDocAdc), StateError);
+  CHECK(m.saveState() == before);
+
   auto badDocClock = snap;
-  badDocClock[fifoCountAt + 4] = 0xFF;  // remainder high byte: >= kCpuClockHz
+  badDocClock[fifoCountAt + 23] = 0xFF;  // remainder high byte: >= kCpuClockHz
   CHECK_THROWS_AS(m.loadState(badDocClock), StateError);
+  CHECK(m.saveState() == before);
+
+  const size_t filtersAt = fifoCountAt + 24;
+  REQUIRE(snap[filtersAt] == 'K');  // fourcc("FBNK") as a LE u32
+  auto badFilters = snap;
+  badFilters[filtersAt] ^= 0xFF;
+  CHECK_THROWS_AS(m.loadState(badFilters), StateError);
   CHECK(m.saveState() == before);
 }
 
@@ -412,7 +426,7 @@ TEST_CASE("machine DOC runs one slot per 8 master clocks (2 E cycles)") {
   Machine m(romWith({0x20, 0xFE}));  // BRA *
   m.powerOn();
   uint64_t frames = 0;
-  m.doc().onFrame = [&frames](const std::array<int32_t, 8>&) { ++frames; };
+  m.onMix = [&frames](float) { ++frames; };
   m.runCycles(60001);
   // Reset default: 1 oscillator + 2 refresh slots = 24 master clocks = 6 E cycles.
   CHECK(frames == m.cycles() / 6);
@@ -435,5 +449,94 @@ TEST_CASE("machine save/load includes the DOC") {
   CHECK(other.saveState() == snap);
   m.runCycles(1001);
   other.runCycles(1001);
+  CHECK(other.saveState() == m.saveState());
+}
+
+// ---- Filters, CV path and A/D mux (Task 11, docs/hardware/filters.md) --------
+
+namespace {
+// Code that reads the DOC A/D the way the OS does ($B935): a read to start a
+// conversion, a delay (MUL x3), then a read for the result, stored at `dst`.
+std::vector<uint8_t> adcReadTo(uint16_t dst) {
+  return {0xB6, 0xEC, 0xE2, 0x3D, 0x3D, 0x3D, 0xB6, 0xEC, 0xE2,
+          0xB7, uint8_t(dst >> 8), uint8_t(dst & 0xFF)};
+}
+}  // namespace
+
+TEST_CASE("machine $E400-$E41F writes reach the filter CV path") {
+  // LDA #$40; STA $E41B (preset); STA $E413 (cutoff 3); LDA #$C8; STA $E41E;
+  // STA $E40E (resonance 6); STA $E401 (both of channel 1).
+  auto rom = romFrom({ldaSta(0x40, 0xE41B), {0xB7, 0xE4, 0x13}, ldaSta(0xC8, 0xE41E),
+                      {0xB7, 0xE4, 0x0E}, {0xB7, 0xE4, 0x01}});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(40);
+  CHECK(m.filters().cutoffCv(3) == 0x40);
+  CHECK(m.filters().resonanceCv(6) == 0xC8);
+  CHECK(m.filters().cutoffCv(1) == 0xC8);
+  CHECK(m.filters().resonanceCv(1) == 0xC8);
+  CHECK(m.filters().resonanceCv(3) == 0x00);
+  CHECK(m.peek(0xE413) == 0xFF);
+}
+
+TEST_CASE("machine A/D reads the input selected by VIA PB3:PB2") {
+  auto rom = romFrom({ldaSta(0x1F, 0xE202),
+                      ldaSta(0x08, 0xE200), adcReadTo(0x8000),   // 2: pitch wheel
+                      ldaSta(0x0C, 0xE200), adcReadTo(0x8001),   // 3: mod wheel
+                      ldaSta(0x04, 0xE200), adcReadTo(0x8002),   // 1: line input
+                      ldaSta(0x00, 0xE200), adcReadTo(0x8003),   // 0: compressed (silent voices)
+                      {0x20, 0xFE}});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(2000);
+  CHECK(m.peek(0x8000) == kPitchWheelRest);
+  CHECK(m.peek(0x8001) == kModWheelRest);
+  CHECK(m.peek(0x8002) == 0x80);
+  CHECK(m.peek(0x8003) == 0x80);
+}
+
+TEST_CASE("machine A/D mux 0 sees a self-oscillating filter swing across $90 and $70") {
+  // Channel 0: resonance $FF, cutoff $7A ($F5DC's sequence), mux 0, OER $FF
+  // (32 oscillators, as the boot ROM leaves it); wait 0.26 s
+  // (LDY #$FFFF; LEAY -1,Y; BNE), then 256 A/D reads to $8000-$80FF.
+  auto rom = romFrom({ldaSta(0xFF, 0xECE1), ldaSta(0x1F, 0xE202), ldaSta(0x00, 0xE200),
+                      ldaSta(0xFF, 0xE418), {0xB7, 0xE4, 0x08}, ldaSta(0x7A, 0xE418),
+                      {0xB7, 0xE4, 0x10},
+                      {0x10, 0x8E, 0xFF, 0xFF, 0x31, 0x3F, 0x26, 0xFC},
+                      // LDX #$8000; LDA $ECE2; STA ,X+; CMPX #$8100; BNE; BRA *
+                      {0x8E, 0x80, 0x00, 0xB6, 0xEC, 0xE2, 0xA7, 0x80, 0x8C, 0x81, 0x00, 0x26,
+                       0xF6, 0x20, 0xFE}});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(kCpuClockHz / 2);
+  CHECK(m.filters().resonanceCv(0) == 0xFF);
+  CHECK(m.filters().cutoffCv(0) == 0x7A);
+  int high = 0, low = 0;
+  for (uint16_t a = 0x8001; a < 0x8100; ++a) {  // $8000 holds the conversion before the loop
+    if (m.peek(a) > 0x90) ++high;
+    if (m.peek(a) < 0x70) ++low;
+  }
+  CHECK(high > 20);
+  CHECK(low > 20);
+}
+
+TEST_CASE("machine save/load includes the filter bank and the A/D") {
+  auto rom = romFrom({ldaSta(0xFF, 0xECE1), ldaSta(0xFF, 0xE41A), {0xB7, 0xE4, 0x0A},
+                      ldaSta(0x90, 0xE41A), {0xB7, 0xE4, 0x12}, {0xB6, 0xEC, 0xE2},
+                      {0x20, 0xFE}});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(20001);
+  const auto snap = m.saveState();
+  Machine other(rom);
+  other.powerOn();
+  other.loadState(snap);
+  CHECK(other.filters().cutoffCv(2) == 0x90);
+  CHECK(other.filters().resonanceCv(2) == 0xFF);
+  CHECK(other.filters().mix() == m.filters().mix());
+  CHECK(other.saveState() == snap);
+  m.runCycles(30001);
+  other.runCycles(30001);
+  CHECK(other.filters().mix() == m.filters().mix());
   CHECK(other.saveState() == m.saveState());
 }

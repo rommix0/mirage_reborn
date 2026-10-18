@@ -1,5 +1,6 @@
-// First boot with the real boot ROM and real disk images (Task 9).
-// docs/hardware/boot-rom.md sections 12-13 describe what these tests expect.
+// First boot with the real boot ROM and real disk images (Task 9), and the
+// OS's filter calibration (Task 11). docs/hardware/boot-rom.md sections 12-13
+// and docs/hardware/filters.md describe what these tests expect.
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -48,31 +49,64 @@ bool shows(const DisplayState& d, uint16_t romWord) {
 
 constexpr uint16_t kUd = 0x387A, kNd = 0x2A7A;  // boot-rom.md section 8
 
-// What a run looked like: the PCs seen, and the display sampled every 10 ms
-// (it is multiplexed and blinks, so one sample is not enough).
+// One pass of the ROM's filter calibration $F571 (filters.md 4), seen at its
+// exit $F5AC: B is the cutoff CV it settled on, Y the count of its last
+// measurement ($81-$84 when it converged; 0 or >= $FA0 when it gave up).
+struct Calibration {
+  uint8_t cv = 0;
+  uint16_t count = 0;
+  uint64_t cycle = 0;
+};
+
+// What a run looked like: the PCs seen, the calibrations, and the display
+// sampled every 10 ms (it is multiplexed and blinks, so one sample is not
+// enough).
 struct BootRun {
   bool ranFromRam = false;    // PC in $8000-$DFFF at some point
   bool jumpedTo800E = false;  // the ROM's hand-off JMP $800E was taken
   bool sawUd = false, sawNd = false, sawLit = false;
+  std::vector<Calibration> calibrations;
   uint64_t cycles = 0;
 };
 
-BootRun boot(Machine& m, uint64_t seconds) {
+// Runs `seconds`, or with `untilSettled` until the OS has finished booting
+// (display lit throughout the last second and no sector read for 2 s), at most
+// `seconds`.
+BootRun boot(Machine& m, uint64_t seconds, bool untilSettled = false) {
   BootRun out;
-  m.setTrace([&out](uint16_t pc, const Regs&) {
+  m.setTrace([&out, &m](uint16_t pc, const Regs& r) {
     if (pc >= 0x8000 && pc < 0xE000) out.ranFromRam = true;
     if (pc == 0x800E) out.jumpedTo800E = true;
+    if (pc == 0xF5AC) out.calibrations.push_back({r.b, r.y, m.cycles()});
   });
+  uint64_t lastSectors = m.fdc().sectorsRead(), quietTicks = 0, litTicks = 0;
   for (uint64_t t = 0; t < seconds * 100; ++t) {
     m.runCycles(kSecond / 100);
     const DisplayState d = m.display();
     if (d.left || d.right) out.sawLit = true;
+    litTicks = d.left || d.right ? litTicks + 1 : 0;
     if (shows(d, kUd)) out.sawUd = true;
     if (shows(d, kNd)) out.sawNd = true;
+    quietTicks = m.fdc().sectorsRead() == lastSectors ? quietTicks + 1 : 0;
+    lastSectors = m.fdc().sectorsRead();
+    if (untilSettled && litTicks >= 100 && quietTicks >= 200) break;
   }
   m.setTrace(nullptr);
   out.cycles = m.cycles();
   return out;
+}
+
+// The OS calibrated all 8 filters, each converging (filters.md 4) near the
+// OS's centre CV $7A, and the last one finished by `bySeconds`.
+void checkCalibrated(const BootRun& r, double bySeconds) {
+  REQUIRE(r.calibrations.size() == 8);
+  for (const Calibration& c : r.calibrations) {
+    CHECK(c.count >= 0x81);
+    CHECK(c.count <= 0x84);
+    CHECK(int(c.cv) >= 0x7A - 8);
+    CHECK(int(c.cv) <= 0x7A + 8);
+  }
+  CHECK(double(r.calibrations.back().cycle) / kSecond < bySeconds);
 }
 
 #define LOAD_ROM(var)                                                           \
@@ -112,33 +146,72 @@ TEST_CASE("boot: SND-A01 loads the OS and runs it from RAM", "[assets]") {
   CHECK_FALSE(r.sawUd);
 }
 
-// Needs the DOC A/D wired to the filter feedback (Task 11). The OS calls the
-// ROM's filter calibration $F571 once per filter; while the DOC A/D reads a
-// constant $FF its wait loops only end when Y wraps, about 6.7 s per filter
-// (boot-rom.md 13).
-TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets][!mayfail]") {
+// The OS calls the ROM's filter calibration $F571 once per filter, which
+// times each filter's self-oscillation through the DOC A/D (filters.md 4),
+// then enters its main loop and scans the display (about 7.4 s). The display
+// goes dark again while the OS loads the lower sound (from about 7.4 s to 35 s
+// with the FDC model's one sector per revolution, fdc.md), so it is sampled
+// over the whole 10 s.
+TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
   REQUIRE_ASSET(disk);
   Machine m(rom);
   m.insertDisk(DiskImage::loadFile(disk));
   m.powerOn();
-  m.runCycles(9 * kSecond);
-  const BootRun r = boot(m, 1);  // the display during the 10th second
+  const BootRun r = boot(m, 10);
+  CHECK(r.calibrations.size() == 8);
   CHECK(r.sawLit);
 }
 
-// With a constant A/D the calibration still finishes (slowly), so the whole OS
-// boot can be checked today: it loads the lower sound and lights the panel.
-TEST_CASE("boot: SND-A01 finishes booting with a constant DOC A/D", "[assets]") {
+// The whole boot: the OS calibrates the 8 filters within about a second of
+// its start (6.25 s), then loads the lower sound and settles.
+TEST_CASE("boot: SND-A01 calibrates its filters and finishes booting", "[assets]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
   REQUIRE_ASSET(disk);
   Machine m(rom);
   m.insertDisk(DiskImage::loadFile(disk));
   m.powerOn();
-  m.runCycles(110 * kSecond);
-  const BootRun r = boot(m, 1);
+  const BootRun r = boot(m, 60, true);
+  checkCalibrated(r, 8.0);
+  CHECK(r.cycles < 60 * kSecond);  // settled before the cap
+  CHECK(r.sawLit);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound
+  CHECK(m.cpu().illegalCount() == 0);
+}
+
+// Other operating systems call the same ROM calibration from their own code
+// (filters.md 4); the hardware model has to satisfy them all unchanged.
+TEST_CASE("boot: EnsoniqOS masos calibrates its filters and boots", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath("EnsoniqOS/masos");
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  const BootRun r = boot(m, 60, true);
+  checkCalibrated(r, 8.0);
+  CHECK(r.jumpedTo800E);
+  CHECK(r.cycles < 60 * kSecond);
+  CHECK(r.sawLit);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound
+  CHECK(m.cpu().illegalCount() == 0);
+}
+
+TEST_CASE("boot: the Soundprocess OS disk calibrates its filters and boots", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath("Soundprocess/Soundprocess OS/Soundprocess OS.img");
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  const BootRun r = boot(m, 60, true);
+  checkCalibrated(r, 8.0);
+  CHECK(r.jumpedTo800E);
+  CHECK(r.cycles < 60 * kSecond);
   CHECK(r.sawLit);
   CHECK_FALSE(r.sawUd);
   CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound

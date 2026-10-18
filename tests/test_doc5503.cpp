@@ -370,15 +370,61 @@ TEST_CASE("doc register read-back") {
   CHECK(r.doc.read(0xE5) == 0xFF);
 }
 
-TEST_CASE("doc A/D: a read of $E2 returns adcRead()") {
+// Datasheet: "A read from this register initiates the A to D conversion.
+// Conversion time is 26 cycles. If the A/D register is read before the
+// conversion is complete, the value will be lost and a new conversion will
+// start." So a read returns the previous conversion; the OS reads once to
+// start a conversion and again for its result (filters.md 3).
+TEST_CASE("doc A/D: a read returns the previous conversion and starts the next") {
   Rig r;
+  uint8_t input = 0x5A;
   int calls = 0;
-  r.doc.adcRead = [&calls] {
+  r.doc.adcRead = [&] {
     ++calls;
-    return uint8_t(0x5A);
+    return input;
   };
+  CHECK(r.doc.read(kAdc) == 0x80);  // power-on: no conversion yet
+  CHECK(calls == 1);                // the input is sampled when a conversion starts
+  input = 0x33;
+  r.doc.tickMasterClocks(26);
   CHECK(r.doc.read(kAdc) == 0x5A);
-  CHECK(calls == 1);
+  r.doc.tickMasterClocks(100);
+  input = 0x99;
+  CHECK(r.doc.read(kAdc) == 0x33);
+  CHECK(calls == 3);
+}
+
+TEST_CASE("doc A/D: a read before 26 clocks loses the conversion in progress") {
+  Rig r;
+  uint8_t input = 0x11;
+  r.doc.adcRead = [&] { return input; };
+  r.doc.read(kAdc);  // starts converting $11
+  r.doc.tickMasterClocks(26);
+  input = 0x22;
+  CHECK(r.doc.read(kAdc) == 0x11);  // starts converting $22
+  input = 0x44;
+  r.doc.tickMasterClocks(25);
+  CHECK(r.doc.read(kAdc) == 0x11);  // too early: $22 is lost, $44 starts
+  r.doc.tickMasterClocks(26);
+  CHECK(r.doc.read(kAdc) == 0x44);
+}
+
+TEST_CASE("doc A/D: save/load keeps the conversion in progress; reset clears it") {
+  Rig a;
+  a.doc.adcRead = [] { return uint8_t(0x6C); };
+  a.doc.read(kAdc);
+  a.doc.tickMasterClocks(10);
+  StateWriter w;
+  a.doc.save(w);
+  const auto blob = w.take();
+  Rig b;
+  b.doc.adcRead = [] { return uint8_t(0x00); };
+  StateReader rd(blob);
+  b.doc.load(rd);
+  b.doc.tickMasterClocks(16);
+  CHECK(b.doc.read(kAdc) == 0x6C);
+  b.doc.reset();
+  CHECK(b.doc.read(kAdc) == 0x80);
 }
 
 TEST_CASE("doc save/load restores every register, the FIFO and the scan position") {

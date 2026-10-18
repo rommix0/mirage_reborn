@@ -65,8 +65,8 @@ the WD1772 at `$E800-$E803`.
 | `$E20C` | VIA PCR | `$F170`: `$0E`. CA1 triggers on the negative edge. CA2 is a manual output held high (PCR3-1=111). CB1 triggers on the negative edge. CB2 is an input on the negative edge. |
 | `$E20E` | VIA IER | `$F166`: `$7F`, all VIA interrupts off during boot. `$F14D`: `$A6` at OS hand-off, enabling T2, SR and CA1. `$F538`: `$A6` and `$F543`: `$7F` (OS-called). |
 | `$E20F` | VIA ORA, no handshake | `$F557` (OS-called): `$18`, both digits off. |
-| `$E400-$E407` | Filter CV, function 0 | `$F0FC-$F104`: all 8 cleared. |
-| `$E418` | Filter CV, function 3, channel 0 | `$F106`: `$10`. `$F5DC` (inside the OS-called `$F571`, with X=`$E418` set by the OS at `$B971`): writes `,X`, `-$10,X` (=`$E408`) and `-8,X` (=`$E410`). |
+| `$E400-$E407` | Filter CV, function 0: strobe cutoff and resonance S/H (filters.md 2) | `$F0FC-$F104`: all 8 cleared. |
+| `$E418` | Filter CV, function 3, channel 0: DAC preset (filters.md 2) | `$F106`: `$10`. `$F5DC` (inside the OS-called `$F571`, with X=`$E418` set by the OS at `$B971`): writes `,X`, `-$10,X` (=`$E408`) and `-8,X` (=`$E410`). |
 | `$E800` | WD1772 command/status | Commands in §5.1. Status is read at `$F096` (busy poll) and `$F0B2` (NMI handler). |
 | `$E801` | WD1772 track | `$F146`: read, copied to `$8002` at hand-off. |
 | `$E802` | WD1772 sector | `$F003/$F016/$F027/$F03A`: written from `$8003`. |
@@ -553,10 +553,9 @@ the DOC A/D (`$ECE2`) to oscillate across `$90`/`$70`.** It does not hang: with
 a constant A/D the calibration gives up per filter after the Y wrap, and the
 whole boot completes at about 98 s with no illegal opcodes. Once the DOC
 (Task 10) and the filter feedback (Task 11) exist, each calibration should take
-milliseconds. The test `boot: SND-A01 lights the display within 10 s` is
-`[!mayfail]` until then; `boot: SND-A01 finishes booting with a constant DOC
-A/D` checks the slow path today. Fitting the DOC (Task 10, §13.3) did not
-change this: its A/D still reads `$FF` until Task 11.
+milliseconds. Fitting the DOC (Task 10, §13.3) did not change this: its A/D
+still read `$FF` until Task 11. With the filters (§13.4) the calibration takes
+about 0.14 s per filter and the OS reaches its main loop at 7.36 s.
 
 No chip bug was found during this boot: the ROM load, the hand-off, the OS's
 IRQ/FIRQ set-up and the sound load ran on the existing CPU, VIA, ACIA and
@@ -604,3 +603,14 @@ Measured with the DOC model (`engine/src/doc5503.cpp`; A/D still a constant
 | The OS never rewrites the oscillator enable: OER stays at the ROM's `$FF`, i.e. 32 oscillators, scan rate 8 MHz / (8 × 34) = 29,411.76 Hz. | probe: `$ECE1` reads `$FF` throughout |
 | A MIDI note (`90 3C 64` after boot) starts oscillators 0-3 as two pairs: even oscillators in swap mode with IE (`$0E`, attack table `$A800`, 2 KB, res 3), odd ones one-shot, halted, IE (`$0B`, `$B000`, 4 KB, res 4). FC `$01FF` / `$0200` (a detuned pair). When an even oscillator ends its table the DOC halts it and starts its partner; the OS IRQ handler reads the OIR (`$45` = osc 2, then `$41` = osc 0) and reprograms the even oscillators. | probe: register changes every 100 µs, `$8871` entries with B = OIR |
 | The odd oscillators then halt on the wavesample's zero end marker (16 zero bytes at `$B3F0`; the lower sound has such markers at the end of several pages, e.g. `$A7F0`, `$D7F0`, `$FFF0`), interrupt (`$47` = osc 3) and the OS halts the whole voice (control `$03`). Output lasted about 0.1 s of the 1 s held note. Whether this program should loop (i.e. whether the OS should have re-pointed the oscillator) is not settled here; it is a check for the first audio task. | probe |
+
+### 13.4 With the filters and the A/D (Task 11)
+
+Measured with the filter bank, the CV path and the A/D mux (`docs/hardware/filters.md`, which
+has the details and evidence).
+
+| Observation | Evidence |
+|---|---|
+| SND-A01: the 8 calls of `$F571` end at 6.390, 6.525, 6.667, 6.810, 6.946, 7.085, 7.223 and 7.358 s, each with B = `$7A` and Y = `$82`/`$83` (converged); the stored offsets `$B068 + $4D * n` are all 0. `$B935` (pitch-wheel centre, `$900A` = `$60`), then the main loop `$B900` at 7.36 s. | `tests/test_boot.cpp` (`$F5AC` trace), trace |
+| The display lights at the main loop (7.37 s), is dark while the OS loads the lower sound (sectors 23-155, until about 35 s), and is steady at `DB 06` from about 35 s. The same as §13.1 shifted 63 s earlier. | `mirage_cli run --seconds T` |
+| `EnsoniqOS/os32` (the same OS as SND-A01) and `masos` (calibration loop at `$BDC0`) give the same calibration times and results; `masos` settles at `DB 06`, 155 sectors. The Soundprocess OS disk (loop at `$9630`) calibrates the same way, settles at `3F 06` with 142 sectors at about 34 s. | `boot:` tests for masos and the Soundprocess OS |

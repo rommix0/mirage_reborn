@@ -16,6 +16,8 @@ constexpr uint8_t kH = 0x01, kM0 = 0x02, kIe = 0x08;
 constexpr int kModeOneShot = 1, kModeSyncAm = 2, kModeSwap = 3;
 // Size register bits.
 constexpr uint8_t kBs = 0x40;
+// A/D conversion time in input clocks (datasheet, $E2).
+constexpr uint64_t kAdcClocks = 26;
 
 int modeOf(uint8_t control) { return (control >> 1) & 3; }
 }  // namespace
@@ -34,6 +36,10 @@ void Doc5503::reset() {
   clockRem_ = 0;
   slot_ = 0;
   frame_.fill(0);
+  clock_ = 0;
+  adcStart_ = 0;
+  adcResult_ = adcSample_ = 0x80;
+  adcBusy_ = false;
 }
 
 // OER bits 5-1 (E4-E0) hold count - 1: the datasheet's register summary, and
@@ -66,7 +72,13 @@ uint8_t Doc5503::read(uint8_t reg) {
       return uint8_t(0x41 | (lastIrqOsc_ << 1));
     }
     case 0xE1: return uint8_t(oer_ | 0xC1);  // bits 7, 6 and 0 unused, read 1
-    case 0xE2: return adcRead ? adcRead() : 0xFF;
+    case 0xE2: {
+      if (adcBusy_ && clock_ - adcStart_ >= kAdcClocks) adcResult_ = adcSample_;
+      adcSample_ = adcRead ? adcRead() : 0xFF;
+      adcBusy_ = true;
+      adcStart_ = clock_;
+      return adcResult_;
+    }
     default: return 0xFF;
   }
 }
@@ -93,6 +105,7 @@ void Doc5503::write(uint8_t reg, uint8_t v) {
 }
 
 void Doc5503::tickMasterClocks(uint32_t n) {
+  clock_ += n;
   clockRem_ += n;
   while (clockRem_ >= kClocksPerSlot) {
     clockRem_ -= kClocksPerSlot;
@@ -186,6 +199,11 @@ void Doc5503::save(StateWriter& w) const {
   for (int32_t s : frame_) w.i32(s);
   w.u8(uint8_t(fifoCount_));
   for (int i = 0; i < fifoCount_; ++i) w.u8(fifo_[size_t(i)]);
+  w.u64(clock_);
+  w.u64(adcStart_);
+  w.u8(adcResult_);
+  w.u8(adcSample_);
+  w.u8(adcBusy_ ? 1 : 0);
 }
 
 void Doc5503::load(StateReader& r) {
@@ -216,6 +234,9 @@ void Doc5503::load(StateReader& r) {
     seen |= 1u << n;
     fifo[size_t(i)] = n;
   }
+  const uint64_t clock = r.u64(), adcStart = r.u64();
+  const uint8_t adcResult = r.u8(), adcSample = r.u8(), adcBusy = r.u8();
+  if (adcBusy > 1 || adcStart > clock) throw StateError("doc5503: bad A/D state");
   oer_ = oer;
   clockRem_ = clockRem;
   slot_ = slot;
@@ -224,6 +245,11 @@ void Doc5503::load(StateReader& r) {
   frame_ = frame;
   fifo_ = fifo;
   fifoCount_ = count;
+  clock_ = clock;
+  adcStart_ = adcStart;
+  adcResult_ = adcResult;
+  adcSample_ = adcSample;
+  adcBusy_ = adcBusy != 0;
 }
 
 }  // namespace mirage

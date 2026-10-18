@@ -16,6 +16,11 @@ constexpr uint32_t kQuarter = 0x8000;
 constexpr uint64_t kMidiByteCycles = uint64_t(kMidiByteSeconds * kCpuClockHz + 0.5);
 // A save file with more queued MIDI bytes than this is treated as corrupt.
 constexpr uint32_t kMaxMidiQueue = 1u << 24;
+// A DOC channel sum (byte - 128) * volume as a voltage: one full-volume
+// oscillator swings about +-1.0.
+constexpr float kVoiceScale = 1.0f / 32768.0f;
+// The line input has nothing connected (Plan 1): the A/D reads mid-scale.
+constexpr uint8_t kLineInputIdle = 0x80;
 }  // namespace
 
 Machine::Machine(std::span<const uint8_t> bootRom)
@@ -40,9 +45,26 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   acia_.onTransmit = [this](uint8_t b) {
     if (onMidiOut) onMidiOut(b);
   };
-  // DOC A/D ($ECE2). Task 11 routes the input selected by the VIA PB2-3 mux
-  // here; until then it reads a constant $FF (the Task 9 boot behaviour).
-  doc_.adcRead = [] { return uint8_t(0xFF); };
+  // Each DOC scan runs the voice filters in emulated time, so an A/D
+  // conversion sees the analog mix of that instant (filters.md 1).
+  doc_.onFrame = [this](const std::array<int32_t, Doc5503::kChannels>& frame) {
+    std::array<float, FilterBank::kVoices> in;
+    const int32_t* sums = frame.data();
+    float* v = in.data();
+    for (int ch = 0; ch < FilterBank::kVoices; ++ch) v[ch] = float(sums[ch]) * kVoiceScale;
+    float mix = 0.0f;
+    filters_.process(in, doc_.sampleRate(), mix);
+    if (onMix) onMix(mix);
+  };
+  // DOC A/D input: the analog mux on VIA PB3:PB2 (boot-rom.md 2.1, filters.md 3).
+  doc_.adcRead = [this] {
+    switch ((via_.outB() >> 2) & 3) {
+      case 0: return compressedAdcCode(filters_.mix());  // voices + audio in (silent)
+      case 1: return kLineInputIdle;
+      case 2: return kPitchWheelRest;
+      default: return kModWheelRest;
+    }
+  };
 }
 
 void Machine::powerOn() {
@@ -56,6 +78,7 @@ void Machine::powerOn() {
   acia_.reset();
   wd_.reset();  // the disk stays in the drive
   doc_.reset();
+  filters_.reset();
   masterRem_ = 0;
   midiIn_.clear();
   nextMidiCycle_ = 0;
@@ -120,7 +143,7 @@ uint8_t Machine::ioRead(uint16_t addr) {
     updateIrq();  // reading T1C-L, T2C-L, ORx or SR clears flags
     return v;
   }
-  if (addr >= 0xE400 && addr <= 0xE41F) return 0xFF;  // filter CV latches (write-only)
+  if (addr >= 0xE400 && addr <= 0xE41F) return 0xFF;  // filter CV latches: write only
   if (addr >= 0xE800 && addr <= 0xE803) {  // WD1772
     const uint8_t v = wd_.read(uint8_t(addr & 3));
     updateIrq();  // a data read clears DRQ
@@ -146,7 +169,10 @@ void Machine::ioWrite(uint16_t addr, uint8_t value) {
     updateIrq();
     return;
   }
-  if (addr >= 0xE400 && addr <= 0xE41F) return;  // filter CV latches
+  if (addr >= 0xE400 && addr <= 0xE41F) {        // filter CV DAC and sample-and-holds
+    filters_.cvWrite(uint8_t(addr & 0x1F), value);
+    return;
+  }
   if (addr >= 0xE800 && addr <= 0xE803) {        // WD1772
     wd_.write(uint8_t(addr & 3), value);
     updateIrq();
@@ -225,6 +251,7 @@ std::vector<uint8_t> Machine::saveState() const {
   via_.save(w);
   doc_.save(w);
   w.u32(masterRem_);
+  filters_.save(w);
   wd_.save(w);
   w.u8(disk_ ? 1 : 0);
   if (disk_) disk_->save(w);
@@ -258,6 +285,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   acia_.save(before);
   wd_.save(before);
   doc_.save(before);
+  filters_.save(before);
   uint64_t nextMidi = 0;
   uint32_t masterRem = 0;
   std::deque<uint8_t> midi;
@@ -268,6 +296,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     doc_.load(r);
     masterRem = r.u32();
     if (masterRem >= kCpuClockHz) throw StateError("machine: bad DOC clock remainder");
+    filters_.load(r);
     wd_.load(r);
     const uint8_t hasDisk = r.u8();
     if (hasDisk > 1) throw StateError("machine: bad disk flag");
@@ -288,6 +317,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     acia_.load(back);
     wd_.load(back);
     doc_.load(back);
+    filters_.load(back);
     throw;
   }
   bank_ = bank;
