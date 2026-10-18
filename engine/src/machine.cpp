@@ -26,8 +26,7 @@ void Machine::powerOn() {
   bank_ = 0;
   cycles_ = 0;
   credit_ = 0;
-  cpu_.regs() = Regs{};
-  cpu_.reset();
+  cpu_.powerOn();
 }
 
 void Machine::runCycles(uint64_t eCycles) {

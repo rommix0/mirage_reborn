@@ -32,6 +32,9 @@ class Cpu6809 {
   explicit Cpu6809(Bus& bus) : bus_(bus) {}
 
   void reset();  // CC |= I|F, DP=0, PC = word at $FFFE, NMI disarmed until S loaded
+  // Full power-on: every register, line latch and counter back to its
+  // initial value, then reset(). reset() alone is the 6809 /RESET behaviour.
+  void powerOn();
   int step();
   void setNmi(bool line);  // low->high edge is latched (once NMI is armed)
   void setIrq(bool line);  // level

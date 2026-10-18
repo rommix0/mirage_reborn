@@ -207,3 +207,23 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   CHECK_THROWS_AS(m.loadState(badBank), StateError);
   CHECK(m.saveState() == before);
 }
+
+TEST_CASE("machine powerOn is equivalent to a fresh power-on") {
+  // $01 is an illegal opcode; then STA $8000 and NOPs.
+  auto rom = romWith({0x01, 0x86, 0x5A, 0xB7, 0x80, 0x00});
+  Machine fresh(rom);
+  fresh.powerOn();
+  const auto clean = fresh.saveState();
+
+  Machine m(rom);
+  m.powerOn();
+  m.cpu().setIrq(true);
+  m.cpu().setFirq(true);
+  m.cpu().setNmi(true);
+  m.runCycles(30);
+  REQUIRE(m.cpu().illegalCount() > 0);
+  MachineTestAccess::setSampleBank(m, 2);
+  m.powerOn();
+  CHECK(m.cpu().illegalCount() == 0);
+  CHECK(m.saveState() == clean);
+}

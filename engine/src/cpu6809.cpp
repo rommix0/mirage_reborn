@@ -92,6 +92,16 @@ void Cpu6809::reset() {
   r_.pc = read16(kVecReset);
 }
 
+void Cpu6809::powerOn() {
+  r_ = Regs{};
+  wait_ = Wait::None;
+  nmiLine_ = nmiPending_ = nmiArmed_ = false;
+  irqLine_ = firqLine_ = false;
+  illegalCount_ = 0;
+  lastIllegalPc_ = 0;
+  reset();
+}
+
 void Cpu6809::setNmi(bool line) {
   // Edges arriving before the first load of S are dropped, not deferred.
   if (line && !nmiLine_ && nmiArmed_) nmiPending_ = true;
