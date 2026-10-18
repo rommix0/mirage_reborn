@@ -62,6 +62,12 @@ struct Rig {
 
 uint8_t oirFor(int n) { return uint8_t(0x40 | (n << 1) | 1); }
 
+// The last address in `v`; fails the test cleanly when nothing was read.
+uint32_t lastOf(const std::vector<uint32_t>& v) {
+  REQUIRE_FALSE(v.empty());
+  return v.back();
+}
+
 }  // namespace
 
 // Enabled = OER bits 5-1 (E4-E0) + 1: the register summary puts E4-E0 in bits
@@ -150,7 +156,7 @@ TEST_CASE("doc address formation follows the size/resolution table for every set
   r.enable(1);
   r.osc(0, 0x13, 0x8000, 0x00, uint8_t(1 << 3 | 7));
   r.scans(1);
-  CHECK(r.reads.back() == 0x1201);  // acc 0x8000 >> 15 = 1, P0 ignored
+  CHECK(lastOf(r.reads) == 0x1201);  // acc 0x8000 >> 15 = 1, P0 ignored
 }
 
 TEST_CASE("doc bank select reads from the upper 64 KB") {
@@ -197,7 +203,7 @@ TEST_CASE("doc one-shot halts after a single pass of a 256-byte table") {
   r.scans(255);
   CHECK_FALSE(r.halted(0));
   CHECK_FALSE(r.doc.irq());
-  CHECK(r.reads.back() == 0x10FF);
+  CHECK(lastOf(r.reads) == 0x10FF);
   r.scans(1);
   CHECK(r.halted(0));
   CHECK(r.doc.read(kOir) == oirFor(0));
@@ -205,7 +211,7 @@ TEST_CASE("doc one-shot halts after a single pass of a 256-byte table") {
   // H = 1 with M0 = 1 holds the accumulator at 0: a restart begins at the top.
   r.doc.write(kCtrl + 0, kOneShot);
   r.scans(1);
-  CHECK(r.reads.back() == 0x1001);
+  CHECK(lastOf(r.reads) == 0x1001);
 }
 
 TEST_CASE("doc free-run wraps and interrupts at the end of every pass") {
@@ -230,19 +236,19 @@ TEST_CASE("doc writing H = 1 with M0 = 1 resets the accumulator") {
   r.enable(1);
   r.osc(0, 0x10, 0x0200, kOneShot);
   r.scans(10);
-  CHECK(r.reads.back() == 0x100A);
+  CHECK(lastOf(r.reads) == 0x100A);
   r.doc.write(kCtrl + 0, kOneShot | kHalt);
   r.doc.write(kCtrl + 0, kOneShot);
   r.scans(1);
-  CHECK(r.reads.back() == 0x1001);
+  CHECK(lastOf(r.reads) == 0x1001);
   // Free run (M0 = 0): halting keeps the accumulator.
   r.osc(0, 0x10, 0x0200, 0x00);
   r.scans(4);
-  CHECK(r.reads.back() == 0x1005);
+  CHECK(lastOf(r.reads) == 0x1005);
   r.doc.write(kCtrl + 0, kHalt);
   r.doc.write(kCtrl + 0, 0x00);
   r.scans(1);
-  CHECK(r.reads.back() == 0x1006);
+  CHECK(lastOf(r.reads) == 0x1006);
 }
 
 TEST_CASE("doc swap: at the end the even oscillator halts and the odd one starts from 0") {
@@ -270,10 +276,10 @@ TEST_CASE("doc sync: when the even oscillator wraps, its odd partner's accumulat
     r.osc(0, 0x20, 0x0200, sync ? kSyncAm : 0x00);
     r.osc(1, 0x40, 0x0100, 0x00);
     r.scans(255);
-    CHECK(r.readsFrom(0x40).back() == 0x407F);  // acc 255 * 0x100
+    CHECK(lastOf(r.readsFrom(0x40)) == 0x407F);  // acc 255 * 0x100
     r.scans(1);
     CHECK_FALSE(r.halted(0));  // the even oscillator keeps running
-    CHECK(r.readsFrom(0x40).back() == (sync ? 0x4000u : 0x4080u));
+    CHECK(lastOf(r.readsFrom(0x40)) == (sync ? 0x4000u : 0x4080u));
   }
 }
 
@@ -330,18 +336,20 @@ TEST_CASE("doc an oscillator is queued once until the OIR passes it on") {
   CHECK_FALSE(r.doc.irq());
 }
 
-TEST_CASE("doc completion with IE = 0 is passed to the OIR when IE changes to 1") {
+TEST_CASE("doc completion with IE = 0 leaves no interrupt behind when IE is set later") {
   Rig r;
-  r.enable(1);
-  r.osc(0, 0x10, 0x0200, kOneShot);
+  r.enable(2);
+  r.mem[0x2003] = 0x00;
+  r.osc(0, 0x10, 0x0200, kOneShot);  // ends its table with IE = 0
+  r.osc(1, 0x20, 0x0200, 0x00);      // halts on the zero at $2003 with IE = 0
   r.scans(256);
   CHECK(r.halted(0));
+  CHECK(r.halted(1));
   CHECK_FALSE(r.doc.irq());
   r.doc.write(kCtrl + 0, kOneShot | kHalt | kIe);
-  CHECK(r.doc.irq());
-  CHECK(r.doc.read(kOir) == oirFor(0));
-  r.doc.write(kCtrl + 0, kOneShot | kHalt | kIe);  // already 1: nothing new
+  r.doc.write(kCtrl + 1, kHalt | kIe);
   CHECK_FALSE(r.doc.irq());
+  CHECK((r.doc.read(kOir) & 0x80) != 0);  // nothing pending
 }
 
 TEST_CASE("doc register read-back") {

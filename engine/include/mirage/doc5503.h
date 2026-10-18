@@ -31,9 +31,9 @@ namespace mirage {
 //      (n ^ 1) is started: H = 0, A = 0.
 // A wave byte of 0 halts the oscillator in every mode (H = 1; A = 0 when
 // M0 = 1; a swap oscillator starts its partner). A completed table and a zero
-// halt each raise an interrupt: queued in the OIR FIFO when IE = 1, otherwise
-// remembered and queued when IE is next changed to 1 (datasheet, IE bit). An
-// oscillator is in the FIFO at most once.
+// halt each raise an interrupt: queued in the OIR FIFO when IE = 1; with IE = 0
+// nothing is recorded (setting IE later raises nothing). An oscillator is in
+// the FIFO at most once.
 //
 // Output: running oscillators add (byte - 128) * volume to their channel
 // (CA & 7, the Mirage has 8). An odd oscillator in mode 10 is amplitude
@@ -65,15 +65,13 @@ class Doc5503 {
   struct Osc {
     uint16_t fc = 0;
     uint8_t volume = 0, data = 0x80, pointer = 0, control = 0, sizeReg = 0;
-    uint32_t acc = 0;      // 24 bits
-    bool latent = false;   // completed with IE = 0, not yet passed to the OIR
+    uint32_t acc = 0;  // 24 bits
   };
 
   void slot();
   void updateOscillator(int n);
   void halt(int n);
   void interrupt(int n);
-  void queue(int n);
 
   std::function<uint8_t(uint32_t)> waveRead_;
   std::array<Osc, kOscillators> osc_{};

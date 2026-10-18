@@ -155,7 +155,7 @@ void Machine::ioWrite(uint16_t addr, uint8_t value) {
   }
   if (addr >= 0xEC00 && addr <= 0xECEF) {        // DOC 5503
     doc_.write(uint8_t(addr), value);
-    updateIrq();  // setting IE can pass a held interrupt to the OIR
+    updateIrq();
   }
 }
 

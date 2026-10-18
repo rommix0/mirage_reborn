@@ -73,24 +73,17 @@ uint8_t Doc5503::read(uint8_t reg) {
 
 void Doc5503::write(uint8_t reg, uint8_t v) {
   if (reg < 0xE0) {
-    const int n = reg & 0x1F;
-    Osc& o = osc_[n];
+    Osc& o = osc_[reg & 0x1F];
     switch (reg >> 5) {
       case 0: o.fc = uint16_t((o.fc & 0xFF00) | v); break;
       case 1: o.fc = uint16_t((o.fc & 0x00FF) | (v << 8)); break;
       case 2: o.volume = v; break;
       case 3: break;  // wave data: read only
       case 4: o.pointer = v; break;
-      case 5: {
-        const bool ieRaised = (v & kIe) && !(o.control & kIe);
+      case 5:
         o.control = v;
         if ((v & kH) && (v & kM0)) o.acc = 0;  // datasheet: M0 = 1 and H = 1 reset A
-        if (ieRaised && o.latent) {
-          o.latent = false;
-          queue(n);
-        }
         break;
-      }
       default: o.sizeReg = v; break;
     }
     return;
@@ -166,13 +159,10 @@ void Doc5503::halt(int n) {
   }
 }
 
-// Oscillator n completed its table (or hit a zero byte).
+// Oscillator n completed its table (or hit a zero byte). Only IE = 1 queues
+// it; with IE = 0 nothing is recorded.
 void Doc5503::interrupt(int n) {
-  if (osc_[n].control & kIe) queue(n);
-  else osc_[n].latent = true;
-}
-
-void Doc5503::queue(int n) {
+  if (!(osc_[n].control & kIe)) return;
   for (int i = 0; i < fifoCount_; ++i)
     if (fifo_[size_t(i)] == n) return;  // already pending
   fifo_[size_t(fifoCount_++)] = uint8_t(n);
@@ -192,7 +182,6 @@ void Doc5503::save(StateWriter& w) const {
     w.u8(o.control);
     w.u8(o.sizeReg);
     w.u32(o.acc);
-    w.u8(o.latent);
   }
   for (int32_t s : frame_) w.i32(s);
   w.u8(uint8_t(fifoCount_));
@@ -213,9 +202,7 @@ void Doc5503::load(StateReader& r) {
     o.control = r.u8();
     o.sizeReg = r.u8();
     o.acc = r.u32();
-    const uint8_t latent = r.u8();
-    if (o.acc > kAccMask || latent > 1) throw StateError("doc5503: bad oscillator");
-    o.latent = latent != 0;
+    if (o.acc > kAccMask) throw StateError("doc5503: bad oscillator");
   }
   std::array<int32_t, kChannels> frame{};
   for (int32_t& s : frame) s = r.i32();

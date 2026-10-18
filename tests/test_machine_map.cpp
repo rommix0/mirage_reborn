@@ -250,13 +250,13 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   CHECK(m.saveState() == before);
 
   // The DOC section follows the VIA: tag, OER, clock, slot, last OIR,
-  // 32 x 12 oscillator bytes, 8 channel sums, FIFO count (0 here), then the
+  // 32 x 11 oscillator bytes, 8 channel sums, FIFO count (0 here), then the
   // machine's DOC clock remainder (u32).
   const std::array<uint8_t, 4> docTag = {'5', 'C', 'O', 'D'};  // fourcc("DOC5") as a LE u32
   const auto docAt =
       size_t(std::search(snap.begin(), snap.end(), docTag.begin(), docTag.end()) - snap.begin());
   REQUIRE(docAt < snap.size());
-  const size_t fifoCountAt = docAt + 4 + 4 + 32 * 12 + 8 * 4;
+  const size_t fifoCountAt = docAt + 4 + 4 + 32 * 11 + 8 * 4;
   REQUIRE(snap[fifoCountAt] == 0);
   auto badDocFifo = snap;
   badDocFifo[fifoCountAt] = 0xFF;  // FIFO count > 32
