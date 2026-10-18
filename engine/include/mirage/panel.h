@@ -1,6 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 #include "mirage/state_io.h"
 
@@ -12,6 +14,12 @@ enum class PanelKey : uint8_t {
   K3, K6, K9, K5, K8, K0, K2, Enter,
   K1, K4, K7, Up, Param, Down, Value, Cancel
 };
+inline constexpr int kPanelKeyCount = 24;
+
+// The enumerator's name ("LoadUpper", "K3", "Enter", ...); empty if out of range.
+std::string_view panelKeyName(PanelKey key);
+// Inverse of panelKeyName, ignoring ASCII case.
+std::optional<PanelKey> panelKeyFromName(std::string_view name);
 
 struct DisplayState {
   uint8_t left = 0, right = 0;  // bit n = segment n (a..g, dp)

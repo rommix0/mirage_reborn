@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <string>
+
 #include "mirage/clocks.h"
 #include "mirage/panel.h"
 
@@ -44,6 +46,38 @@ TEST_CASE("panel keypad matrix covers all 24 keys") {
       CHECK(p.rowSense(col) == expect);
     }
   }
+}
+
+TEST_CASE("panel key names are the enumerator names and round-trip") {
+  CHECK(kPanelKeyCount == 24);
+  // Pinned against the matrix (row*8 + column, global-constraints keypad table).
+  CHECK(panelKeyName(PanelKey::LoadUpper) == "LoadUpper");
+  CHECK(panelKeyName(PanelKey::SampleLower) == "SampleLower");
+  CHECK(panelKeyName(PanelKey::K3) == "K3");
+  CHECK(panelKeyName(PanelKey::K0) == "K0");
+  CHECK(panelKeyName(PanelKey::Enter) == "Enter");
+  CHECK(panelKeyName(PanelKey::K1) == "K1");
+  CHECK(panelKeyName(PanelKey::Up) == "Up");
+  CHECK(panelKeyName(PanelKey::Cancel) == "Cancel");
+  CHECK(uint8_t(PanelKey::K3) == 8);
+  CHECK(uint8_t(PanelKey::Enter) == 15);
+  CHECK(uint8_t(PanelKey::Cancel) == 23);
+  for (int k = 0; k < kPanelKeyCount; ++k) {
+    const auto name = panelKeyName(PanelKey(k));
+    REQUIRE_FALSE(name.empty());
+    CHECK(panelKeyFromName(name) == PanelKey(k));
+  }
+}
+
+TEST_CASE("panel key name lookup ignores case and rejects unknown names") {
+  CHECK(panelKeyFromName("enter") == PanelKey::Enter);
+  CHECK(panelKeyFromName("LOADLOWER") == PanelKey::LoadLower);
+  CHECK(panelKeyFromName("k7") == PanelKey::K7);
+  CHECK_FALSE(panelKeyFromName("").has_value());
+  CHECK_FALSE(panelKeyFromName("7").has_value());
+  CHECK_FALSE(panelKeyFromName("Enterr").has_value());
+  CHECK_FALSE(panelKeyFromName("bogus").has_value());
+  CHECK(panelKeyName(PanelKey(24)).empty());  // out of range
 }
 
 TEST_CASE("panel two keys in one column pull two rows low") {

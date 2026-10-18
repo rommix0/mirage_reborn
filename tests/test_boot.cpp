@@ -220,6 +220,61 @@ TEST_CASE("boot: a disk with a zero-filled OS area is jumped into; garbage runs 
   CHECK(ranFor(m.cycles(), 11 * kSecond));
 }
 
+// Garbage disks (Review Focus 1): every sector reads, so the ROM loads noise
+// and jumps into it. The host must keep running whatever the CPU does.
+TEST_CASE("boot: a disk of LCG noise is jumped into and the CPU keeps executing", "[assets]") {
+  LOAD_ROM(rom);
+  std::vector<uint8_t> bytes(DiskImage::kImageBytes);
+  uint32_t x = 12345;  // fixed seed: the run is deterministic
+  for (uint8_t& b : bytes) {
+    x = x * 1103515245u + 12345u;
+    b = uint8_t(x >> 16);
+  }
+  Machine m(rom);
+  m.insertDisk(DiskImage::fromBytes(bytes));
+  m.powerOn();
+  BootRun r;
+  REQUIRE_NOTHROW(r = boot(m, 10));
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.jumpedTo800E);
+  CHECK(m.fdc().sectorsRead() >= kBootSectors);
+  const uint64_t illegal = m.cpu().illegalCount();
+  CHECK(illegal > 0);
+  // Still genuinely running: during another second the CPU executes
+  // instructions at many addresses and keeps counting illegal opcodes.
+  std::vector<bool> seen(0x10000);
+  REQUIRE_NOTHROW(m.setTrace([&seen](uint16_t pc, const Regs&) { seen[pc] = true; }));
+  m.runCycles(kSecond);
+  m.setTrace(nullptr);
+  CHECK(ranFor(m.cycles(), 11 * kSecond));
+  CHECK(std::count(seen.begin(), seen.end(), true) > 1);
+  CHECK(m.cpu().illegalCount() > illegal);
+}
+
+// All $FF: $800E is STU $FFFF, repeated up to $DFFF and on into I/O and ROM;
+// the CPU reaches the ROM's Read Sector primitive $F000 and waits in SYNC for a
+// DRQ that never comes, because the motor is off (PB4=1 since the hand-off)
+// and the ROM has no time-outs (boot-rom.md 5.1). Hardware would hang the same
+// way; the host just keeps counting cycles.
+TEST_CASE("boot: an all-$FF disk ends with the CPU parked in SYNC; the host runs on", "[assets]") {
+  LOAD_ROM(rom);
+  Machine m(rom);
+  m.insertDisk(DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes, 0xFF)));
+  m.powerOn();
+  BootRun r;
+  REQUIRE_NOTHROW(r = boot(m, 10));
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.jumpedTo800E);
+  CHECK(r.ranFromRam);
+  CHECK(m.cpu().illegalCount() > 0);  // met on the way; counted and skipped
+  CHECK(m.cpu().waiting());
+  CHECK(m.cpu().regs().pc == 0xF00D);  // after the SYNC at $F00C
+  CHECK(m.fdc().busy());               // Read Sector waiting for rotation
+  CHECK_FALSE(m.driveActive());
+  m.runCycles(kSecond);
+  CHECK(ranFor(m.cycles(), 11 * kSecond));
+}
+
 TEST_CASE("machine trace is called before each instruction with its PC", "[assets]") {
   LOAD_ROM(rom);
   Machine m(rom);

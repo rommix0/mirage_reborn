@@ -1,5 +1,8 @@
 #include "mirage/panel.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include "mirage/clocks.h"
 
 namespace mirage {
@@ -8,7 +11,29 @@ namespace {
 // The multiplexed display looks lit for roughly this long after a segment was
 // last driven; the ROM scans every segment well inside this (about 8.5 ms).
 constexpr uint64_t kPersistCycles = uint64_t(kCpuClockHz) / 50;  // 20 ms
+
+// Indexed by PanelKey (row*8 + column).
+constexpr std::string_view kKeyNames[kPanelKeyCount] = {
+    "LoadUpper", "LoadLower", "SampleUpper", "PlaySeq", "LoadSeq", "SaveSeq", "RecSeq",
+    "SampleLower", "K3", "K6", "K9", "K5", "K8", "K0", "K2", "Enter",
+    "K1", "K4", "K7", "Up", "Param", "Down", "Value", "Cancel"};
+static_assert(uint8_t(PanelKey::Cancel) + 1 == kPanelKeyCount);
 }  // namespace
+
+std::string_view panelKeyName(PanelKey key) {
+  const auto i = uint8_t(key);
+  return i < kPanelKeyCount ? kKeyNames[i] : std::string_view{};
+}
+
+std::optional<PanelKey> panelKeyFromName(std::string_view name) {
+  const auto same = [](char a, char b) {
+    return std::tolower(static_cast<unsigned char>(a)) ==
+           std::tolower(static_cast<unsigned char>(b));
+  };
+  for (int i = 0; i < kPanelKeyCount; ++i)
+    if (std::ranges::equal(kKeyNames[i], name, same)) return PanelKey(i);
+  return std::nullopt;
+}
 
 void Panel::setKey(PanelKey key, bool down) {
   const uint32_t bit = 1u << (uint8_t(key) % 24);

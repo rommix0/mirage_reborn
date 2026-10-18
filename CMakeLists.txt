@@ -22,13 +22,47 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 
 enable_testing()
 add_subdirectory(engine)
+# mirage_cli's option parsing and event scheduling, shared with the unit tests.
+add_library(mirage_cli_core STATIC tools/mirage_cli/run_options.cpp)
+target_include_directories(mirage_cli_core PUBLIC tools/mirage_cli)
+target_link_libraries(mirage_cli_core PUBLIC mirage_engine)
 add_subdirectory(tests)
 add_executable(mirage_cli tools/mirage_cli/main.cpp)
-target_link_libraries(mirage_cli PRIVATE mirage_engine)
+target_link_libraries(mirage_cli PRIVATE mirage_cli_core)
 target_compile_definitions(mirage_cli PRIVATE MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
 
-# mirage_cli argument handling (no assets needed: both fail before loading the ROM).
-add_test(NAME cli_run_rejects_unknown_option COMMAND mirage_cli run --no-such-option 1)
-add_test(NAME cli_run_wav_not_available_yet COMMAND mirage_cli run --wav out.wav --rate 48000)
-set_tests_properties(cli_run_rejects_unknown_option cli_run_wav_not_available_yet
-                     PROPERTIES WILL_FAIL TRUE)
+# mirage_cli end to end: exact exit code plus stdout/stderr regexes
+# (tests/cli_check.cmake). Arguments are separated by "|".
+set(MIRAGE_TEST_ROM "${MIRAGE_ASSET_ROOT}/Ensoniq Mirage EPROM Firmware/mirage.bin")
+set(MIRAGE_TEST_SND_A01 "${MIRAGE_ASSET_ROOT}/Factory Library/IMG/SND-A01.img")
+function(mirage_cli_test name rc args)
+  add_test(NAME ${name}
+           COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:mirage_cli> "-DARGS=${args}" -DRC=${rc}
+                   ${ARGN} -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_check.cmake)
+  set_tests_properties(${name} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+endfunction()
+
+# Usage errors (exit 2) and unavailable options (exit 1) fail before the ROM loads.
+mirage_cli_test(cli_run_unknown_option 2 "run|--no-such-option|1" "-DERR=^usage:")
+mirage_cli_test(cli_run_missing_value 2 "run|--disk" "-DERR=^usage:")
+mirage_cli_test(cli_run_negative_seconds 2 "run|--seconds|-1"
+                "-DERR=^bad value for --seconds: -1/$")
+mirage_cli_test(cli_run_unknown_key 2 "run|--key|bogus@1" "-DERR=^bad value for --key: bogus@1/$")
+mirage_cli_test(cli_run_note_without_duration 2 "run|--note|60:100@1"
+                "-DERR=^bad value for --note: 60:100@1/$")
+mirage_cli_test(cli_run_bad_midi_hex 2 "run|--midi-hex|ZZ@1"
+                "-DERR=^bad value for --midi-hex: ZZ@1/$")
+mirage_cli_test(cli_run_wav_not_available_yet 1 "run|--wav|out.wav|--rate|48000"
+                "-DERR=^--wav: not available yet .Task 12./--rate: not available yet .Task 12./$")
+mirage_cli_test(cli_run_snapshot_not_available_yet 1 "run|--snapshot-in|x.snap"
+                "-DERR=^--snapshot-in: not available yet .Task 13./$")
+mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
+                "-DERR=^no-such-rom.bin: cannot read a 4096-byte boot ROM/$")
+# Real runs (skipped without the user's ROM / disk).
+mirage_cli_test(cli_run_snd_a01_10s 0 "run|--disk|${MIRAGE_TEST_SND_A01}|--seconds|10"
+                "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
+                "-DOUT=^display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: [2-9][0-9]+/cycles: 200000[0-3][0-9]/$")
+mirage_cli_test(cli_run_with_events 0
+                "run|--seconds|3|--key|Enter@1:2|--key|enter@2:0.5|--note|60:100@1:0.5|--midi-hex|90 3C 64@2|--key|Cancel@5"
+                "-DNEEDS=${MIRAGE_TEST_ROM}"
+                "-DOUT=^display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: 0/cycles: 60000[0-3][0-9]/$")
