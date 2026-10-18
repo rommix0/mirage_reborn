@@ -60,18 +60,29 @@ value to the strobe address, and the roles follow from what is written:
 | ROM `$F5E7`, called by OS `$8AE4` once per voice with U = `$E418+ch` | `,U`←A; `-8,U` (`$E410`)←A; `,U+`←B; `-$11,U` (`$E408`)←B | OS: A = the filter envelope clamped to `$27,X`, B = `$28,X`: cutoff and resonance of the playing voice |
 | OS `$AE17` | `$F5E7` with D = 0 for U = `$E418..$E41F` | clears all 16 S/H |
 | OS `$9742` (sampling set-up `$9702`) | `,X`←B; `-$10,X`←B; `,X`←A; `-8,X`←A, X = `$E41F` | resonance and cutoff of channel 7 (see section 3.3) |
-| ROM `$F0FC-$F106` | `$E400-$E407`←0, then `$E418`←`$10` | power-on clear of both CVs of every channel |
+| ROM `$F0FC-$F106` | `$E400-$E407`←0 (no preset), then `$E418`←`$10` | power-on clear of both CVs; channel 0 takes the DAC's power-on value (section 2, consequence) |
 | SP `$86FB-$870C` | `CLR $E418`, then `CLR $E408,X`, `CLR $E410,X` for X = 0..7 | clear |
-| SP `$97B8-$97C8` | `$E400+X`←0 for X = 0..7, `$E418`←0 | clear both through function 0 |
+| SP `$97B8-$97C8` | `$E400+X`←0 for X = 0..7 (no preset), then `$E418`←0 | clear both through function 0; channel 0 keeps the DAC value from before the loop (section 2, consequence) |
 | SP `$A974-$A98B` | `$E418`←A, `$E410`←A, `$E418`←A; `$E418`←R, `$E408`←R, `$E418`←R | cutoff A, resonance R |
 | MAME `coefficients_w` | address bit 3 = 0 → "VF" (cutoff), bit 4 = 0 → "VQ" (resonance), both 1 → "preload dac" | agrees with the code; MAME's header comment (`e408` cut-off, `e410` resonance) contradicts its own code and the ROM |
 
-**Why the preset (inferred).** If the DAC input latch is clocked at the end of the write strobe
-(a rising-edge latch) while the S/H switch is open only during the strobe, the S/H sees the
-previous DAC value. That is exactly what the ubiquitous "write `$E418+ch` first" pattern
-compensates for. With every observed writer presetting first, latching the old or the new value
-gives the same CVs for all known software; the model takes the old value, as the hardware
-explanation suggests. S/H droop is not modelled (the OS refreshes the CVs from its envelope code,
+**Why the preset (inferred), and the semantics chosen.** If the DAC input latch is clocked at
+the end of the write strobe (a rising-edge latch) while the S/H switch is open only during the
+strobe, the S/H sees the previous DAC value. Every routine that sets a real CV (ROM `$F5DC`,
+`$F5E7`; OS `$8AE4`, `$9742`, `$AE17`; SP `$86FB`, `$A974`) deliberately writes the same value to
+`$E418+ch` first. That preset is only necessary if the strobe samples the DAC before the new
+value has settled; if a strobe latched the value being written, it would be pointless. The model
+therefore latches the **previous** DAC value.
+
+The two clear loops do **not** preset: ROM `$F0FC-$F104` and SP `$97B8-$97C6` write 0 to
+`$E400+X` for X = 0..7. With previous-value latching, channels 1-7 are cleared (the preceding
+write left the DAC at 0), but channel 0 takes whatever the DAC held before the loop (at power-on,
+the DAC's reset value; in SP, for example the last resonance `$A974` wrote). The SP author
+evidently meant to clear all 8, which is weak evidence for new-value latching. It is outweighed by
+the deliberate presets above, and the consequence is harmless: every note-on path presets and
+strobes before it uses a voice, so a stale channel-0 CV never reaches a played note. The model
+keeps this behaviour (test "CV decode: a clear loop without preset leaves channel 0 at the
+previous DAC value"). S/H droop is not modelled (the OS refreshes the CVs from its envelope code,
 and the calibration rewrites them on every pass of its wait loop).
 
 ## 3. The DOC A/D and its input mux

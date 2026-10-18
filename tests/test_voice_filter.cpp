@@ -240,6 +240,31 @@ TEST_CASE("CV decode: a strobe takes the DAC's previous value, then the DAC load
   CHECK(b.dac() == 0x00);
 }
 
+// SP $97B8-$97C8 (and ROM $F0FC-$F106) clear with function 0 and no preset:
+// LDX #0; LDA #0; STA $E400,X; LEAX 1,X; CMPX #8; BNE; STA $E418. With
+// previous-value latching (filters.md 2) channels 1-7 clear, and channel 0
+// takes the DAC value from before the loop.
+TEST_CASE("CV decode: a clear loop without preset leaves channel 0 at the previous DAC value") {
+  FilterBank b;
+  for (int ch = 0; ch < 8; ++ch) {  // all CVs set, as after playing
+    load(b, uint8_t(0x10 | ch), 0x90);
+    load(b, uint8_t(0x08 | ch), 0x55);
+  }
+  b.cvWrite(0x1D, 0x6B);  // SP $A974 ends with the DAC at the last resonance
+  b.cvWrite(0x0D, 0x6B);
+  b.cvWrite(0x1D, 0x6B);
+  REQUIRE(b.dac() == 0x6B);
+  for (uint8_t x = 0; x < 8; ++x) b.cvWrite(x, 0x00);
+  b.cvWrite(0x18, 0x00);
+  CHECK(b.cutoffCv(0) == 0x6B);
+  CHECK(b.resonanceCv(0) == 0x6B);
+  for (int ch = 1; ch < 8; ++ch) {
+    CHECK(b.cutoffCv(ch) == 0x00);
+    CHECK(b.resonanceCv(ch) == 0x00);
+  }
+  CHECK(b.dac() == 0x00);
+}
+
 TEST_CASE("CV decode: the ROM's $F5DC sequence sets resonance $FF and cutoff B") {
   // $F5DC with X = $E41A, B = $9C: ,X <- $FF; -$10,X <- $FF; ,X <- B; -8,X <- B.
   FilterBank b;
