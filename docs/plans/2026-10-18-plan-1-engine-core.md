@@ -52,7 +52,10 @@ what Tasks 5, 7 and 11 discover.
   derived from reverse engineering cites its evidence there (ROM address, OS
   address, or MAME).
 
-### Hardware reference (from MAME `enmirage.cpp`, to confirm in Task 5)
+### Hardware reference (MAME `enmirage.cpp`, checked against the boot ROM in Task 5)
+
+Evidence for every row is in `docs/hardware/boot-rom.md`. Where the ROM and
+MAME disagree, the ROM wins.
 
 **Memory map (6809):**
 
@@ -61,7 +64,7 @@ what Tasks 5, 7 and 11 discover.
 | `$0000–$7FFF` | 32 KB window onto 128 KB sample RAM. Quarter selected by VIA PB1:PB0. |
 | `$8000–$BFFF` | Main RAM |
 | `$C000–$DFFF` | Expansion RAM |
-| `$E100–$E101` | 6850 ACIA (MIDI) |
+| `$E100–$E101` | 6850 ACIA (MIDI). The ROM writes control at `$E100` (`$03` reset, `$95` at OS hand-off). |
 | `$E200–$E2FF` | 6522 VIA (register = addr & 15) |
 | `$E400–$E41F` | Filter CV writes. Channel = addr & 7, function = (addr>>3) & 3 (meaning confirmed in Task 11). |
 | `$E800–$E803` | WD1772 |
@@ -70,18 +73,27 @@ what Tasks 5, 7 and 11 discover.
 
 **Interrupts:**
 - NMI ← WD1772 INTRQ.
-- IRQ ← OR of VIA IRQ, WD1772 DRQ and DOC IRQ.
+- IRQ ← OR of VIA IRQ, WD1772 DRQ and DOC IRQ. The ROM moves disk data with
+  `SYNC` while I/F are masked, which is consistent with DRQ on IRQ. NMI ←
+  INTRQ is confirmed: the ROM's NMI handler `$F0B0` ends every FDC command.
 - FIRQ ← ACIA IRQ.
 
 **Clocks:**
 - 8 MHz master, which also clocks the DOC and the WD1772.
-- CPU E clock 2 MHz (MAME; verified in Task 7).
+- CPU E clock 2 MHz (MAME; verified in Task 7). The ROM supports this: VIA T1
+  is free-running with latch 0, PB7 drives the ACIA at ÷16, and that gives
+  31,250 baud only if the VIA's Φ2 = E = 2 MHz. MAME clocks its VIA at
+  3 MHz, which would be wrong.
 
 **VIA port A (front panel):**
 - **Outputs:**
   - PA0–2: column/segment select, decoded by a 74LS145 into 8 lines.
-  - PA3: right-digit enable.
-  - PA4: left-digit enable. Both enables are active low; MAME XORs them with 3.
+  - PA3: **left**-digit enable.
+  - PA4: **right**-digit enable. Both enables are active low.
+  - MAME's comment has PA3/PA4 the other way round. The ROM wins: its error
+    words `$7A9E` "dE", `$387A` "ud", `$2A7A` "nd" and `$FDB7` "O.S." put the
+    high byte (the left glyph) on PA3 (`$F33C`).
+  - DDRA = `$1F`.
 - **Inputs:** PA5/PA6/PA7 sense key rows 0/1/2, active low.
 
 **VIA port B:**
@@ -91,11 +103,18 @@ what Tasks 5, 7 and 11 discover.
   - PB2–3: ADC mux. 0 = compressed input (audio in mixed with voice output),
     1 = line input, 2 = pitch wheel, 3 = mod wheel.
   - PB3 also acts as sample/play.
-  - PB4: drive select/motor/keyboard-controller reset.
+  - PB4: drive select/motor/keyboard-controller reset, **active low** (0 =
+    motor on; `$F4C6`/`$F4D6`).
   - PB7: ACIA clock (VIA T1 output).
 - **Inputs:**
   - PB5: DOC sync, 500 kHz.
-  - PB6: disk change.
+  - PB6: **disk present**, a level signal, 1 = disk in. The ROM reads it
+    before any step and shows "nd" when it is 0 (`$F116`). It is not a
+    latched disk-change.
+- DDRB = `$1F`.
+- **Boot ROM VIA setup:** ACR `$CC` (T1 free-run with PB7, T2 one-shot, SR
+  in on CB1). PCR `$0E`. T1 latch 0. T2 = 5000 cycles. IER `$7F` during
+  boot, `$A6` (T2, SR, CA1) at OS hand-off.
 - **Shift register and CA2/CB1/CB2:** these go to the keyboard controller. Not
   emulated: the rack DMS-8 has none.
 
