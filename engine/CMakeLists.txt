@@ -4,6 +4,8 @@ add_library(mirage_engine STATIC
   src/opcodes6809.cpp
   src/cpu6809.cpp
   src/cpu6809_ops.cpp
+  src/via6522.cpp
+  src/panel.cpp
   src/machine.cpp
   src/disasm6809.cpp
 )

@@ -9,13 +9,6 @@
 #include "asset_paths.h"
 #include "mirage/machine.h"
 
-namespace mirage {
-// Test-only access to the private bank hook (VIA port B takes over in Task 6).
-struct MachineTestAccess {
-  static void setSampleBank(Machine& m, int quarter) { m.setSampleBank(quarter); }
-};
-}  // namespace mirage
-
 using namespace mirage;
 
 namespace {
@@ -28,6 +21,30 @@ std::vector<uint8_t> romWith(std::initializer_list<uint8_t> code) {
   rom[0xFFE] = 0xF0;
   rom[0xFFF] = 0x00;
   return rom;
+}
+
+// LDA #v; STA addr  (7 E-cycles)
+std::vector<uint8_t> ldaSta(uint8_t v, uint16_t addr) {
+  return {0x86, v, 0xB7, uint8_t(addr >> 8), uint8_t(addr & 0xFF)};
+}
+
+// ROM image: `parts` concatenated at $F000, reset vector at $F000.
+std::vector<uint8_t> romFrom(std::initializer_list<std::vector<uint8_t>> parts) {
+  std::vector<uint8_t> rom(4096, 0x12);
+  size_t i = 0;
+  for (const auto& p : parts)
+    for (uint8_t b : p) rom[i++] = b;
+  rom[0xFFE] = 0xF0;
+  rom[0xFFF] = 0x00;
+  return rom;
+}
+
+// VIA port B: DDRB = $1F (the boot ROM's value), ORB = quarter. 14 E-cycles.
+std::vector<uint8_t> selectBank(uint8_t quarter) {
+  auto a = ldaSta(0x1F, 0xE202);
+  auto b = ldaSta(quarter, 0xE200);
+  a.insert(a.end(), b.begin(), b.end());
+  return a;
 }
 
 std::vector<uint8_t> loadFile(const std::filesystem::path& p) {
@@ -86,34 +103,48 @@ TEST_CASE("machine ROM is read-only") {
   CHECK(m.peek(0xFFFE) == 0xF0);
 }
 
-TEST_CASE("machine sample window follows the bank") {
-  // LDA #$77; STA $0005
-  auto rom = romWith({0x86, 0x77, 0xB7, 0x00, 0x05});
-  Machine m(rom);
+TEST_CASE("machine sample window follows VIA PB1:PB0") {
+  Machine m(romFrom({selectBank(2), ldaSta(0x77, 0x0005), ldaSta(0x00, 0xE200), ldaSta(0x03, 0xE200)}));
   m.powerOn();
-  MachineTestAccess::setSampleBank(m, 2);
-  m.runCycles(10);
+  CHECK(m.peek(0x0005) == 0x00);
+  m.runCycles(14 + 7);  // bank 2, store through the window
+  REQUIRE(m.cycles() == 21);
   CHECK(m.sampleRam(0x10005) == 0x77);
   CHECK(m.sampleRam(0x00005) == 0x00);
   CHECK(m.sampleRam(0x08005) == 0x00);
   CHECK(m.sampleRam(0x18005) == 0x00);
   CHECK(m.peek(0x0005) == 0x77);  // window reads the selected quarter
-  MachineTestAccess::setSampleBank(m, 0);
+  m.runCycles(7);                 // ORB = 0: quarter 0
   CHECK(m.peek(0x0005) == 0x00);
-  MachineTestAccess::setSampleBank(m, 3);
+  m.runCycles(7);                 // ORB = 3: quarter 3
   CHECK(m.peek(0x7FFF) == 0x00);
   CHECK(m.sampleRam(0x1FFFF) == 0x00);
 }
 
-TEST_CASE("machine I/O space reads $FF and ignores writes for now") {
-  // LDA #$00; STA $E200; STA $E050; LDA $E200; STA $8000; LDA $E050; STA $8001
-  auto rom = romWith({0x86, 0x00, 0xB7, 0xE2, 0x00, 0xB7, 0xE0, 0x50, 0xB6, 0xE2, 0x00,
-                      0xB7, 0x80, 0x00, 0xB6, 0xE0, 0x50, 0xB7, 0x80, 0x01});
+TEST_CASE("machine bank 1 maps $0000 to the second quarter") {
+  Machine m(romFrom({selectBank(1), ldaSta(0x42, 0x0000)}));
+  m.powerOn();
+  m.runCycles(21);
+  CHECK(m.sampleRam(0x08000) == 0x42);
+  CHECK(m.sampleRam(0x00000) == 0x00);
+}
+
+TEST_CASE("machine bank uses only PB1:PB0 of port B") {
+  Machine m(romFrom({selectBank(0x1E), ldaSta(0x42, 0x0000)}));  // PB4-PB1 high, PB0 low
+  m.powerOn();
+  m.runCycles(21);
+  CHECK(m.sampleRam(0x10000) == 0x42);  // quarter 2
+}
+
+TEST_CASE("machine unmapped and not-yet-wired I/O reads $FF and ignores writes") {
+  // LDA #$00; STA $E050; STA $E800; LDA $E050; STA $8000; LDA $E800; STA $8001
+  auto rom = romWith({0x86, 0x00, 0xB7, 0xE0, 0x50, 0xB7, 0xE8, 0x00, 0xB6, 0xE0, 0x50,
+                      0xB7, 0x80, 0x00, 0xB6, 0xE8, 0x00, 0xB7, 0x80, 0x01});
   Machine m(rom);
   m.powerOn();
   m.runCycles(40);
-  CHECK(m.peek(0x8000) == 0xFF);  // VIA range
-  CHECK(m.peek(0x8001) == 0xFF);  // unmapped $E000-$EFFF
+  CHECK(m.peek(0x8000) == 0xFF);  // unmapped $E000-$EFFF
+  CHECK(m.peek(0x8001) == 0xFF);  // WD1772 until Task 8
   for (uint16_t a : std::initializer_list<uint16_t>{0xE000, 0xE100, 0xE200, 0xE41F, 0xE800, 0xEC00, 0xECEF, 0xEFFF})
     CHECK(m.peek(a) == 0xFF);
 }
@@ -134,12 +165,11 @@ TEST_CASE("machine runCycles keeps an exact cycle total") {
 }
 
 TEST_CASE("machine powerOn clears RAM, sample RAM and bank") {
-  // LDA #$5A; STA $8000; STA $0000
-  auto rom = romWith({0x86, 0x5A, 0xB7, 0x80, 0x00, 0xB7, 0x00, 0x00});
+  // bank 1; LDA #$5A; STA $8000; STA $0000
+  auto rom = romFrom({selectBank(1), {0x86, 0x5A, 0xB7, 0x80, 0x00, 0xB7, 0x00, 0x00}});
   Machine m(rom);
   m.powerOn();
-  MachineTestAccess::setSampleBank(m, 1);
-  m.runCycles(20);
+  m.runCycles(40);
   REQUIRE(m.peek(0x8000) == 0x5A);
   REQUIRE(m.sampleRam(0x8000) == 0x5A);
   m.powerOn();
@@ -150,12 +180,14 @@ TEST_CASE("machine powerOn clears RAM, sample RAM and bank") {
 }
 
 TEST_CASE("machine save/load round-trips RAM, sample RAM and CPU") {
-  // LDA #$5A; STA $8123; STA $0010; then NOPs
-  auto rom = romWith({0x86, 0x5A, 0xB7, 0x81, 0x23, 0xB7, 0x00, 0x10});
+  // bank 3; T1 free-running with PB7; LDA #$5A; STA $8123; STA $0010; NOPs.
+  // The VIA timers, the panel and a held key are all part of the snapshot.
+  auto rom = romFrom({selectBank(3), ldaSta(0xC0, 0xE20B), ldaSta(0x03, 0xE205),
+                      {0x86, 0x5A, 0xB7, 0x81, 0x23, 0xB7, 0x00, 0x10}});
   Machine m(rom);
   m.powerOn();
-  MachineTestAccess::setSampleBank(m, 3);
-  m.runCycles(20);
+  m.setKey(PanelKey::Enter, true);
+  m.runCycles(60);
   const auto snap = m.saveState();
   const uint64_t cyc = m.cycles();
   const Regs regs = m.cpu().regs();
@@ -206,11 +238,19 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   badBank[4] = 9;
   CHECK_THROWS_AS(m.loadState(badBank), StateError);
   CHECK(m.saveState() == before);
+
+  // A corrupt panel section (last in the stream, after the CPU and VIA have
+  // loaded) must not leave anything half-loaded.
+  constexpr size_t kPanelBytes = 4 + 4 + 2 + 2 * 8 * 8;  // tag, keys, valid, lit times
+  auto badPanelTag = snap;
+  badPanelTag[badPanelTag.size() - kPanelBytes] ^= 0xFF;
+  CHECK_THROWS_AS(m.loadState(badPanelTag), StateError);
+  CHECK(m.saveState() == before);
 }
 
 TEST_CASE("machine powerOn is equivalent to a fresh power-on") {
-  // $01 is an illegal opcode; then STA $8000 and NOPs.
-  auto rom = romWith({0x01, 0x86, 0x5A, 0xB7, 0x80, 0x00});
+  // $01 is an illegal opcode; then STA $8000, VIA setup (bank 2, T1 running), NOPs.
+  auto rom = romFrom({{0x01, 0x86, 0x5A, 0xB7, 0x80, 0x00}, selectBank(2), ldaSta(0x00, 0xE205)});
   Machine fresh(rom);
   fresh.powerOn();
   const auto clean = fresh.saveState();
@@ -220,10 +260,82 @@ TEST_CASE("machine powerOn is equivalent to a fresh power-on") {
   m.cpu().setIrq(true);
   m.cpu().setFirq(true);
   m.cpu().setNmi(true);
-  m.runCycles(30);
+  m.runCycles(60);
   REQUIRE(m.cpu().illegalCount() > 0);
-  MachineTestAccess::setSampleBank(m, 2);
+  REQUIRE(m.saveState() != clean);
   m.powerOn();
   CHECK(m.cpu().illegalCount() == 0);
   CHECK(m.saveState() == clean);
+}
+
+TEST_CASE("machine VIA T2 time-out interrupts the CPU through the IRQ line") {
+  // $F000: IER = T2 enable; T2 = 16 cycles; CLI; spin.   $F100 (IRQ handler): mark; spin.
+  auto rom = romFrom({ldaSta(0xA0, 0xE20E), ldaSta(0x10, 0xE208), ldaSta(0x00, 0xE209),
+                      {0x1C, 0xEF, 0x20, 0xFE}});
+  const auto handler = ldaSta(0x5A, 0x8000);
+  size_t i = 0x100;
+  for (uint8_t b : handler) rom[i++] = b;
+  rom[i++] = 0x20;  // BRA *
+  rom[i++] = 0xFE;
+  rom[0xFF8] = 0xF1;  // IRQ vector -> $F100
+  rom[0xFF9] = 0x00;
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(21 + 4);  // set-up is done, T2 still running
+  CHECK(m.peek(0x8000) == 0x00);
+  m.runCycles(100);
+  CHECK(m.peek(0x8000) == 0x5A);  // the handler ran
+}
+
+TEST_CASE("machine port A reads the keypad for the column selected on PA0-2") {
+  // DDRA = $1F; ORA = column 7; read ORA into $8000; column 0 into $8001.
+  auto rom = romFrom({ldaSta(0x1F, 0xE203), ldaSta(0x07, 0xE201),
+                      {0xB6, 0xE2, 0x01, 0xB7, 0x80, 0x00},
+                      ldaSta(0x00, 0xE201),
+                      {0xB6, 0xE2, 0x01, 0xB7, 0x80, 0x01}});
+  Machine m(rom);
+  m.powerOn();
+  m.setKey(PanelKey::Enter, true);  // row 1, column 7
+  m.runCycles(60);
+  CHECK(m.peek(0x8000) == 0xA7);  // PA6 low; PA5/PA7 high; PA0-2 = 7
+  CHECK(m.peek(0x8001) == 0xE0);  // column 0: nothing down
+}
+
+TEST_CASE("machine port A drives the front-panel display") {
+  Machine m(romFrom({ldaSta(0x1F, 0xE203), ldaSta(0x13, 0xE201)}));  // left on, segment d
+  m.powerOn();
+  m.runCycles(14);
+  // Making PA0-4 outputs with ORA = 0 first lit segment a on both digits (the
+  // behaviour boot-rom.md section 8 describes); the ORA write adds segment d
+  // on the left digit only.
+  CHECK(m.display().left == 0x09);
+  CHECK(m.display().right == 0x01);
+  m.runCycles(2 * 40000);  // 40 ms of NOPs
+  CHECK(m.display().left == 0x00);
+  CHECK(m.display().right == 0x00);
+}
+
+TEST_CASE("machine PB6 reads 0 (no disk) and DDRB masks port B reads") {
+  // DDRB = $1F; ORB = $1F; read ORB -> $8000
+  Machine m(romFrom({ldaSta(0x1F, 0xE202), ldaSta(0x1F, 0xE200), {0xB6, 0xE2, 0x00, 0xB7, 0x80, 0x00}}));
+  m.powerOn();
+  m.runCycles(40);
+  CHECK(m.peek(0x8000) == 0x1F);  // PB5-7 inputs read 0
+}
+
+TEST_CASE("machine boot ROM fills sample RAM through the VIA bank bits", "[assets]") {
+  auto p = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin");
+  REQUIRE_ASSET(p);
+  auto rom = loadFile(p);
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(2'500'000);  // past the $F1E5 fill, then waiting on the FDC stub
+  // boot-rom.md section 5.5: the fill ORs the quarter number into the previous
+  // ORB value, so quarters 0, 1, 3, 3 are written and quarter 2 is never filled.
+  for (uint32_t base : {0x00000u, 0x08000u, 0x18000u}) {
+    CHECK(m.sampleRam(base) == 0x7F);
+    CHECK(m.sampleRam(base + 0x7FFF) == 0x7F);
+  }
+  CHECK(m.sampleRam(0x10000) == 0x00);
+  CHECK(m.sampleRam(0x17FFF) == 0x00);
 }

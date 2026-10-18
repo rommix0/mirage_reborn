@@ -4,6 +4,8 @@ add_executable(mirage_tests
   test_state_io.cpp
   test_disk_image.cpp
   test_cpu6809.cpp
+  test_via6522.cpp
+  test_panel.cpp
   test_machine_map.cpp
   test_disasm6809.cpp
 )

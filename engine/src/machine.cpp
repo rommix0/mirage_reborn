@@ -17,6 +17,16 @@ Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
   if (bootRom.size() != kBootRomSize)
     throw std::invalid_argument("boot ROM must be exactly 4096 bytes");
   std::copy(bootRom.begin(), bootRom.end(), rom_.begin());
+
+  // Port A: PA0-2 column/segment, PA3/PA4 digit enables (outputs), PA5-7 key
+  // rows (inputs).
+  via_.portAPins = [this] { return uint8_t(panel_.rowSense(via_.outA()) | (via_.outA() & 0x1F)); };
+  via_.portAOut = [this](uint8_t a) { panel_.portAWritten(a, cycles_); };
+  // Port B: PB0/PB1 select the sample RAM quarter. PB5 (DOC sync) and PB6
+  // (disk present, 1 = disk in) read 0 until the DOC and drive exist. PB2-4
+  // and PB7 are wired by later tasks.
+  via_.portBPins = [] { return uint8_t(0); };
+  via_.portBOut = [this](uint8_t b) { bank_ = uint8_t(b & 3); };
 }
 
 void Machine::powerOn() {
@@ -26,6 +36,8 @@ void Machine::powerOn() {
   bank_ = 0;
   cycles_ = 0;
   credit_ = 0;
+  via_.reset();
+  panel_.clearDisplay();
   cpu_.powerOn();
 }
 
@@ -71,7 +83,11 @@ void Machine::write(uint16_t addr, uint8_t value) {
 // device; unmapped addresses read $FF.
 uint8_t Machine::ioRead(uint16_t addr) {
   if (addr >= 0xE100 && addr <= 0xE101) return 0xFF;  // 6850 ACIA
-  if (addr >= 0xE200 && addr <= 0xE2FF) return 0xFF;  // 6522 VIA, register = addr & 15
+  if (addr >= 0xE200 && addr <= 0xE2FF) {  // 6522 VIA, register = addr & 15
+    const uint8_t v = via_.read(uint8_t(addr & 15));
+    updateIrq();  // reading T1C-L, T2C-L, ORx or SR clears flags
+    return v;
+  }
   if (addr >= 0xE400 && addr <= 0xE41F) return 0xFF;  // filter CV latches (write-only)
   if (addr >= 0xE800 && addr <= 0xE803) return 0xFF;  // WD1772
   if (addr >= 0xEC00 && addr <= 0xECEF) return 0xFF;  // DOC 5503
@@ -80,13 +96,24 @@ uint8_t Machine::ioRead(uint16_t addr) {
 
 void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
   if (addr >= 0xE100 && addr <= 0xE101) return;  // 6850 ACIA
-  if (addr >= 0xE200 && addr <= 0xE2FF) return;  // 6522 VIA
+  if (addr >= 0xE200 && addr <= 0xE2FF) {        // 6522 VIA
+    via_.write(uint8_t(addr & 15), value);
+    updateIrq();
+    return;
+  }
   if (addr >= 0xE400 && addr <= 0xE41F) return;  // filter CV latches
   if (addr >= 0xE800 && addr <= 0xE803) return;  // WD1772
   if (addr >= 0xEC00 && addr <= 0xECEF) return;  // DOC 5503
 }
 
-void Machine::tickDevices([[maybe_unused]] uint32_t cycles) {}
+void Machine::tickDevices(uint32_t cycles) {
+  via_.tick(cycles);  // Phi2 = the CPU E clock
+  updateIrq();
+}
+
+void Machine::updateIrq() {
+  cpu_.setIrq(via_.irq());  // | WD1772 DRQ | DOC IRQ (Tasks 8 and 10)
+}
 
 std::vector<uint8_t> Machine::saveState() const {
   StateWriter w;
@@ -98,6 +125,8 @@ std::vector<uint8_t> Machine::saveState() const {
   w.bytes(exp_);
   w.bytes(sample_);
   cpu_.save(w);
+  via_.save(w);
+  panel_.save(w);
   return w.take();
 }
 
@@ -114,16 +143,24 @@ void Machine::loadState(std::span<const uint8_t> data) {
   r.bytes(ram);
   r.bytes(exp);
   r.bytes(sample);
-  // Cpu6809::load commits only on success, so it goes last. If trailing data
-  // is then found, the CPU is put back from a snapshot taken beforehand.
+  // Each device load commits only on success, but a later one can still fail
+  // (or trailing data be found), so the devices are put back from a snapshot.
   StateWriter before;
   cpu_.save(before);
-  cpu_.load(r);
-  if (!r.atEnd()) {
+  via_.save(before);
+  panel_.save(before);
+  try {
+    cpu_.load(r);
+    via_.load(r);
+    panel_.load(r);
+    if (!r.atEnd()) throw StateError("machine: trailing data");
+  } catch (...) {
     const auto old = before.take();
     StateReader back(old);
     cpu_.load(back);
-    throw StateError("machine: trailing data");
+    via_.load(back);
+    panel_.load(back);
+    throw;
   }
   bank_ = bank;
   cycles_ = cycles;
