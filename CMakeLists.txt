@@ -25,3 +25,10 @@ add_subdirectory(engine)
 add_subdirectory(tests)
 add_executable(mirage_cli tools/mirage_cli/main.cpp)
 target_link_libraries(mirage_cli PRIVATE mirage_engine)
+target_compile_definitions(mirage_cli PRIVATE MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
+
+# mirage_cli argument handling (no assets needed: both fail before loading the ROM).
+add_test(NAME cli_run_rejects_unknown_option COMMAND mirage_cli run --no-such-option 1)
+add_test(NAME cli_run_wav_not_available_yet COMMAND mirage_cli run --wav out.wav --rate 48000)
+set_tests_properties(cli_run_rejects_unknown_option cli_run_wav_not_available_yet
+                     PROPERTIES WILL_FAIL TRUE)

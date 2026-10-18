@@ -44,6 +44,9 @@ class Cpu6809 {
   const Regs& regs() const { return r_; }
   uint64_t illegalCount() const { return illegalCount_; }
   uint16_t lastIllegalPc() const { return lastIllegalPc_; }
+  // True while stopped in SYNC or CWAI: the next step() only waits (or ends
+  // the wait) and executes no instruction.
+  bool waiting() const { return wait_ != Wait::None; }
 
   void save(StateWriter&) const;
   void load(StateReader&);

@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "mirage/acia6850.h"
@@ -42,6 +43,11 @@ class Machine : private Bus {
   uint8_t peek(uint16_t addr);  // CPU view, no I/O side effects (I/O reads $FF)
   uint8_t sampleRam(uint32_t addr) const { return sample_[addr & (kSampleRamSize - 1)]; }
   Cpu6809& cpu() { return cpu_; }
+  // Debug trace: when set, called before each instruction (and before each
+  // interrupt entry, with the interrupted PC) with the PC about to execute and
+  // the registers. Steps spent waiting in SYNC/CWAI are not reported. Pass an
+  // empty function to stop. Unset costs one branch per step.
+  void setTrace(std::function<void(uint16_t pc, const Regs&)> fn) { trace_ = std::move(fn); }
 
   // Front panel. Held keys survive powerOn() like a finger on a button.
   void setKey(PanelKey key, bool down) { panel_.setKey(key, down); }
@@ -97,6 +103,7 @@ class Machine : private Bus {
   std::optional<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
   std::deque<uint8_t> midiIn_;
   uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives
+  std::function<void(uint16_t, const Regs&)> trace_;  // host-side, not saved
 };
 
 }  // namespace mirage

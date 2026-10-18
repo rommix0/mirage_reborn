@@ -1,0 +1,258 @@
+// First boot with the real boot ROM and real disk images (Task 9).
+// docs/hardware/boot-rom.md sections 12-13 describe what these tests expect.
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <vector>
+
+#include "asset_paths.h"
+#include "mirage/clocks.h"
+#include "mirage/machine.h"
+
+using namespace mirage;
+
+namespace {
+
+constexpr uint64_t kSecond = kCpuClockHz;
+// boot-rom.md section 6: the ROM reads 12 sectors (T0-1) + 9 sectors (S5 of
+// T2-10) of OS image, then the config sector T11 S5.
+constexpr uint64_t kBootSectors = 12 + 9 + 1;
+// runCycles may overshoot by the tail of its last instruction (credited
+// against the next call); no 6809 instruction or interrupt entry is this long.
+constexpr uint64_t kMaxOvershoot = 32;
+
+bool ranFor(uint64_t cycles, uint64_t requested) {
+  return cycles >= requested && cycles < requested + kMaxOvershoot;
+}
+
+std::vector<uint8_t> loadFile(const std::filesystem::path& p) {
+  std::ifstream f(p, std::ios::binary);
+  return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+// The ROM's display words use bit 7 = segment a (boot-rom.md section 8);
+// DisplayState uses bit 0 = segment a.
+constexpr uint8_t fromRomFont(uint8_t v) {
+  uint8_t r = 0;
+  for (int i = 0; i < 8; ++i)
+    if (v & (0x80 >> i)) r |= uint8_t(1 << i);
+  return r;
+}
+
+bool shows(const DisplayState& d, uint16_t romWord) {
+  return d.left == fromRomFont(uint8_t(romWord >> 8)) && d.right == fromRomFont(uint8_t(romWord));
+}
+
+constexpr uint16_t kUd = 0x387A, kNd = 0x2A7A;  // boot-rom.md section 8
+
+// What a run looked like: the PCs seen, and the display sampled every 10 ms
+// (it is multiplexed and blinks, so one sample is not enough).
+struct BootRun {
+  bool ranFromRam = false;    // PC in $8000-$DFFF at some point
+  bool jumpedTo800E = false;  // the ROM's hand-off JMP $800E was taken
+  bool sawUd = false, sawNd = false, sawLit = false;
+  uint64_t cycles = 0;
+};
+
+BootRun boot(Machine& m, uint64_t seconds) {
+  BootRun out;
+  m.setTrace([&out](uint16_t pc, const Regs&) {
+    if (pc >= 0x8000 && pc < 0xE000) out.ranFromRam = true;
+    if (pc == 0x800E) out.jumpedTo800E = true;
+  });
+  for (uint64_t t = 0; t < seconds * 100; ++t) {
+    m.runCycles(kSecond / 100);
+    const DisplayState d = m.display();
+    if (d.left || d.right) out.sawLit = true;
+    if (shows(d, kUd)) out.sawUd = true;
+    if (shows(d, kNd)) out.sawNd = true;
+  }
+  m.setTrace(nullptr);
+  out.cycles = m.cycles();
+  return out;
+}
+
+#define LOAD_ROM(var)                                                           \
+  const auto var##Path = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"); \
+  REQUIRE_ASSET(var##Path);                                                     \
+  const std::vector<uint8_t> var = loadFile(var##Path);                         \
+  REQUIRE(var.size() == 4096)
+
+const char* const kSndA01 = "Factory Library/IMG/SND-A01.img";
+
+// The first image (by name) of the Soundprocess sound packs.
+std::filesystem::path firstSoundPack() {
+  const auto dir = assetPath("Soundprocess/Soundprocess Sound Packs/IMG");
+  std::vector<std::filesystem::path> files;
+  if (std::filesystem::is_directory(dir))
+    for (const auto& e : std::filesystem::directory_iterator(dir))
+      if (e.is_regular_file()) files.push_back(e.path());
+  std::sort(files.begin(), files.end());
+  return files.empty() ? dir / "missing.img" : files.front();
+}
+
+}  // namespace
+
+TEST_CASE("boot: SND-A01 loads the OS and runs it from RAM", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath(kSndA01);
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  const BootRun r = boot(m, 10);
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.jumpedTo800E);
+  CHECK(r.ranFromRam);
+  CHECK(m.cpu().illegalCount() == 0);
+  CHECK(m.fdc().sectorsRead() >= kBootSectors);
+  CHECK_FALSE(r.sawUd);
+}
+
+// Needs the DOC 5503 (Task 10) and the filters (Task 11). The OS calls the
+// ROM's filter calibration $F571 once per filter; with no DOC its A/D wait
+// loops only end when Y wraps, about 6.7 s per filter (boot-rom.md 13).
+TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets][!mayfail]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath(kSndA01);
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  m.runCycles(9 * kSecond);
+  const BootRun r = boot(m, 1);  // the display during the 10th second
+  CHECK(r.sawLit);
+}
+
+// Without the DOC the calibration still finishes (slowly), so the whole OS
+// boot can be checked today: it loads the lower sound and lights the panel.
+TEST_CASE("boot: SND-A01 finishes booting with no DOC fitted", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath(kSndA01);
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  m.runCycles(110 * kSecond);
+  const BootRun r = boot(m, 1);
+  CHECK(r.sawLit);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound
+  CHECK(m.cpu().illegalCount() == 0);
+}
+
+TEST_CASE("boot: a blank disk shows \"ud\" and the ROM retries", "[assets]") {
+  LOAD_ROM(rom);
+  Machine m(rom);
+  m.insertDisk(DiskImage::blank());
+  m.powerOn();
+  BootRun r;
+  REQUIRE_NOTHROW(r = boot(m, 10));
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.sawUd);
+  CHECK_FALSE(r.sawNd);
+  CHECK_FALSE(r.jumpedTo800E);
+  CHECK_FALSE(r.ranFromRam);
+  CHECK(m.cpu().illegalCount() == 0);
+  CHECK(m.fdc().sectorsRead() == 0);
+  // Still running: another second of emulation advances by that second.
+  m.runCycles(kSecond);
+  CHECK(ranFor(m.cycles(), 11 * kSecond));
+}
+
+TEST_CASE("boot: no disk shows \"nd\"", "[assets]") {
+  LOAD_ROM(rom);
+  Machine m(rom);
+  m.powerOn();
+  const BootRun r = boot(m, 5);
+  CHECK(r.sawNd);
+  CHECK_FALSE(r.sawUd);
+  CHECK_FALSE(r.jumpedTo800E);
+  CHECK(m.cpu().illegalCount() == 0);
+}
+
+// The Soundprocess sound packs carry the Soundprocess OS in tracks 0-10, so
+// the ROM boots them like a factory disk (boot-rom.md 13).
+TEST_CASE("boot: a Soundprocess sound pack boots its own OS", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = firstSoundPack();
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  BootRun r;
+  REQUIRE_NOTHROW(r = boot(m, 10));
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.jumpedTo800E);
+  CHECK(r.ranFromRam);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.cpu().illegalCount() == 0);
+  CHECK(m.fdc().sectorsRead() >= kBootSectors);
+  m.runCycles(kSecond);
+  CHECK(ranFor(m.cycles(), 11 * kSecond));
+}
+
+// A sound disk whose OS area (tracks 0-11) is zero-filled: every sector reads
+// fine, so the ROM loads zeros and jumps to $800E (it never checks what it
+// loaded, boot-rom.md 6). The zeros run as NEG <$00 with DP=$E8, i.e. on the
+// FDC registers, and the CPU ends up in garbage. The host must keep running.
+TEST_CASE("boot: a disk with a zero-filled OS area is jumped into; garbage runs on", "[assets]") {
+  LOAD_ROM(rom);
+  const auto src = assetPath(kSndA01);
+  REQUIRE_ASSET(src);
+  std::vector<uint8_t> bytes = loadFile(src);
+  REQUIRE(bytes.size() == size_t(DiskImage::kImageBytes));
+  std::fill(bytes.begin(), bytes.begin() + 12 * DiskImage::kTrackBytes, uint8_t(0));
+  Machine m(rom);
+  m.insertDisk(DiskImage::fromBytes(bytes));
+  m.powerOn();
+  BootRun r;
+  REQUIRE_NOTHROW(r = boot(m, 10));
+  CHECK(ranFor(r.cycles, 10 * kSecond));
+  CHECK(r.jumpedTo800E);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.fdc().sectorsRead() >= kBootSectors);
+  CHECK(m.cpu().illegalCount() > 0);  // counted, and execution went on
+  m.runCycles(kSecond);
+  CHECK(ranFor(m.cycles(), 11 * kSecond));
+}
+
+TEST_CASE("machine trace is called before each instruction with its PC", "[assets]") {
+  LOAD_ROM(rom);
+  Machine m(rom);
+  m.powerOn();
+  std::vector<uint16_t> pcs;
+  m.setTrace([&pcs](uint16_t pc, const Regs& r) {
+    CHECK(pc == r.pc);
+    pcs.push_back(pc);
+  });
+  m.runCycles(2);  // CLRA (2 cycles)
+  m.runCycles(1);  // LDX # (3 cycles)
+  m.setTrace(nullptr);
+  m.runCycles(100);
+  // Reset entry $FC7F: CLRA, then LDX #$C000.
+  REQUIRE(pcs.size() == 2);
+  CHECK(pcs[0] == 0xFC7F);
+  CHECK(pcs[1] == 0xFC80);
+}
+
+TEST_CASE("machine trace skips steps spent waiting in SYNC") {
+  // $F000: LDS #$BF80; SYNC; NOP; BRA *. Nothing raises an interrupt, so the
+  // CPU stays in SYNC.
+  std::vector<uint8_t> rom(4096, 0x12);
+  const uint8_t code[] = {0x10, 0xCE, 0xBF, 0x80, 0x13, 0x12, 0x20, 0xFE};
+  std::copy(std::begin(code), std::end(code), rom.begin());
+  rom[0xFFE] = 0xF0;
+  rom[0xFFF] = 0x00;
+  Machine m(rom);
+  m.powerOn();
+  std::vector<uint16_t> pcs;
+  m.setTrace([&pcs](uint16_t pc, const Regs&) { pcs.push_back(pc); });
+  m.runCycles(1000);
+  REQUIRE(pcs.size() == 2);
+  CHECK(pcs[0] == 0xF000);
+  CHECK(pcs[1] == 0xF004);
+}

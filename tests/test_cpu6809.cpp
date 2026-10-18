@@ -392,6 +392,26 @@ TEST_CASE("cpu SYNC resumes on masked IRQ without vectoring") {
   REQUIRE(cpu.regs().s == 0x8000);
 }
 
+TEST_CASE("cpu waiting() is true only inside SYNC and CWAI") {
+  RamBus bus;
+  auto cpu = cpuAt(bus, 0x1000, {0x13, 0x3C, 0xEF});  // SYNC; CWAI #$EF (clears I)
+  bus.put16(0xFFF8, 0x3000);
+  cpu.regs().s = 0x8000;
+  CHECK_FALSE(cpu.waiting());
+  cpu.step();  // SYNC
+  CHECK(cpu.waiting());
+  cpu.setIrq(true);
+  cpu.step();  // leaves SYNC (I masked: no vector)
+  CHECK_FALSE(cpu.waiting());
+  cpu.setIrq(false);
+  cpu.step();  // CWAI
+  CHECK(cpu.waiting());
+  cpu.setIrq(true);
+  cpu.step();  // vectors to IRQ
+  CHECK_FALSE(cpu.waiting());
+  CHECK(cpu.regs().pc == 0x3000);
+}
+
 TEST_CASE("cpu SYNC with unmasked IRQ vectors after resuming") {
   RamBus bus;
   auto cpu = cpuAt(bus, 0x1000, {0x13, 0x12});

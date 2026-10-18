@@ -69,6 +69,9 @@ void Machine::runCycles(uint64_t eCycles) {
   credit_ = 0;
   uint64_t done = 0;
   while (done < eCycles) {
+    if (trace_) [[unlikely]] {
+      if (!cpu_.waiting()) trace_(cpu_.regs().pc, cpu_.regs());
+    }
     const int c = cpu_.step();
     cycles_ += uint64_t(c);
     done += uint64_t(c);

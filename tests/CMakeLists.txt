@@ -10,6 +10,7 @@ add_executable(mirage_tests
   test_wd1772.cpp
   test_machine_map.cpp
   test_disasm6809.cpp
+  test_boot.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine Catch2::Catch2WithMain)
 target_compile_definitions(mirage_tests PRIVATE

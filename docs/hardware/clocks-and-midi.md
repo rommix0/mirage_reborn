@@ -58,9 +58,25 @@ per-byte cycle count from `kMidiByteSeconds * kCpuClockHz`.
   the ACIA with `$95`, polls RDRF and stores each byte. All 1,000 bytes (including
   `F8` and `FE`) arrive in order with no OVRN, in 1000 x 640 cycles +/- one byte.
 
-## Not yet checked
+## Checked in Task 9: the OS keeps the boot ROM's settings
 
-The OS (as opposed to the boot ROM) may reprogram the ACIA or VIA T1 after
-hand-off. Task 9 should confirm that the OS keeps latch 0 and `$95`; if it uses
-different values, the pacing here (which ignores the divide setting) still holds
-only while the resulting baud rate is 31,250.
+The OS (SND-A01) reprograms the VIA timer and the ACIA, but with the same
+values, so the MIDI rate stays 31,250 baud and the pacing above holds.
+
+| OS address | Write | Meaning |
+|---|---|---|
+| `$9F80-$9F8E` | ACR `$CC`; T1L-L, T1L-H, T1C-L, T1C-H cleared | T1 free-run on PB7, latch 0, as the ROM |
+| `$A07E-$A085` | ACIA `$03`, then `$95` | master reset, then RX IRQ, 8N1, divide by 16, as the ROM |
+| `$A14B-$A14D` | ACIA `$B5` | queueing a byte to send: the same, plus the TX interrupt (CR6-5 = 01) |
+| `$A1D3-$A1D5` | ACIA `$95` | transmit queue empty: TX interrupt off again |
+| `$F541` (ROM, called from `$9F6B`/`$9F71`) | ACIA `$03` | reset before the re-init above |
+
+The divide bits (CR1-0 = 01) are the same in every value the OS writes, and no
+other write to T1 (`$E204-$E207`), the ACR (`$E20B`) or `$E100` was executed.
+(T2, `$E208/$E209`, is reloaded by the 400 Hz tick `$F4DF` and `$F52D`; it does
+not affect PB7.) Evidence: every PC
+executed after `$800E` in a 100 s boot of SND-A01, disassembled and filtered
+for `$E1xx`/`$E2xx` operands (indexed accesses through a pointer register
+would not show up this way; none of the OS's VIA/ACIA accesses seen use one).
+In that run `$9F80` and `$A07E` execute at 98.07 s, after the sound load, and
+`$A14B` at 70.27 s, when the OS sends its first 5 MIDI bytes.

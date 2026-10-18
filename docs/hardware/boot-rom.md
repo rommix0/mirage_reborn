@@ -526,4 +526,64 @@ ACIA data register, CA2/CB1/CB2.
   cannot be read but whose other sectors can is loaded misplaced (from
   `$8008`) and jumped into (§5.3 quirk). The test should expect "the ROM jumps
   to `$800E` and the CPU runs whatever is there without crashing the host",
-  not an error display.
+  not an error display. What Task 9 observed is in §13.
+
+## 13. First boot in the emulator (Task 9)
+
+Measured with `Machine` (no DOC or filters yet: `$EC00-$ECEF` reads `$FF`),
+the real ROM and `tests/test_boot.cpp`. Reproduce with
+`mirage_cli run --disk <img> --seconds S [--trace t.txt --trace-from T]`.
+Times are emulated seconds from power-on.
+
+### 13.1 SND-A01: where the OS boot stops
+
+| Time | What happens | Evidence |
+|---|---|---|
+| 0-6.25 s | ROM loads the OS (22 sectors: 21 OS + config) | `sectors: 22` |
+| 6.246 s | `JMP $800E` → `JMP $B920`, the OS entry. `LDS #$B052`, DP=`$80`, `JSR $875E` | trace |
+| 6.248 s | `$B96E`: for X=`$E418`..`$E41F` (8 filters), B=`$10`, U=`$B050`+`$4D`·n, `JSR $F571` (ROM filter calibration, §9) | trace |
+| 6.25-70.27 s | Inside `$F571`. The A/D reads `$ECE2`=`$FF`: the wait for a rise above `$90` (`$F5C7`) ends at once, but the wait for a fall below `$70` (`$F5D4`) never does, so each of the four timed waits ends only when Y wraps (65,536 passes). That is about 8.19 s per filter (6.68 s for the first, whose Y starts at `$EC9B`). With Y=0 after the four timed waits, `$F58E` takes the "no oscillation" exit and stores `B-$7A` = `$36` at `$18,U`. | trace: `B976` at 6.248, 12.926, 21.118, ... 62.078 s; `B983` at 70.270 s |
+| 70.27 s | `$B935`: ORB=`$18` (A/D mux PB3:PB2 = 10, the pitch wheel), three `$ECE2` reads averaged into `$900A`: the pitch-wheel centre calibration (for Task 11). Then `JSR $896B`, `JMP $B900`: the main loop. The display lights and the OS sends 5 MIDI bytes (TX IRQ path `$A14B`). | probe |
+| 71.1-98.1 s | The OS loads the lower sound: 133 more sectors (155 in all) | `sectors: 155` |
+| 98.07 s | `$9F6F`: re-init (`$F541`, `$F52D`, `$A07E` ACIA `$03`/`$95`, ACR=`$CC`, T1 latch 0); then the main loop | probe |
+| ≥ 98.1 s | Display steady at segments `DB 06` (DisplayState order, bit 0 = a): left a,b,d,e,g,dp, right b,c, i.e. "2." "1" | `display: DB 06` |
+
+So **at 10 s the OS is in the ROM's filter calibration `$F571`, waiting for
+the DOC A/D (`$ECE2`) to oscillate across `$90`/`$70`.** It does not hang: with
+a constant A/D the calibration gives up per filter after the Y wrap, and the
+whole boot completes at about 98 s with no illegal opcodes. Once the DOC
+(Task 10) and the filter feedback (Task 11) exist, each calibration should take
+milliseconds. The test `boot: SND-A01 lights the display within 10 s` is
+`[!mayfail]` until then; `boot: SND-A01 finishes booting with no DOC fitted`
+checks the slow path today.
+
+No chip bug was found during this boot: the ROM load, the hand-off, the OS's
+IRQ/FIRQ set-up and the sound load ran on the existing CPU, VIA, ACIA and
+WD1772 models unchanged.
+
+Other observations:
+
+- The OS IRQ handler `$893C` reads the VIA IFR; with IFR bit 7 clear it reads
+  the DOC interrupt status `$ECE0` and returns (`RTI`) when bit 7 is set, as
+  with the stub's `$FF`; bit 7 clear goes to the DOC interrupt code `$8871`.
+  So the OS expects `$ECE0` bit 7 = 0 to mean "oscillator interrupt pending"
+  (to be checked against the 5503 data sheet in Task 10).
+- The OS scans the display from its main loop (`$9DF0-$9E32`, ORA-nh
+  `$E20F`), one segment per pass, and reads the keypad rows between two
+  writes (`$9E25`). A pass sometimes takes longer than the panel model's 20 ms
+  persistence, so about 1 in 10 display samples taken every 10 ms misses a
+  segment.
+
+### 13.2 Non-bootable and other disks
+
+| Disk | What the ROM does | Test |
+|---|---|---|
+| None | PB6=0 → "nd" blinking, retry forever. No illegal opcodes. | `boot: no disk shows "nd"` |
+| Blank (every track unformatted) | Restore with verify ends in Seek Error after 5 revolutions → "ud" blinking (code 6, §8), retry forever. No sector is read, `$800E` is never reached, no illegal opcodes. | `boot: a blank disk shows "ud" ...` |
+| Soundprocess sound packs (`Soundprocess Sound Packs/IMG/*`) | **Not sound-only:** all 7 carry the Soundprocess OS in tracks 0-10 (`$8008: JMP $996E`, `$800E: LBRA $A5F1`). The ROM boots it exactly like SND-A01: 22 sectors, `$800E` at 6.25 s, the same `$F571` calibration, display "01" (`3F 06`) and 142 sectors by 120 s. No illegal opcodes. | `boot: a Soundprocess sound pack boots its own OS` |
+| SND-A01 with tracks 0-11 zero-filled (a sound disk with an empty OS area) | Every sector reads, so the ROM loads zeros and jumps to `$800E`. `00 00` is `NEG <$00` with DP=`$E8`, i.e. read-modify-write on the WD1772 command register; the CPU runs through zeroed RAM, hits illegal opcodes (8 by 10 s, counted and skipped) and ends up in the ROM's read loop waiting in `SYNC` at `$F00C`. The host keeps running. | `boot: a disk with a zero-filled OS area ...` |
+
+None of the asset images is a real sound-only disk with an unreadable OS area:
+every `.img` under the asset root has a JMP table at `$8008` (factory OS,
+Soundprocess OS, Sound Cells, MirImage `FMT-1`) except the EDM2IMG sample
+`M_13.img`, which holds a `6D B6` fill pattern.
