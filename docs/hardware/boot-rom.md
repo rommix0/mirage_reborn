@@ -554,8 +554,9 @@ a constant A/D the calibration gives up per filter after the Y wrap, and the
 whole boot completes at about 98 s with no illegal opcodes. Once the DOC
 (Task 10) and the filter feedback (Task 11) exist, each calibration should take
 milliseconds. The test `boot: SND-A01 lights the display within 10 s` is
-`[!mayfail]` until then; `boot: SND-A01 finishes booting with no DOC fitted`
-checks the slow path today.
+`[!mayfail]` until then; `boot: SND-A01 finishes booting with a constant DOC
+A/D` checks the slow path today. Fitting the DOC (Task 10, §13.3) did not
+change this: its A/D still reads `$FF` until Task 11.
 
 No chip bug was found during this boot: the ROM load, the hand-off, the OS's
 IRQ/FIRQ set-up and the sound load ran on the existing CPU, VIA, ACIA and
@@ -566,8 +567,9 @@ Other observations:
 - The OS IRQ handler `$893C` reads the VIA IFR; with IFR bit 7 clear it reads
   the DOC interrupt status `$ECE0` and returns (`RTI`) when bit 7 is set, as
   with the stub's `$FF`; bit 7 clear goes to the DOC interrupt code `$8871`.
-  So the OS expects `$ECE0` bit 7 = 0 to mean "oscillator interrupt pending"
-  (to be checked against the 5503 data sheet in Task 10).
+  So the OS expects `$ECE0` bit 7 = 0 to mean "oscillator interrupt pending".
+  This matches the 5503 data sheet (OIR bit 7 low while an interrupt is
+  pending, oscillator number in bits 5-1); §13.3 shows the OS decoding it.
 - The OS scans the display from its main loop (`$9DF0-$9E32`, ORA-nh
   `$E20F`), one segment per pass, and reads the keypad rows between two
   writes (`$9E25`). A pass sometimes takes longer than the panel model's 20 ms
@@ -589,3 +591,16 @@ None of the asset images is a real sound-only disk with an unreadable OS area:
 every `.img` under the asset root has a JMP table at `$8008` (factory OS,
 Soundprocess OS, Sound Cells, MirImage `FMT-1`) except the EDM2IMG sample
 `M_13.img`, which holds a `6D B6` fill pattern.
+
+### 13.3 With the DOC 5503 fitted (Task 10)
+
+Measured with the DOC model (`engine/src/doc5503.cpp`; A/D still a constant
+`$FF`) and scratch probes over `Machine`.
+
+| Observation | Evidence |
+|---|---|
+| The boot timeline of §13.1 is unchanged: `$800E` at 6.25 s, the slow `$F571` calibration, display `DB 06` and 155 sectors at about 98 s, no illegal opcodes. No DOC interrupt is taken during the boot (`$8871` never entered). | probe, 120 s; `mirage_cli run --seconds 15` gives the same `display: 00 00`, `sectors: 22` as before |
+| The ROM fills sample RAM with `$7F` before its DOC clear (`$F197`), so while the cleared oscillators run (control 0, FC 0) they read `$7F`: no zero halt, no completed table, so no held (IE = 0) interrupts exist when the OS starts. Control becomes `$63` at `$F1D1`. | probe: osc 5 data `$80` → `$7F` at cycle 1,706,997, control `$63` at 1,708,410 |
+| The OS never rewrites the oscillator enable: OER stays at the ROM's `$FF`, i.e. 32 oscillators, scan rate 8 MHz / (8 × 34) = 29,411.76 Hz. | probe: `$ECE1` reads `$FF` throughout |
+| A MIDI note (`90 3C 64` after boot) starts oscillators 0-3 as two pairs: even oscillators in swap mode with IE (`$0E`, attack table `$A800`, 2 KB, res 3), odd ones one-shot, halted, IE (`$0B`, `$B000`, 4 KB, res 4). FC `$01FF` / `$0200` (a detuned pair). When an even oscillator ends its table the DOC halts it and starts its partner; the OS IRQ handler reads the OIR (`$45` = osc 2, then `$41` = osc 0) and reprograms the even oscillators. | probe: register changes every 100 µs, `$8871` entries with B = OIR |
+| The odd oscillators then halt on the wavesample's zero end marker (16 zero bytes at `$B3F0`; the lower sound has such markers at the end of several pages, e.g. `$A7F0`, `$D7F0`, `$FFF0`), interrupt (`$47` = osc 3) and the OS halts the whole voice (control `$03`). Output lasted about 0.1 s of the 1 s held note. Whether this program should loop (i.e. whether the OS should have re-pointed the oscillator) is not settled here; it is a check for the first audio task. | probe |

@@ -18,7 +18,8 @@ constexpr uint64_t kMidiByteCycles = uint64_t(kMidiByteSeconds * kCpuClockHz + 0
 constexpr uint32_t kMaxMidiQueue = 1u << 24;
 }  // namespace
 
-Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
+Machine::Machine(std::span<const uint8_t> bootRom)
+    : cpu_(*this), doc_([this](uint32_t addr17) { return sample_[addr17 & (kSampleRamSize - 1)]; }) {
   if (bootRom.size() != kBootRomSize)
     throw std::invalid_argument("boot ROM must be exactly 4096 bytes");
   std::copy(bootRom.begin(), bootRom.end(), rom_.begin());
@@ -39,6 +40,9 @@ Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
   acia_.onTransmit = [this](uint8_t b) {
     if (onMidiOut) onMidiOut(b);
   };
+  // DOC A/D ($ECE2). Task 11 routes the input selected by the VIA PB2-3 mux
+  // here; until then it reads a constant $FF (the Task 9 boot behaviour).
+  doc_.adcRead = [] { return uint8_t(0xFF); };
 }
 
 void Machine::powerOn() {
@@ -51,6 +55,8 @@ void Machine::powerOn() {
   via_.reset();
   acia_.reset();
   wd_.reset();  // the disk stays in the drive
+  doc_.reset();
+  masterRem_ = 0;
   midiIn_.clear();
   nextMidiCycle_ = 0;
   updateFirq();
@@ -121,11 +127,15 @@ uint8_t Machine::ioRead(uint16_t addr) {
     updateNmi();  // a status read clears INTRQ
     return v;
   }
-  if (addr >= 0xEC00 && addr <= 0xECEF) return 0xFF;  // DOC 5503
+  if (addr >= 0xEC00 && addr <= 0xECEF) {  // DOC 5503, register = addr & $FF
+    const uint8_t v = doc_.read(uint8_t(addr));
+    updateIrq();  // an OIR read pops the interrupt FIFO
+    return v;
+  }
   return 0xFF;
 }
 
-void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
+void Machine::ioWrite(uint16_t addr, uint8_t value) {
   if (addr >= 0xE100 && addr <= 0xE101) {        // 6850 ACIA
     acia_.write(uint8_t(addr & 1), value);
     updateFirq();
@@ -143,12 +153,20 @@ void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
     updateNmi();
     return;
   }
-  if (addr >= 0xEC00 && addr <= 0xECEF) return;  // DOC 5503
+  if (addr >= 0xEC00 && addr <= 0xECEF) {        // DOC 5503
+    doc_.write(uint8_t(addr), value);
+    updateIrq();  // setting IE can pass a held interrupt to the OIR
+  }
 }
 
 void Machine::tickDevices(uint32_t cycles) {
   via_.tick(cycles);  // Phi2 = the CPU E clock
   wd_.tick(cycles);
+  // The DOC runs on the master clock: E cycles x kMasterClockHz / kCpuClockHz,
+  // remainder carried.
+  const uint64_t master = masterRem_ + uint64_t(cycles) * kMasterClockHz;
+  doc_.tickMasterClocks(uint32_t(master / kCpuClockHz));
+  masterRem_ = uint32_t(master % kCpuClockHz);
   updateIrq();
   updateNmi();
   // cycles_ already includes this step. One tick is a single instruction, far
@@ -187,7 +205,7 @@ void Machine::queueMidi(std::span<const uint8_t> bytes) {
 }
 
 void Machine::updateIrq() {
-  cpu_.setIrq(via_.irq() || wd_.drq());  // | DOC IRQ (Task 10)
+  cpu_.setIrq(via_.irq() || wd_.drq() || doc_.irq());
 }
 
 void Machine::updateNmi() { cpu_.setNmi(wd_.intrq()); }
@@ -205,6 +223,8 @@ std::vector<uint8_t> Machine::saveState() const {
   w.bytes(sample_);
   cpu_.save(w);
   via_.save(w);
+  doc_.save(w);
+  w.u32(masterRem_);
   wd_.save(w);
   w.u8(disk_ ? 1 : 0);
   if (disk_) disk_->save(w);
@@ -237,12 +257,17 @@ void Machine::loadState(std::span<const uint8_t> data) {
   panel_.save(before);
   acia_.save(before);
   wd_.save(before);
+  doc_.save(before);
   uint64_t nextMidi = 0;
+  uint32_t masterRem = 0;
   std::deque<uint8_t> midi;
   std::optional<DiskImage> disk;
   try {
     cpu_.load(r);
     via_.load(r);
+    doc_.load(r);
+    masterRem = r.u32();
+    if (masterRem >= kCpuClockHz) throw StateError("machine: bad DOC clock remainder");
     wd_.load(r);
     const uint8_t hasDisk = r.u8();
     if (hasDisk > 1) throw StateError("machine: bad disk flag");
@@ -262,6 +287,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     panel_.load(back);
     acia_.load(back);
     wd_.load(back);
+    doc_.load(back);
     throw;
   }
   bank_ = bank;
@@ -271,6 +297,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   exp_ = exp;
   sample_ = sample;
   nextMidiCycle_ = nextMidi;
+  masterRem_ = masterRem;
   midiIn_ = std::move(midi);
   disk_ = std::move(disk);
   wd_.attachDisk(disk_ ? &*disk_ : nullptr);

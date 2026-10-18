@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
@@ -137,14 +139,14 @@ TEST_CASE("machine bank uses only PB1:PB0 of port B") {
 }
 
 TEST_CASE("machine unmapped and not-yet-wired I/O reads $FF and ignores writes") {
-  // LDA #$00; STA $E050; LDA $E050; STA $8000; STA $EC00; LDA $EC00; STA $8001
+  // LDA #$00; STA $E050; LDA $E050; STA $8000; STA $E400; LDA $E400; STA $8001
   auto rom = romWith({0x86, 0x00, 0xB7, 0xE0, 0x50, 0xB6, 0xE0, 0x50, 0xB7, 0x80, 0x00,
-                      0xB7, 0xEC, 0x00, 0xB6, 0xEC, 0x00, 0xB7, 0x80, 0x01});
+                      0xB7, 0xE4, 0x00, 0xB6, 0xE4, 0x00, 0xB7, 0x80, 0x01});
   Machine m(rom);
   m.powerOn();
   m.runCycles(40);
   CHECK(m.peek(0x8000) == 0xFF);  // unmapped $E000-$EFFF
-  CHECK(m.peek(0x8001) == 0xFF);  // DOC until Task 10
+  CHECK(m.peek(0x8001) == 0xFF);  // filter CV latches until Task 11
   for (uint16_t a : std::initializer_list<uint16_t>{0xE000, 0xE100, 0xE200, 0xE41F, 0xE800, 0xEC00, 0xECEF, 0xEFFF})
     CHECK(m.peek(a) == 0xFF);
 }
@@ -246,6 +248,25 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   badPanelTag[badPanelTag.size() - kPanelBytes] ^= 0xFF;
   CHECK_THROWS_AS(m.loadState(badPanelTag), StateError);
   CHECK(m.saveState() == before);
+
+  // The DOC section follows the VIA: tag, OER, clock, slot, last OIR,
+  // 32 x 12 oscillator bytes, 8 channel sums, FIFO count (0 here), then the
+  // machine's DOC clock remainder (u32).
+  const std::array<uint8_t, 4> docTag = {'5', 'C', 'O', 'D'};  // fourcc("DOC5") as a LE u32
+  const auto docAt =
+      size_t(std::search(snap.begin(), snap.end(), docTag.begin(), docTag.end()) - snap.begin());
+  REQUIRE(docAt < snap.size());
+  const size_t fifoCountAt = docAt + 4 + 4 + 32 * 12 + 8 * 4;
+  REQUIRE(snap[fifoCountAt] == 0);
+  auto badDocFifo = snap;
+  badDocFifo[fifoCountAt] = 0xFF;  // FIFO count > 32
+  CHECK_THROWS_AS(m.loadState(badDocFifo), StateError);
+  CHECK(m.saveState() == before);
+
+  auto badDocClock = snap;
+  badDocClock[fifoCountAt + 4] = 0xFF;  // remainder high byte: >= kCpuClockHz
+  CHECK_THROWS_AS(m.loadState(badDocClock), StateError);
+  CHECK(m.saveState() == before);
 }
 
 TEST_CASE("machine powerOn is equivalent to a fresh power-on") {
@@ -338,4 +359,81 @@ TEST_CASE("machine boot ROM fills sample RAM through the VIA bank bits", "[asset
   }
   CHECK(m.sampleRam(0x10000) == 0x00);
   CHECK(m.sampleRam(0x17FFF) == 0x00);
+}
+
+// DOC 5503 at $EC00-$ECEF (Task 10).
+
+TEST_CASE("machine DOC registers are mapped at $EC00-$ECEF") {
+  // LDA #$5A; STA $EC85; LDA $EC85; STA $8000; LDA $ECE1; STA $8001
+  auto rom = romFrom({ldaSta(0x5A, 0xEC85),
+                      {0xB6, 0xEC, 0x85, 0xB7, 0x80, 0x00, 0xB6, 0xEC, 0xE1, 0xB7, 0x80, 0x01}});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(30);
+  CHECK(m.peek(0x8000) == 0x5A);  // wavetable pointer of oscillator 5
+  CHECK(m.peek(0x8001) == 0xC1);  // OER after reset: X bits read 1
+  CHECK(m.doc().read(0x85) == 0x5A);
+  CHECK(m.peek(0xEC85) == 0xFF);  // peek has no I/O side effects
+}
+
+TEST_CASE("machine DOC reads sample RAM; BS selects the upper 64 KB") {
+  // Sample RAM $00000 = $77 (quarter 0), $10000 = $99 (quarter 2). Oscillator 0:
+  // pointer 0, FC 1 (stays on byte 0 for 511 scans), BS = 1, running.
+  auto rom = romFrom({selectBank(0), ldaSta(0x77, 0x0000), selectBank(2), ldaSta(0x99, 0x0000),
+                      ldaSta(0x01, 0xEC00), ldaSta(0x40, 0xECC0), ldaSta(0x00, 0xECA0)});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(100);
+  CHECK(m.doc().read(0x60) == 0x99);
+  m.doc().write(0xC0, 0x00);  // BS = 0
+  m.runCycles(20);
+  CHECK(m.doc().read(0x60) == 0x77);
+}
+
+TEST_CASE("machine DOC interrupt reaches the CPU IRQ line; the handler reads the OIR") {
+  // OER = 1 oscillator; oscillator 0 IE, free run, pointer 0: sample RAM is
+  // all 0 after powerOn, so the first byte halts it and interrupts. CLI; spin.
+  // IRQ handler: LDA $ECE0; STA $8000; LDA $ECE0; STA $8001; spin.
+  auto rom = romFrom({ldaSta(0x02, 0xECE1), ldaSta(0x08, 0xECA0), {0x1C, 0xEF, 0x20, 0xFE}});
+  const std::vector<uint8_t> handler = {0xB6, 0xEC, 0xE0, 0xB7, 0x80, 0x00,
+                                        0xB6, 0xEC, 0xE0, 0xB7, 0x80, 0x01, 0x20, 0xFE};
+  std::copy(handler.begin(), handler.end(), rom.begin() + 0x100);
+  rom[0xFF8] = 0xF1;  // IRQ vector -> $F100
+  rom[0xFF9] = 0x00;
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(200);
+  CHECK(m.peek(0x8000) == 0x41);  // osc 0 pending: bit 7 = 0
+  CHECK(m.peek(0x8001) == 0xC1);  // FIFO empty: bit 7 = 1
+  CHECK_FALSE(m.doc().irq());
+}
+
+TEST_CASE("machine DOC runs one slot per 8 master clocks (2 E cycles)") {
+  Machine m(romWith({0x20, 0xFE}));  // BRA *
+  m.powerOn();
+  uint64_t frames = 0;
+  m.doc().onFrame = [&frames](const std::array<int32_t, 8>&) { ++frames; };
+  m.runCycles(60001);
+  // Reset default: 1 oscillator + 2 refresh slots = 24 master clocks = 6 E cycles.
+  CHECK(frames == m.cycles() / 6);
+  CHECK(m.doc().sampleRate() == 8e6 / 24);
+}
+
+TEST_CASE("machine save/load includes the DOC") {
+  auto rom = romFrom({ldaSta(0x40, 0xECE1), ldaSta(0x5A, 0xEC85), ldaSta(0x13, 0xEC00),
+                      ldaSta(0x10, 0xECA0)});
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(41);
+  const auto snap = m.saveState();
+
+  Machine other(rom);
+  other.powerOn();
+  other.loadState(snap);
+  CHECK(other.doc().read(0x85) == 0x5A);
+  CHECK(other.doc().enabledOscillators() == 32);
+  CHECK(other.saveState() == snap);
+  m.runCycles(1001);
+  other.runCycles(1001);
+  CHECK(other.saveState() == m.saveState());
 }

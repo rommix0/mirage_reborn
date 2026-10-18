@@ -12,6 +12,7 @@
 #include "mirage/bus.h"
 #include "mirage/cpu6809.h"
 #include "mirage/disk_image.h"
+#include "mirage/doc5503.h"
 #include "mirage/panel.h"
 #include "mirage/via6522.h"
 #include "mirage/wd1772.h"
@@ -19,9 +20,9 @@
 namespace mirage {
 
 // The whole Mirage: 6809 + RAM + banked sample RAM + boot ROM + I/O decode.
-// The VIA, ACIA (MIDI), WD1772 floppy controller and front panel are wired in; the
-// other I/O devices are stubs for now (reads $FF, writes ignored); later tasks plug
-// the DOC and filter chips into ioRead/ioWrite/tickDevices.
+// The VIA, ACIA (MIDI), WD1772 floppy controller, DOC 5503 and front panel are
+// wired in; the filter CV latches are a stub for now (reads $FF, writes ignored)
+// until Task 11 plugs them into ioRead/ioWrite/tickDevices.
 class Machine : private Bus {
  public:
   static constexpr uint32_t kBootRomSize = 0x1000;
@@ -69,8 +70,11 @@ class Machine : private Bus {
   DiskImage* disk() { return disk_ ? &*disk_ : nullptr; }
   bool driveActive() const { return wd_.motor(); }
   Wd1772& fdc() { return wd_; }  // diagnostics: sectorsRead(), diskChanged()
+  // The DOC sees all 128 KB of sample RAM and is clocked by the 8 MHz master
+  // clock. Its onFrame callback is the host's audio tap (not saved).
+  Doc5503& doc() { return doc_; }
 
-  // The saved state includes the FDC and the inserted disk (or "no disk").
+  // The saved state includes the FDC, the DOC and the inserted disk (or "no disk").
   std::vector<uint8_t> saveState() const;
   void loadState(std::span<const uint8_t> data);  // throws StateError; unchanged on failure
 
@@ -100,6 +104,8 @@ class Machine : private Bus {
   Panel panel_;
   Acia6850 acia_;
   Wd1772 wd_;
+  Doc5503 doc_;
+  uint32_t masterRem_ = 0;  // master clocks owed to the DOC, x kCpuClockHz
   std::optional<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
   std::deque<uint8_t> midiIn_;
   uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives

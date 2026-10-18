@@ -112,9 +112,10 @@ TEST_CASE("boot: SND-A01 loads the OS and runs it from RAM", "[assets]") {
   CHECK_FALSE(r.sawUd);
 }
 
-// Needs the DOC 5503 (Task 10) and the filters (Task 11). The OS calls the
-// ROM's filter calibration $F571 once per filter; with no DOC its A/D wait
-// loops only end when Y wraps, about 6.7 s per filter (boot-rom.md 13).
+// Needs the DOC A/D wired to the filter feedback (Task 11). The OS calls the
+// ROM's filter calibration $F571 once per filter; while the DOC A/D reads a
+// constant $FF its wait loops only end when Y wraps, about 6.7 s per filter
+// (boot-rom.md 13).
 TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets][!mayfail]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
@@ -127,9 +128,9 @@ TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets][!mayfail]") 
   CHECK(r.sawLit);
 }
 
-// Without the DOC the calibration still finishes (slowly), so the whole OS
+// With a constant A/D the calibration still finishes (slowly), so the whole OS
 // boot can be checked today: it loads the lower sound and lights the panel.
-TEST_CASE("boot: SND-A01 finishes booting with no DOC fitted", "[assets]") {
+TEST_CASE("boot: SND-A01 finishes booting with a constant DOC A/D", "[assets]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
   REQUIRE_ASSET(disk);
