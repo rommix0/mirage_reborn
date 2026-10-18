@@ -736,8 +736,8 @@ mirage_cli run --disk <img> [--rom <bin>] [--seconds S]
   - Map `$EC00–$ECEF`. The DOC reads sample RAM directly; BS selects the
     upper 64 KB.
   - DOC IRQ → IRQ.
-  - Tick: one oscillator slot every 8 master clocks, which is 4 E cycles at
-    2 MHz.
+  - Tick: one oscillator slot every 8 master clocks, which is 2 E cycles at
+    2 MHz (corrected by controller ruling).
 
 **Interfaces:**
 - Produces:
@@ -771,7 +771,7 @@ public:
     cleared and reset.
   - **Interrupts:** an interrupt FIFO feeds the OIR. Bit 7 low while pending,
     osc# in bits 5–1, bits 6 and 0 read as 1. A read pops the FIFO.
-  - **Oscillator enable:** OER = 2 × count.
+  - **Oscillator enable:** count = ((OER >> 1) & 0x1F) + 1 (controller ruling; SQ80 $2E → 24).
 
 - [ ] **Step 1: Write the failing tests.**
   - **Sample rate:** OER `0x40` → 29411.76 Hz (±0.01). OER `0x30` →
@@ -783,7 +783,7 @@ public:
     `addr = ((ptr<<8) & ~mask) | ((acc >> (9 + res - size)) & mask)`, with
     `mask = (256<<size) - 1`. So size 3 (2 KB), res 3, ptr `0x2F` gives
     `0x2800 | ((acc>>9) & 0x7FF)`; pointer bits P2–P0 are ignored. With
-    res 4 and size 3, the same FC steps twice as fast (`acc>>10`).
+    res 4 and size 3, the same FC steps at half the rate (`acc>>10`).
   - **Halt on zero:** wave byte 0 → H set, IE set → OIR == `0x40 | (5<<1) | 1`
     for osc 5. A second OIR read has bit 7 = 1.
   - **One-shot:** a 256-byte table halts after a single pass. Free-run is
