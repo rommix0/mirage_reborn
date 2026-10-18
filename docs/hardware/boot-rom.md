@@ -270,8 +270,25 @@ registers are lost. B equals `[$8006]` on return.
   becomes 0 and the loop exits as "OK" even though the seek failed.
 - **`$F3AC` (boot) and `$F448` (OS): read sector at `$8004` with 10
   attempts.** If all fail, they Step Out, Step In, then make one last read.
-  The boot version also restores the parameter block from `$BF8D` after each
-  failed attempt while `$BF8C`=1.
+  This retry behaviour is real for every sector except the first one the boot
+  loader reads. For that one, see the quirk below.
+- **Quirk: a failed first sector is silently accepted** (`$F3BE-$F3D5`,
+  `$F25C-$F26B`). While `$BF8C`=1, a failed read calls `$F437`, which copies
+  back the parameter block saved at `$F24D`. That copy holds `$8006`=0 and
+  `$8001`=2 (or 1), because it was saved after a successful seek in `$F3F1`.
+  - `$F3C6` decrements `$8001` to 1 (or 0), and `$F3CE` reads `$8006`=0, so
+    the loop exits after **one** attempt. `$F3D5` then sees `$8006`=0 and
+    returns success: no Step Out/In, no last read.
+  - X is left at `$8008` by `$F437`'s copy loop. `$F263-$F269` keeps it, and
+    `$F26B` stores it to `$8004`.
+  - So when T0 S0 cannot be read (no ID for sector 0, or a CRC error), the
+    ROM does not show "ud". It loads T0 S1 to `$8008`, carries on with the
+    rest of the image about `$3F8` bytes lower than intended, and runs
+    `JMP $800E` on whatever ended up there.
+  - Example: a disk whose track 0 has readable IDs but no sector 0, such as a
+    PC format numbering sectors 1-9, makes the restore and seek succeed. The
+    error display is reached only if a later sector, the config sector, or
+    the restore or seek fails.
 - **`$F476` (OS):** write sector with the same retry scheme, using `$F024`.
 - **`$F4C6` and `$F4D6`:** motor on (with the 0.52 s wait) and motor off.
 
@@ -305,7 +322,9 @@ registers are lost. B equals `[$8006]` on return.
    `$F1B5`, so only until the first sector succeeds), `$F425` saves
    `$8000-$8007` to `$BF8D`. After the first successful sector, `$F437` copies
    them back and `$BF8C` is cleared (`$F25C-$F269`). So **the first 8 bytes of
-   T0 S0 never reach RAM**: `$8000-$8007` stay the parameter block.
+   T0 S0 never reach RAM**: `$8000-$8007` stay the parameter block. The same
+   restore makes a *failed* T0 S0 read look successful (§5.3 quirk): the load
+   then continues from `$8008`.
    - (dump) `resmos32.bin` starts with `88 09 0B 05 00 00 00 00`. That is the
      parameter block exactly as the ROM leaves it: last command Read Sector,
      9 retries left, track 11, sector 5, pointer `$0000`, status 0, code 0.
@@ -322,7 +341,8 @@ registers are lost. B equals `[$8006]` on return.
 7. **Entry.** If `$8006`=0, the hand-off in §3 runs `JMP $800E`.
 
 The ROM never checks what it loaded. There is no signature or checksum: any
-readable disk is jumped into.
+readable disk is jumped into. Even a disk without a readable T0 S0 is jumped
+into (§5.3 quirk).
 
 ## 7. Vectors
 
@@ -360,7 +380,9 @@ The only interrupt the ROM takes is NMI.
 
 So the pattern is bit7=a … bit0=dp, and the high byte drives **PA3**. The
 digits are dark while `$BF86` bit 7 is 0, so the code blinks: 128 slots on,
-128 off, about 0.27 s each.
+128 off. One slot is about 2,136 E-cycles (2,048 delay plus 88 overhead),
+or 1.068 ms. So each phase is about 0.137 s, and a full on-plus-off period
+is about 0.27 s.
 
 **`$F306` (show an error code).** It maps error code `$8007` to a display word
 and runs 127 scans (about 1.1 s):
@@ -499,3 +521,9 @@ ACIA data register, CA2/CB1/CB2.
   ROM jumps into expansion RAM.
 - **Sample RAM quarter 2.** Its contents survive the ROM fill, so power-on
   RAM state there is visible to the OS.
+- **Non-bootable disks (Task 9).** "ud" is shown only when the restore, a
+  seek, a sector after T0 S0, or the config sector fails. A disk whose T0 S0
+  cannot be read but whose other sectors can is loaded misplaced (from
+  `$8008`) and jumped into (§5.3 quirk). The test should expect "the ROM jumps
+  to `$800E` and the CPU runs whatever is there without crashing the host",
+  not an error display.
