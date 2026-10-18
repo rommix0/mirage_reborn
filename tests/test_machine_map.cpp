@@ -391,10 +391,10 @@ TEST_CASE("machine DOC reads sample RAM; BS selects the upper 64 KB") {
 }
 
 TEST_CASE("machine DOC interrupt reaches the CPU IRQ line; the handler reads the OIR") {
-  // OER = 1 oscillator; oscillator 0 IE, free run, pointer 0: sample RAM is
+  // OER = $00: 1 oscillator; oscillator 0 IE, free run, pointer 0: sample RAM is
   // all 0 after powerOn, so the first byte halts it and interrupts. CLI; spin.
   // IRQ handler: LDA $ECE0; STA $8000; LDA $ECE0; STA $8001; spin.
-  auto rom = romFrom({ldaSta(0x02, 0xECE1), ldaSta(0x08, 0xECA0), {0x1C, 0xEF, 0x20, 0xFE}});
+  auto rom = romFrom({ldaSta(0x00, 0xECE1), ldaSta(0x08, 0xECA0), {0x1C, 0xEF, 0x20, 0xFE}});
   const std::vector<uint8_t> handler = {0xB6, 0xEC, 0xE0, 0xB7, 0x80, 0x00,
                                         0xB6, 0xEC, 0xE0, 0xB7, 0x80, 0x01, 0x20, 0xFE};
   std::copy(handler.begin(), handler.end(), rom.begin() + 0x100);
@@ -420,7 +420,7 @@ TEST_CASE("machine DOC runs one slot per 8 master clocks (2 E cycles)") {
 }
 
 TEST_CASE("machine save/load includes the DOC") {
-  auto rom = romFrom({ldaSta(0x40, 0xECE1), ldaSta(0x5A, 0xEC85), ldaSta(0x13, 0xEC00),
+  auto rom = romFrom({ldaSta(0x3E, 0xECE1), ldaSta(0x5A, 0xEC85), ldaSta(0x13, 0xEC00),
                       ldaSta(0x10, 0xECA0)});
   Machine m(rom);
   m.powerOn();

@@ -33,7 +33,8 @@ struct Rig {
   }
   Rig(const Rig&) = delete;
 
-  void enable(int count) { doc.write(kOer, uint8_t(2 * count)); }
+  // OER bits 5-1 hold (count - 1).
+  void enable(int count) { doc.write(kOer, uint8_t(2 * (count - 1))); }
   // Sets up oscillator n; `control` is written last, so it starts the oscillator
   // when H = 0.
   void osc(int n, uint8_t ptr, uint16_t fc, uint8_t control, uint8_t sizeReg = 0,
@@ -63,25 +64,31 @@ uint8_t oirFor(int n) { return uint8_t(0x40 | (n << 1) | 1); }
 
 }  // namespace
 
-TEST_CASE("doc sample rate is 8 MHz / (8 * (enabled + 2)); OER = 2 * count") {
+// Enabled = OER bits 5-1 (E4-E0) + 1: the register summary puts E4-E0 in bits
+// 5-1, and the SQ80 writes $2E for 24 oscillators at 38.46 kHz (buchty).
+TEST_CASE("doc sample rate is 8 MHz / (8 * (enabled + 2)); enabled = OER bits 5-1 + 1") {
   Rig r;
   CHECK(r.doc.enabledOscillators() == 1);  // reset default: one oscillator
   CHECK(r.doc.sampleRate() == Catch::Approx(8e6 / 24).margin(0.01));
-  r.doc.write(kOer, 0x40);
+  r.doc.write(kOer, 0x3E);
   CHECK(r.doc.enabledOscillators() == 32);
   CHECK(r.doc.sampleRate() == Catch::Approx(29411.76).margin(0.01));
-  r.doc.write(kOer, 0x30);
+  r.doc.write(kOer, 0x2E);  // the SQ80's value
   CHECK(r.doc.enabledOscillators() == 24);
   CHECK(r.doc.sampleRate() == Catch::Approx(38461.54).margin(0.01));
-  r.doc.write(kOer, 0x00);
-  CHECK(r.doc.enabledOscillators() == 1);  // a minimum of one is always enabled
-  r.doc.write(kOer, 0xFF);                 // the boot ROM's value ($F192)
+  r.doc.write(kOer, 0xFF);  // the boot ROM's value ($F192)
   CHECK(r.doc.enabledOscillators() == 32);
+  CHECK(r.doc.sampleRate() == Catch::Approx(29411.76).margin(0.01));
+  r.doc.write(kOer, 0x00);  // a minimum of one is always enabled
+  CHECK(r.doc.enabledOscillators() == 1);
+  CHECK(r.doc.sampleRate() == Catch::Approx(333333.33).margin(0.01));
+  r.doc.write(kOer, 0x40);  // bit 6 is not an E bit
+  CHECK(r.doc.enabledOscillators() == 1);
 }
 
 TEST_CASE("doc emits one frame per scan of enabled + 2 slots of 8 clocks") {
   Rig r;
-  r.doc.write(kOer, 0x40);
+  r.doc.write(kOer, 0x3E);
   r.doc.tickMasterClocks(8 * 34 - 1);
   CHECK(r.frames.empty());
   r.doc.tickMasterClocks(1);

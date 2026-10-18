@@ -36,9 +36,9 @@ void Doc5503::reset() {
   frame_.fill(0);
 }
 
-// OER = 2 x count (datasheet: "to enable all 32 oscillators load the register
-// with 64"), at least one.
-int Doc5503::enabledOscillators() const { return std::clamp(oer_ >> 1, 1, kOscillators); }
+// OER bits 5-1 (E4-E0) hold count - 1: the datasheet's register summary, and
+// the SQ80's $2E enables 24 oscillators (buchty). 1 to 32.
+int Doc5503::enabledOscillators() const { return ((oer_ >> 1) & 0x1F) + 1; }
 
 double Doc5503::sampleRate() const {
   return double(kMasterClockHz) / (kClocksPerSlot * double(enabledOscillators() + kRefreshSlots));

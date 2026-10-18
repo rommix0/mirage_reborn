@@ -17,8 +17,8 @@ namespace mirage {
 //
 // Timing: one slot per 8 input clocks. A scan is one slot for each enabled
 // oscillator in order, then two refresh slots; onFrame is called at the end
-// of every scan. Enabled oscillators = OER / 2, clamped to 1-32 (datasheet:
-// "load the register with 64" for all 32; reset default one).
+// of every scan. Enabled oscillators = OER bits 5-1 (E4-E0) + 1, so 1-32
+// ($3E or the ROM's $FF = 32, the SQ80's $2E = 24; reset default one).
 //
 // Oscillator update (one slot): A = A + FC (24-bit accumulator), then the
 // 16-bit address is ((ptr << 8) & ~mask) | ((A >> (9 + res - size)) & mask),
