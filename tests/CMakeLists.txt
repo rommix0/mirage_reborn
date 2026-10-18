@@ -7,6 +7,7 @@ add_executable(mirage_tests
   test_via6522.cpp
   test_panel.cpp
   test_acia6850.cpp
+  test_wd1772.cpp
   test_machine_map.cpp
   test_disasm6809.cpp
 )

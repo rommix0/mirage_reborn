@@ -27,11 +27,15 @@ Machine::Machine(std::span<const uint8_t> bootRom) : cpu_(*this) {
   // rows (inputs).
   via_.portAPins = [this] { return uint8_t(panel_.rowSense(via_.outA()) | (via_.outA() & 0x1F)); };
   via_.portAOut = [this](uint8_t a) { panel_.portAWritten(a, cycles_); };
-  // Port B: PB0/PB1 select the sample RAM quarter. PB5 (DOC sync) and PB6
-  // (disk present, 1 = disk in) read 0 until the DOC and drive exist. PB2-4
-  // and PB7 are wired by later tasks.
-  via_.portBPins = [] { return uint8_t(0); };
-  via_.portBOut = [this](uint8_t b) { bank_ = uint8_t(b & 3); };
+  // Port B: PB0/PB1 select the sample RAM quarter. PB4 is the drive select/motor
+  // line, active low (boot-rom.md 2.1). PB6 reads 1 while a disk is in the drive
+  // (a level, not a change latch); PB5 (DOC sync) reads 0 until the DOC exists.
+  // PB2-3 and PB7 are wired by later tasks.
+  via_.portBPins = [this] { return uint8_t(disk_ ? 0x40 : 0x00); };
+  via_.portBOut = [this](uint8_t b) {
+    bank_ = uint8_t(b & 3);
+    wd_.setMotor((b & 0x10) == 0);
+  };
   acia_.onTransmit = [this](uint8_t b) {
     if (onMidiOut) onMidiOut(b);
   };
@@ -46,11 +50,14 @@ void Machine::powerOn() {
   credit_ = 0;
   via_.reset();
   acia_.reset();
+  wd_.reset();  // the disk stays in the drive
   midiIn_.clear();
   nextMidiCycle_ = 0;
   updateFirq();
   panel_.clearDisplay();
   cpu_.powerOn();
+  updateIrq();
+  updateNmi();
 }
 
 void Machine::runCycles(uint64_t eCycles) {
@@ -105,7 +112,12 @@ uint8_t Machine::ioRead(uint16_t addr) {
     return v;
   }
   if (addr >= 0xE400 && addr <= 0xE41F) return 0xFF;  // filter CV latches (write-only)
-  if (addr >= 0xE800 && addr <= 0xE803) return 0xFF;  // WD1772
+  if (addr >= 0xE800 && addr <= 0xE803) {  // WD1772
+    const uint8_t v = wd_.read(uint8_t(addr & 3));
+    updateIrq();  // a data read clears DRQ
+    updateNmi();  // a status read clears INTRQ
+    return v;
+  }
   if (addr >= 0xEC00 && addr <= 0xECEF) return 0xFF;  // DOC 5503
   return 0xFF;
 }
@@ -122,13 +134,20 @@ void Machine::ioWrite(uint16_t addr, [[maybe_unused]] uint8_t value) {
     return;
   }
   if (addr >= 0xE400 && addr <= 0xE41F) return;  // filter CV latches
-  if (addr >= 0xE800 && addr <= 0xE803) return;  // WD1772
+  if (addr >= 0xE800 && addr <= 0xE803) {        // WD1772
+    wd_.write(uint8_t(addr & 3), value);
+    updateIrq();
+    updateNmi();
+    return;
+  }
   if (addr >= 0xEC00 && addr <= 0xECEF) return;  // DOC 5503
 }
 
 void Machine::tickDevices(uint32_t cycles) {
   via_.tick(cycles);  // Phi2 = the CPU E clock
+  wd_.tick(cycles);
   updateIrq();
+  updateNmi();
   // cycles_ already includes this step. One tick is a single instruction, far
   // shorter than a MIDI byte, so at most one byte falls due.
   if (!midiIn_.empty() && cycles_ >= nextMidiCycle_) {
@@ -139,6 +158,24 @@ void Machine::tickDevices(uint32_t cycles) {
   }
 }
 
+void Machine::insertDisk(DiskImage disk) {
+  wd_.setDisk(nullptr);  // a disk already in the drive is taken out first
+  disk_.emplace(std::move(disk));
+  wd_.setDisk(&*disk_);
+  updateIrq();
+  updateNmi();
+}
+
+std::optional<DiskImage> Machine::ejectDisk() {
+  if (!disk_) return std::nullopt;
+  wd_.setDisk(nullptr);  // aborts a command in flight
+  std::optional<DiskImage> out = std::move(disk_);
+  disk_.reset();
+  updateIrq();
+  updateNmi();
+  return out;
+}
+
 void Machine::queueMidi(std::span<const uint8_t> bytes) {
   if (bytes.empty()) return;
   // Into an idle line: the first byte finishes one byte time from now.
@@ -147,8 +184,10 @@ void Machine::queueMidi(std::span<const uint8_t> bytes) {
 }
 
 void Machine::updateIrq() {
-  cpu_.setIrq(via_.irq());  // | WD1772 DRQ | DOC IRQ (Tasks 8 and 10)
+  cpu_.setIrq(via_.irq() || wd_.drq());  // | DOC IRQ (Task 10)
 }
+
+void Machine::updateNmi() { cpu_.setNmi(wd_.intrq()); }
 
 void Machine::updateFirq() { cpu_.setFirq(acia_.irq()); }
 
@@ -163,6 +202,9 @@ std::vector<uint8_t> Machine::saveState() const {
   w.bytes(sample_);
   cpu_.save(w);
   via_.save(w);
+  wd_.save(w);
+  w.u8(disk_ ? 1 : 0);
+  if (disk_) disk_->save(w);
   acia_.save(w);
   w.u64(nextMidiCycle_);
   w.u32(uint32_t(midiIn_.size()));
@@ -191,11 +233,17 @@ void Machine::loadState(std::span<const uint8_t> data) {
   via_.save(before);
   panel_.save(before);
   acia_.save(before);
+  wd_.save(before);
   uint64_t nextMidi = 0;
   std::deque<uint8_t> midi;
+  std::optional<DiskImage> disk;
   try {
     cpu_.load(r);
     via_.load(r);
+    wd_.load(r);
+    const uint8_t hasDisk = r.u8();
+    if (hasDisk > 1) throw StateError("machine: bad disk flag");
+    if (hasDisk) disk.emplace().load(r);
     acia_.load(r);
     nextMidi = r.u64();
     const uint32_t n = r.u32();
@@ -210,6 +258,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     via_.load(back);
     panel_.load(back);
     acia_.load(back);
+    wd_.load(back);
     throw;
   }
   bank_ = bank;
@@ -220,7 +269,10 @@ void Machine::loadState(std::span<const uint8_t> data) {
   sample_ = sample;
   nextMidiCycle_ = nextMidi;
   midiIn_ = std::move(midi);
+  disk_ = std::move(disk);
+  wd_.attachDisk(disk_ ? &*disk_ : nullptr);
   updateIrq();
+  updateNmi();
   updateFirq();
 }
 

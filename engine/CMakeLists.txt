@@ -7,6 +7,7 @@ add_library(mirage_engine STATIC
   src/via6522.cpp
   src/panel.cpp
   src/acia6850.cpp
+  src/wd1772.cpp
   src/machine.cpp
   src/disasm6809.cpp
 )
