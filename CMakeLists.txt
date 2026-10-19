@@ -22,6 +22,7 @@ list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
 
 enable_testing()
 add_subdirectory(engine)
+add_subdirectory(host)
 # mirage_cli's option parsing and event scheduling, shared with the unit tests.
 add_library(mirage_cli_core STATIC tools/mirage_cli/run_options.cpp)
 target_include_directories(mirage_cli_core PUBLIC tools/mirage_cli)

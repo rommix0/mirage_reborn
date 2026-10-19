@@ -19,9 +19,12 @@ add_executable(mirage_tests
   test_sha1.cpp
   test_cli_run.cpp
   test_realtime.cpp
+  test_spsc_queue.cpp
+  test_midi_byte_parser.cpp
+  test_panel_layout.cpp
   alloc_counter.cpp
 )
-target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_cli_core Catch2::Catch2WithMain)
+target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_host mirage_cli_core Catch2::Catch2WithMain)
 target_include_directories(mirage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../engine/src)
 target_compile_definitions(mirage_tests PRIVATE
   MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
