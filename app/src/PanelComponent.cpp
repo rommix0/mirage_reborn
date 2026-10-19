@@ -142,7 +142,9 @@ class PanelComponent::Button : public juce::Component {
     g.fillRect(face.getX() + 2.0f, face.getY() + 0.4f, face.getWidth() - 4.0f, 0.6f);
   }
 
-  void mouseDown(const juce::MouseEvent&) override { setHeld(true); }
+  void mouseDown(const juce::MouseEvent& e) override {
+    if (e.mods.isLeftButtonDown()) setHeld(true);  // right and middle clicks don't press
+  }
   void mouseDrag(const juce::MouseEvent& e) override {
     if (!contains(e.getPosition())) setHeld(false);
   }

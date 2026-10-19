@@ -55,8 +55,8 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   juce::AudioDeviceManager deviceManager_;
 
   std::atomic<bool> ready_{false};  // prepare() done and the device running
-  std::atomic<float> volume_{0.8f};
-  float lastGain_ = 0.8f;  // audio thread: gain at the end of the previous block
+  std::atomic<float> volume_{1.0f};
+  float lastGain_ = 1.0f;  // audio thread: gain at the end of the previous block
   size_t maxBlock_ = 0;    // set in audioDeviceAboutToStart, read by the callback
   double rate_ = 0.0;
 

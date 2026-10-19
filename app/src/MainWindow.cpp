@@ -89,6 +89,7 @@ MainWindow::MainWindow(mirage::RealtimeHost& host, AudioEngine& engine, Settings
 }
 
 MainWindow::~MainWindow() {
+  stopTimer();
   removeKeyListener(this);
   setMenuBar(nullptr);
   clearContentComponent();
@@ -126,6 +127,7 @@ bool MainWindow::keyPressed(const juce::KeyPress& key, juce::Component*) {
     if (h.keyCode == code) return true;  // auto-repeat
   held_.push_back({code, *panelKey});
   content_->panel().press(*panelKey, true);
+  startTimerHz(30);
   return true;
 }
 
@@ -140,6 +142,12 @@ void MainWindow::releaseHeldKeys(bool all) {
     content_->panel().press(held_[i].key, false);
     held_.erase(held_.begin() + std::ptrdiff_t(i));
   }
+  if (held_.empty()) stopTimer();
+}
+
+void MainWindow::timerCallback() {
+  if (juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0)
+    releaseHeldKeys(true);
 }
 
 juce::StringArray MainWindow::getMenuBarNames() { return {"File", "Machine", "MIDI", "Audio"}; }

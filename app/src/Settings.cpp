@@ -32,7 +32,7 @@ juce::String Settings::midiOut() const { return file().getValue("midiOut"); }
 void Settings::setMidiOut(const juce::String& id) { file().setValue("midiOut", id); }
 
 float Settings::volume() const {
-  return juce::jlimit(0.0f, 1.0f, (float)file().getDoubleValue("volume", 0.8));
+  return juce::jlimit(0.0f, 1.0f, (float)file().getDoubleValue("volume", 1.0));
 }
 void Settings::setVolume(float g) { file().setValue("volume", (double)g); }
 

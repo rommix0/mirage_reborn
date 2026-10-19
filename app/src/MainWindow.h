@@ -47,7 +47,8 @@ class MirageContent : public juce::Component, private juce::Timer {
 class MainWindow : public juce::DocumentWindow,
                    private juce::MenuBarModel,
                    private juce::ApplicationCommandTarget,
-                   private juce::KeyListener {
+                   private juce::KeyListener,
+                   private juce::Timer {
  public:
   MainWindow(mirage::RealtimeHost& host, AudioEngine& engine, Settings& settings);
   ~MainWindow() override;
@@ -83,6 +84,8 @@ class MainWindow : public juce::DocumentWindow,
   bool keyPressed(const juce::KeyPress& key, juce::Component*) override;
   bool keyStateChanged(bool isKeyDown, juce::Component*) override;
   void releaseHeldKeys(bool all);  // all, or only those no longer physically down
+  // Runs while keys are held: a modal dialog takes the key-ups, so let go when one opens.
+  void timerCallback() override;
 
   void showAudioSettings();
 
