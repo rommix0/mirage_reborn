@@ -133,20 +133,30 @@ TEST_CASE("panel integrates segments over the multiplex scan") {
   CHECK(d.right == 0x80);
 }
 
-TEST_CASE("panel display is blank 25 ms after the last write, lit at 15 ms") {
+TEST_CASE("panel display is blank 40 ms after the last write, lit at 30 ms") {
   Panel p;
   p.portAWritten(0x03, 5000);
-  CHECK(p.display(5000 + ms(15)).left == 0x08);
-  CHECK(p.display(5000 + ms(25)).left == 0);
-  CHECK(p.display(5000 + ms(25)).right == 0);
+  CHECK(p.display(5000 + ms(30)).left == 0x08);
+  CHECK(p.display(5000 + ms(40)).left == 0);
+  CHECK(p.display(5000 + ms(40)).right == 0);
 }
 
 TEST_CASE("panel a rewrite refreshes the persistence window") {
   Panel p;
   p.portAWritten(0x03, 0);
-  p.portAWritten(0x03, ms(15));
-  CHECK(p.display(ms(30)).left == 0x08);
-  CHECK(p.display(ms(36)).left == 0);
+  p.portAWritten(0x03, ms(30));
+  CHECK(p.display(ms(55)).left == 0x08);
+  CHECK(p.display(ms(66)).left == 0);
+}
+
+TEST_CASE("panel keyDown reflects setKey") {
+  Panel p;
+  CHECK_FALSE(p.keyDown(PanelKey::Enter));
+  p.setKey(PanelKey::Enter, true);
+  CHECK(p.keyDown(PanelKey::Enter));
+  CHECK_FALSE(p.keyDown(PanelKey::Cancel));
+  p.setKey(PanelKey::Enter, false);
+  CHECK_FALSE(p.keyDown(PanelKey::Enter));
 }
 
 TEST_CASE("panel clearDisplay blanks lit segments but keeps held keys") {

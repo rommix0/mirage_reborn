@@ -192,6 +192,23 @@ TEST_CASE("boot: SND-A01 settles with its lower sound loaded in under 15 s", "[a
   CHECK(mirage_test::bootedSnapshot("SND-A01.img").seconds < 15.0);
 }
 
+// The OS scans one display segment per main-loop pass; the longest gap between
+// two lit writes of a segment is 21.3 ms (panel.cpp, boot-rom.md 13.1), so the
+// display must never read blank once it has settled.
+TEST_CASE("boot: settled SND-A01 display never reads blank", "[assets]") {
+  const auto disk = assetPath(kSndA01);
+  REQUIRE_ASSET(disk);
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  auto m = mirage_test::bootedMachine("SND-A01.img");
+  int blank = 0;
+  for (int i = 0; i < 300; ++i) {
+    m->runCycles(kSecond / 100);
+    const DisplayState d = m->display();
+    if (d.left != 0xDB || d.right != 0x06) ++blank;
+  }
+  CHECK(blank == 0);
+}
+
 // Other operating systems call the same ROM calibration from their own code
 // (filters.md 4); the hardware model has to satisfy them all unchanged.
 TEST_CASE("boot: EnsoniqOS masos calibrates its filters and boots", "[assets]") {
@@ -256,6 +273,24 @@ TEST_CASE("boot: no disk shows \"nd\"", "[assets]") {
   CHECK_FALSE(r.sawUd);
   CHECK_FALSE(r.jumpedTo800E);
   CHECK(m.cpu().illegalCount() == 0);
+}
+
+// "nd" blinks (128 slots on, 128 off, boot-rom.md 8), so the persistence window
+// must not smear the dark phase away: both lit and dark samples are seen.
+TEST_CASE("boot: no disk still blinks \"nd\"", "[assets]") {
+  LOAD_ROM(rom);
+  Machine m(rom);
+  m.powerOn();
+  m.runCycles(2 * kSecond);
+  int lit = 0, dark = 0;
+  for (int i = 0; i < 400; ++i) {
+    m.runCycles(kSecond / 100);
+    const DisplayState d = m.display();
+    if (d.left || d.right) ++lit;
+    else ++dark;
+  }
+  CHECK(lit > 0);
+  CHECK(dark > 0);
 }
 
 // The Soundprocess sound packs carry the Soundprocess OS in tracks 0-10, so

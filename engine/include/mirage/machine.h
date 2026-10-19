@@ -60,6 +60,7 @@ class Machine : private Bus {
 
   // Front panel. Held keys survive powerOn() like a finger on a button.
   void setKey(PanelKey key, bool down) { panel_.setKey(key, down); }
+  bool keyDown(PanelKey key) const { return panel_.keyDown(key); }
   DisplayState display() const { return panel_.display(cycles_); }
 
   // MIDI. Queued bytes reach the ACIA one per MIDI byte time (320 us) of

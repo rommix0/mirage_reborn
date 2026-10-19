@@ -31,12 +31,13 @@ struct DisplayState {
 class Panel {
  public:
   void setKey(PanelKey key, bool down);
+  bool keyDown(PanelKey key) const { return (keys_ >> (uint8_t(key) % 24)) & 1u; }
   // Row sense levels in bits 5..7 (bit 5+row; 0 = a key is down in that row in
   // the column selected by portA & 7). Other bits are 0.
   uint8_t rowSense(uint8_t portA) const;
   // Records the segment lit on each enabled digit; `cycle` is the E-cycle count.
   void portAWritten(uint8_t portA, uint64_t cycle);
-  // Segments written within the last 20 ms (persistence of the multiplex).
+  // Segments written within the persistence window (35 ms, panel.cpp).
   DisplayState display(uint64_t nowCycle) const;
   void clearDisplay();  // forgets the lit history; held keys are kept
 

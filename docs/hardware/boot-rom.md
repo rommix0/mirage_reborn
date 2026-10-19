@@ -571,9 +571,13 @@ Other observations:
   pending, oscillator number in bits 5-1); §13.3 shows the OS decoding it.
 - The OS scans the display from its main loop (`$9DF0-$9E32`, ORA-nh
   `$E20F`), one segment per pass, and reads the keypad rows between two
-  writes (`$9E25`). A pass sometimes takes longer than the panel model's 20 ms
-  persistence, so about 1 in 10 display samples taken every 10 ms misses a
-  segment.
+  writes (`$9E25`). A pass sometimes takes longer than a 20 ms persistence
+  would cover (about 1 in 10 display samples taken every 10 ms missed a
+  segment). Measured on the settled SND-A01 display over 10 s, the longest
+  gap between two lit writes of one segment is 21.3 ms, so the panel model's
+  persistence is 35 ms (1.5 x that, rounded up to 5 ms; below the 137 ms
+  blink phase of §8). Test: `boot: settled SND-A01 display never reads
+  blank`.
 
 ### 13.2 Non-bootable and other disks
 

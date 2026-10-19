@@ -8,9 +8,13 @@
 namespace mirage {
 
 namespace {
-// The multiplexed display looks lit for roughly this long after a segment was
-// last driven; the ROM scans every segment well inside this (about 8.5 ms).
-constexpr uint64_t kPersistCycles = uint64_t(kCpuClockHz) / 50;  // 20 ms
+// The multiplexed display looks lit for this long after a segment was last
+// driven. The OS scans one segment per main-loop pass, and a pass sometimes
+// takes much longer than the usual 8.5 ms: measured on the settled SND-A01
+// display over 10 s, the longest gap between two lit writes of one segment is
+// 21.3 ms. 1.5 x that, rounded up to a whole 5 ms, is 35 ms; it must stay below
+// the ROM's 137 ms blink phase (boot-rom.md 8) so "nd" and "ud" still blink.
+constexpr uint64_t kPersistCycles = uint64_t(kCpuClockHz) * 35 / 1000;  // 35 ms
 
 // Indexed by PanelKey (row*8 + column).
 constexpr std::string_view kKeyNames[kPanelKeyCount] = {
