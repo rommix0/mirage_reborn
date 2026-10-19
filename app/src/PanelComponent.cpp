@@ -1,8 +1,6 @@
 #include "PanelComponent.h"
 
-#if MIRAGE_HAS_ENSONIQ_LOGO
 #include <BinaryData.h>
-#endif
 
 namespace {
 
@@ -55,19 +53,16 @@ juce::Path textPath(const juce::String& text, const juce::Font& font, Rectangle<
 }
 
 // The ensoniq badge (box and logotype) from the embedded ensoniq_logo.svg, inked
-// in the panel's branding grey; null when the build had no logo file.
+// in the panel's branding grey.
 std::unique_ptr<juce::Drawable> makeEnsoniqLogo() {
-#if MIRAGE_HAS_ENSONIQ_LOGO
   auto logo = juce::Drawable::createFromImageData(MirageBranding::ensoniq_logo_svg,
                                                   size_t(MirageBranding::ensoniq_logo_svgSize));
+  jassert(logo != nullptr);
   if (logo) {
     logo->replaceColour(juce::Colours::black, kBranding);   // paths with no fill
     logo->replaceColour(Colour(0xff231f20), kBranding);     // the "e" (class cls-1)
   }
   return logo;
-#else
-  return nullptr;
-#endif
 }
 
 // The drive's faceplate on the lip: the slot and its activity LED.
@@ -379,17 +374,9 @@ void PanelComponent::paintLegends(juce::Graphics& g) const {
 
 void PanelComponent::paintBranding(juce::Graphics& g) const {
   const auto& geo = mirage::panelGeometry();
-  // ensoniq: the logotype in its box, from the artwork when the build has it,
-  // else an outlined text stand-in.
-  const auto badge = toRect(geo.ensoniqBadge);
-  g.setColour(kBranding);
-  if (ensoniqLogo_) {
-    ensoniqLogo_->drawWithin(g, badge, juce::RectanglePlacement::centred, 1.0f);
-  } else {
-    g.drawRoundedRectangle(badge, 4.0f, 1.2f);
-    g.strokePath(textPath("ensoniq", panelFont(40.0f, true), badge.reduced(10.0f, 4.0f)),
-                 juce::PathStrokeType(0.8f));
-  }
+  // ensoniq: the logotype in its box.
+  if (ensoniqLogo_)
+    ensoniqLogo_->drawWithin(g, toRect(geo.ensoniqBadge), juce::RectanglePlacement::centred, 1.0f);
   // Mirage in solid yellow, its subtitle in small widely spaced caps.
   g.setColour(kMirageYellow);
   g.fillPath(textPath("Mirage",

@@ -33,18 +33,12 @@ target_compile_definitions(MirageApp PRIVATE
   JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MirageApp,JUCE_VERSION>"
   MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
 
-# The ensoniq badge artwork is the owner's file next to the ROM; like the ROM it
-# is never copied into the repo. It is embedded in the exe at build time when
-# present; without it the panel draws a text badge instead.
-set(MIRAGE_ENSONIQ_LOGO "${MIRAGE_ASSET_ROOT}/ensoniq_logo.svg")
-if(EXISTS "${MIRAGE_ENSONIQ_LOGO}")
-  juce_add_binary_data(MirageBranding NAMESPACE MirageBranding SOURCES "${MIRAGE_ENSONIQ_LOGO}")
-  target_link_libraries(MirageApp PRIVATE MirageBranding)
-  target_compile_definitions(MirageApp PRIVATE MIRAGE_HAS_ENSONIQ_LOGO=1)
-endif()
+# Panel artwork embedded in the exe (the ensoniq badge).
+juce_add_binary_data(MirageBranding NAMESPACE MirageBranding SOURCES resources/ensoniq_logo.svg)
 
 target_link_libraries(MirageApp
   PRIVATE
+    MirageBranding
     mirage_host
     juce::juce_gui_extra
     juce::juce_audio_utils
