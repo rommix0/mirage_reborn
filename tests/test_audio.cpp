@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <string>
 #include <numbers>
 #include <vector>
 
@@ -113,22 +115,24 @@ TEST_CASE("resampler: input rate change keeps a 440 Hz sine continuous") {
     }
   };
   gen(kRateA, 29412);  // 1 s
-  // The output index at which the first new-rate sample influences the output
-  // is about the number of outputs produced so far (less the filter latency).
+  // The resampler applies the new rate when its output position reaches the
+  // first new-rate sample, about 32 input samples (53 outputs) after this
+  // point; that is inside the checks below, which do not depend on the exact
+  // index.
   const size_t switchAt = out.size();
   r.setInputRate(kRateB);
   gen(kRateB, 38462);  // 1 s
 
   REQUIRE(out.size() > 90000);
-  const auto maxStep = [&](size_t from, size_t to) {
-    float m = 0;
-    for (size_t i = from + 1; i < to; ++i) m = std::max(m, std::fabs(out[i] - out[i - 1]));
-    return m;
-  };
-  const size_t lo = switchAt - 50, hi = switchAt + 50;
-  const float near = maxStep(lo, hi);
-  const float elsewhere = std::max(maxStep(1000, lo), maxStep(hi, out.size()));
-  CHECK(near <= 1.5f * elsewhere);
+  // No click anywhere: a clean 440 Hz sine of amplitude 0.5 sampled at 48 kHz
+  // moves by at most 2 pi 440 0.5 / 48000 = 0.0288 per sample. A jump in the
+  // stream position at the rate change (even a few input samples) is several
+  // times that.
+  constexpr double kMaxSine = 2 * std::numbers::pi * kHz * 0.5 / kOut;
+  float maxStep = 0;
+  for (size_t i = 1001; i < out.size(); ++i) maxStep = std::max(maxStep, std::fabs(out[i] - out[i - 1]));
+  CHECK(maxStep <= 1.5 * kMaxSine);
+  CHECK(maxStep >= 0.9 * kMaxSine);  // and the sine really is there
   // Pitch on both sides, away from the start-up and the switch.
   CHECK(zeroCrossHz(out, 2000, switchAt - 400, kOut) == Catch::Approx(kHz).epsilon(0.01));
   CHECK(zeroCrossHz(out, switchAt + 400, out.size() - 400, kOut) ==
@@ -212,40 +216,40 @@ std::unique_ptr<Machine> idleMachine() {
   return m;
 }
 
-// Boots SND-A01 (the OS auto-loads the lower sound) until it has settled, and
-// returns the machine state at that point; computed once per test run.
-// Settled = the drive motor is off, the display has been lit for a second and
-// no sector has been read for two (docs/hardware/boot-rom.md 13.5). Capped at
-// 90 s of emulated time.
-const std::vector<uint8_t>& bootedSnapshot(double* bootSeconds = nullptr) {
-  static std::vector<uint8_t> snap;
-  static double seconds = 0;
-  if (snap.empty()) {
-    const auto romPath = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin");
-    const auto rom = loadBytes(romPath);
-    Machine m(rom);
-    m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
-    m.powerOn();
-    uint64_t lastSectors = 0, quiet = 0, lit = 0;
-    for (uint64_t t = 0; t < 9000; ++t) {
-      m.runCycles(kSecond / 100);
-      const DisplayState d = m.display();
-      lit = (d.left || d.right) ? lit + 1 : 0;
-      quiet = m.fdc().sectorsRead() == lastSectors ? quiet + 1 : 0;
-      lastSectors = m.fdc().sectorsRead();
-      if (lit >= 100 && quiet >= 200 && !m.driveActive()) break;
-    }
-    seconds = double(m.cycles()) / kSecond;
-    snap = m.saveState();
+// Boots a factory disk image (the OS auto-loads the lower sound) until it has
+// settled, and returns the machine state at that point; computed once per image
+// per test run. Settled = the drive motor is off, the display has been lit for
+// a second and no sector has been read for two (docs/hardware/boot-rom.md
+// 13.5). Capped at 90 s of emulated time.
+struct Booted {
+  std::vector<uint8_t> state;
+  double seconds = 0;
+};
+
+const Booted& bootedSnapshot(const std::string& image) {
+  static std::map<std::string, Booted> cache;
+  auto it = cache.find(image);
+  if (it != cache.end()) return it->second;
+  const auto rom = loadBytes(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/" + image)));
+  m.powerOn();
+  uint64_t lastSectors = 0, quiet = 0, lit = 0;
+  for (uint64_t t = 0; t < 9000; ++t) {
+    m.runCycles(kSecond / 100);
+    const DisplayState d = m.display();
+    lit = (d.left || d.right) ? lit + 1 : 0;
+    quiet = m.fdc().sectorsRead() == lastSectors ? quiet + 1 : 0;
+    lastSectors = m.fdc().sectorsRead();
+    if (lit >= 100 && quiet >= 200 && !m.driveActive()) break;
   }
-  if (bootSeconds) *bootSeconds = seconds;
-  return snap;
+  return cache[image] = {m.saveState(), double(m.cycles()) / kSecond};
 }
 
-std::unique_ptr<Machine> bootedMachine() {
+std::unique_ptr<Machine> bootedMachine(const std::string& image) {
   const auto rom = loadBytes(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
   auto m = std::make_unique<Machine>(rom);
-  m->loadState(bootedSnapshot());
+  m->loadState(bootedSnapshot(image).state);
   return m;
 }
 
@@ -333,11 +337,10 @@ constexpr uint8_t kKeyLow = 44, kKeyHigh = 56, kKeyBrief = 60;
 TEST_CASE("render: SND-A01 plays a note through the whole chain", "[assets]") {
   REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
-  double bootSeconds = 0;
-  bootedSnapshot(&bootSeconds);
+  const double bootSeconds = bootedSnapshot("SND-A01.img").seconds;
   INFO("booted at " << bootSeconds << " s");
   REQUIRE(bootSeconds < 89.0);  // the condition was met, not the cap
-  auto m = bootedMachine();
+  auto m = bootedMachine("SND-A01.img");
 
   SECTION("silence before the note") {
     const auto v = renderSeconds(*m, 1.0);
@@ -374,7 +377,7 @@ TEST_CASE("render: SND-A01 plays a note through the whole chain", "[assets]") {
 
   SECTION("pitch: keys 44 and 56 (one octave) differ by a factor of 2") {
     const auto period = [&](uint8_t key) {
-      auto n = bootedMachine();
+      auto n = bootedMachine("SND-A01.img");
       note(*n, 0x90, key, 100);
       const auto v = renderSeconds(*n, 0.5);
       // Steady part of the note: 50 ms to 280 ms after the key, lags for 70-700 Hz.
@@ -427,4 +430,55 @@ TEST_CASE("render: the audio state is part of the saved state, atomically") {
 
   CHECK_NOTHROW(m->loadState(snap));
   CHECK(m->saveState() == snap);
+}
+
+// SND-A04 is a strings sound that sustains while the key is held (SND-A01's
+// sound 1 is percussive: every key ends by itself within 1.3 s, so it cannot
+// show that note-off matters). Key 48 is 131.05 Hz, key 60 261.55 Hz.
+TEST_CASE("render: SND-A04 strings sustain while held and stop after release", "[assets]") {
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A04.img"));
+  const double bootSeconds = bootedSnapshot("SND-A04.img").seconds;
+  INFO("booted at " << bootSeconds << " s");
+  REQUIRE(bootSeconds < 89.0);
+  auto m = bootedMachine("SND-A04.img");
+
+  SECTION("held key sounds throughout, then dies away after the release") {
+    const auto silence = renderSeconds(*m, 0.5);
+    CHECK(rms(silence, 0, silence.size()) < 1e-3);
+    note(*m, 0x90, 48, 100);
+    const auto held = renderSeconds(*m, 4.0);
+    note(*m, 0x80, 48, 0);
+    const auto tail = renderSeconds(*m, 4.0);
+    const double heldRms = rms(held, 0, held.size());
+    const double lastRms = rms(held, held.size() - size_t(0.25 * kHost), held.size());
+    // The release itself takes up to a second; the 3 s after it must be quiet.
+    const double tailRms = rms(tail, size_t(1.0 * kHost), tail.size());
+    const double endRms = rms(tail, tail.size() - size_t(0.25 * kHost), tail.size());
+    float peak = 0;
+    for (float x : held) peak = std::max(peak, std::fabs(x));
+    INFO("held rms " << heldRms << " last 0.25 s " << lastRms << " tail (1-4 s) " << tailRms
+                     << " end " << endRms << " peak " << peak);
+    CHECK(lastRms > 0.03);  // still sounding after 4 s: nothing ended it
+    CHECK(tailRms < 0.1 * heldRms);
+    CHECK(endRms < 1e-3);
+    CHECK(peak <= 1.0f);
+  }
+
+  SECTION("pitch: keys 48 and 60 (one octave) differ by a factor of 2") {
+    const auto period = [&](uint8_t key) {
+      auto n = bootedMachine("SND-A04.img");
+      note(*n, 0x90, key, 100);
+      const auto v = renderSeconds(*n, 2.0);
+      // 1 s to 2 s after the key; lags for 90-600 Hz.
+      return autocorrPeriod(v, size_t(1.0 * kHost), size_t(2.0 * kHost), size_t(kHost / 600),
+                            size_t(kHost / 90));
+    };
+    const double pLow = period(48), pHigh = period(60);
+    INFO("period " << pLow << " vs " << pHigh << " samples");
+    REQUIRE(pHigh > 0);
+    CHECK(pLow / pHigh == Catch::Approx(2.0).epsilon(0.03));
+    CHECK(kHost / pLow == Catch::Approx(131.05).epsilon(0.03));
+    CHECK(kHost / pHigh == Catch::Approx(261.55).epsilon(0.03));
+  }
 }
