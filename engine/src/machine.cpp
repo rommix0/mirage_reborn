@@ -17,8 +17,6 @@ constexpr uint16_t kRamBase = 0x8000, kExpBase = 0xC000, kIoBase = 0xE000, kRomB
 constexpr uint32_t kQuarter = 0x8000;
 // E cycles per MIDI byte on the wire (640 at 2 MHz).
 constexpr uint64_t kMidiByteCycles = uint64_t(kMidiByteSeconds * kCpuClockHz + 0.5);
-// A save file with more queued MIDI bytes than this is treated as corrupt.
-constexpr uint32_t kMaxMidiQueue = 1u << 24;
 // A DOC channel sum (byte - 128) * volume as a voltage: one full-volume
 // oscillator swings about +-1.0.
 constexpr float kVoiceScale = 1.0f / 32768.0f;
@@ -91,7 +89,8 @@ void Machine::powerOn() {
   doc_.reset();
   filters_.reset();
   masterRem_ = 0;
-  midiIn_.clear();
+  midiHead_ = midiCount_ = 0;
+  midiOverflows_ = 0;
   nextMidiCycle_ = 0;
   resampler_.reset();
   dcIn_ = dcOut_ = lastOut_ = 0.0f;
@@ -135,7 +134,19 @@ void Machine::pushMix(float mix) {
   resampler_.setInputRate(rate);
   resampler_.push(y * kOutputGain);
   float s;
-  while (resampler_.pop(s)) pending_.push_back(s);
+  while (resampler_.pop(s)) pending_.push_back(softClip(s));
+}
+
+float Machine::softClip(float x) {
+  constexpr float kKnee = 0.75f, kRoom = 1.0f - kKnee;
+  const float a = std::fabs(x);
+  if (!(a > kKnee)) return x;  // also passes NaN through
+  return std::copysign(kKnee + kRoom * std::tanh((a - kKnee) / kRoom), x);
+}
+
+void Machine::prepare(size_t maxFrames, double hostRate) {
+  pending_.reserve(2 * maxFrames + 64);
+  if (hostRate >= kMinHostRate && hostRate <= kMaxHostRate) resampler_.setOutputRate(hostRate);
 }
 
 void Machine::render(float* out, size_t frames, double hostRate) {
@@ -149,7 +160,6 @@ void Machine::render(float* out, size_t frames, double hostRate) {
   renderCycleFrac_ += double(frames) * double(kCpuClockHz) / hostRate;
   const double whole = std::floor(renderCycleFrac_);
   renderCycleFrac_ -= whole;
-  pending_.reserve(pending_.size() + frames + 16);
   rendering_ = true;
   runCycles(uint64_t(whole));
   rendering_ = false;
@@ -251,9 +261,10 @@ void Machine::tickDevices(uint32_t cycles) {
   updateNmi();
   // cycles_ already includes this step. One tick is a single instruction, far
   // shorter than a MIDI byte, so at most one byte falls due.
-  if (!midiIn_.empty() && cycles_ >= nextMidiCycle_) {
-    acia_.receiveByte(midiIn_.front());
-    midiIn_.pop_front();
+  if (midiCount_ != 0 && cycles_ >= nextMidiCycle_) {
+    acia_.receiveByte(midiRing_[midiHead_]);
+    midiHead_ = (midiHead_ + 1) % kMidiQueueCapacity;
+    --midiCount_;
     nextMidiCycle_ += kMidiByteCycles;
     updateFirq();
   }
@@ -278,9 +289,18 @@ std::unique_ptr<DiskImage> Machine::ejectDisk() { return insertDisk(std::unique_
 void Machine::queueMidi(std::span<const uint8_t> bytes) {
   if (bytes.empty()) return;
   // Into an idle line: the first byte finishes one byte time from now.
-  if (midiIn_.empty()) nextMidiCycle_ = cycles_ + kMidiByteCycles;
-  midiIn_.insert(midiIn_.end(), bytes.begin(), bytes.end());
+  if (midiCount_ == 0) nextMidiCycle_ = cycles_ + kMidiByteCycles;
+  for (uint8_t b : bytes) {
+    if (midiCount_ == kMidiQueueCapacity) {
+      ++midiOverflows_;
+      continue;
+    }
+    midiRing_[(midiHead_ + midiCount_) % kMidiQueueCapacity] = b;
+    ++midiCount_;
+  }
 }
+
+void Machine::flushMidi() { midiHead_ = midiCount_ = 0; }
 
 void Machine::updateIrq() {
   cpu_.setIrq(via_.irq() || wd_.drq() || doc_.irq());
@@ -313,8 +333,8 @@ std::vector<uint8_t> Machine::saveState() const {
   if (disk_) disk_->save(w);
   acia_.save(w);
   w.u64(nextMidiCycle_);
-  w.u32(uint32_t(midiIn_.size()));
-  for (uint8_t b : midiIn_) w.u8(b);
+  w.u32(uint32_t(midiCount_));
+  for (size_t i = 0; i < midiCount_; ++i) w.u8(midiRing_[(midiHead_ + i) % kMidiQueueCapacity]);
   panel_.save(w);
   return w.take();
 }
@@ -351,7 +371,7 @@ void Machine::loadAudio(StateReader& r) {
   dcOut_ = dcOut;
   lastOut_ = lastOut;
   renderCycleFrac_ = frac;
-  pending_ = std::move(pending);
+  pending_.assign(pending.begin(), pending.end());  // keeps the capacity prepare() reserved
 }
 
 void Machine::loadState(std::span<const uint8_t> data) {
@@ -387,7 +407,8 @@ void Machine::loadState(std::span<const uint8_t> data) {
   saveAudio(before);
   uint64_t nextMidi = 0;
   uint32_t masterRem = 0;
-  std::deque<uint8_t> midi;
+  std::array<uint8_t, kMidiQueueCapacity> midi{};
+  uint32_t midiCount = 0;
   std::unique_ptr<DiskImage> disk;
   try {
     cpu_.load(r);
@@ -407,8 +428,9 @@ void Machine::loadState(std::span<const uint8_t> data) {
     acia_.load(r);
     nextMidi = r.u64();
     const uint32_t n = r.u32();
-    if (n > kMaxMidiQueue) throw StateError("machine: bad MIDI queue");
-    for (uint32_t i = 0; i < n; ++i) midi.push_back(r.u8());  // a short file throws here
+    if (n > kMidiQueueCapacity) throw StateError("machine: bad MIDI queue");
+    for (uint32_t i = 0; i < n; ++i) midi[i] = r.u8();  // a short file throws here
+    midiCount = n;
     panel_.load(r);
     if (!r.atEnd()) throw StateError("machine: trailing data");
   } catch (...) {
@@ -432,7 +454,9 @@ void Machine::loadState(std::span<const uint8_t> data) {
   sample_ = sample;
   nextMidiCycle_ = nextMidi;
   masterRem_ = masterRem;
-  midiIn_ = std::move(midi);
+  midiRing_ = midi;
+  midiHead_ = 0;
+  midiCount_ = midiCount;
   disk_ = std::move(disk);
   wd_.attachDisk(disk_.get());
   updateIrq();

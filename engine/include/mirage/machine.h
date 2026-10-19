@@ -2,7 +2,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -65,10 +64,20 @@ class Machine : private Bus {
   DisplayState display() const { return panel_.display(cycles_); }
 
   // MIDI. Queued bytes reach the ACIA one per MIDI byte time (320 us) of
-  // emulated time, whatever the ACIA's divide setting. The queue is unbounded
-  // (host side); an OS that reads too slowly gets OVRN as on hardware. powerOn()
-  // discards queued bytes. Bytes the OS transmits are passed to onMidiOut.
+  // emulated time, whatever the ACIA's divide setting. The input is a fixed
+  // ring of kMidiQueueCapacity bytes, so queueMidi never allocates and the
+  // audio thread may call it. Bytes that do not fit are dropped (the newest
+  // first) and counted in midiOverflows(); an OS that reads too slowly gets
+  // OVRN as on hardware. midiQueueDepth() is the bytes queued and not yet
+  // delivered to the ACIA. flushMidi() discards them (a byte already in the
+  // ACIA stays). powerOn() discards queued bytes and zeroes midiOverflows(),
+  // which is host diagnostics and not saved; loadState() leaves it alone.
+  // Bytes the OS transmits are passed to onMidiOut.
+  static constexpr size_t kMidiQueueCapacity = 4096;
   void queueMidi(std::span<const uint8_t> bytes);
+  size_t midiQueueDepth() const { return midiCount_; }
+  uint64_t midiOverflows() const { return midiOverflows_; }
+  void flushMidi();
   std::function<void(uint8_t)> onMidiOut;
 
   // Floppy drive. insertDisk replaces any disk already in the drive (aborting a
@@ -100,10 +109,13 @@ class Machine : private Bus {
   // (the fractional E cycles of each call are carried to the next, so the
   // total over many calls tracks the requested time) and writes `frames` mono
   // samples at hostRate. The mix is DC-blocked (one-pole high-pass, about
-  // 5 Hz), scaled by kOutputGain and resampled from doc().sampleRate(), which
-  // can change while running, by a StreamResampler. A single full-volume
-  // oscillator through an open filter peaks at kOutputGain; the stream is not
-  // clipped, so several loud voices can exceed 1.0 (the WAV writer clamps).
+  // 5 Hz), scaled by kOutputGain, resampled from doc().sampleRate(), which
+  // can change while running, by a StreamResampler, and passed through
+  // softClip(). Headroom: a single full-volume oscillator through an open
+  // filter peaks at kOutputGain (0.5) and one factory-sound voice at about
+  // 0.26, so normal play stays inside softClip()'s linear region (to 0.75)
+  // and is untouched; a loud chord rounds off towards +-1.0 and never passes
+  // it. The CLI's WAVs and the app therefore match.
   // The resampler's group delay (32 DOC scans, about 1 ms) means the first
   // samples after power-on are silence. Mix samples made by runCycles() outside
   // render() are not part of the audio stream. hostRate may differ between
@@ -111,10 +123,21 @@ class Machine : private Bus {
   // (8 kHz-384 kHz); otherwise (NaN, infinity, 0, negative, out of range, as a
   // host may report before prepareToPlay) render() writes `frames` zeros,
   // advances nothing and returns.
+  // Real time: after prepare(maxFrames, hostRate), render() with
+  // frames <= maxFrames never allocates, frees or locks (a larger request still
+  // works but may allocate). prepare() itself allocates, so call it off the
+  // audio thread; it only reserves capacity (and sets the output rate), so it
+  // is safe at any time and changes no emulated state. powerOn() and
+  // loadState() keep the reserved capacity.
+  void prepare(size_t maxFrames, double hostRate);
   void render(float* out, size_t frames, double hostRate);
-  // Output scale of render(): headroom for two coincident full-volume
-  // oscillators before the stream passes +-1.0.
+  // Output scale of render(), before the soft clip.
   static constexpr float kOutputGain = 0.5f;
+  // Linear to +-0.75, then 0.75 + 0.25 tanh((|x| - 0.75) / 0.25): odd,
+  // monotonic, continuous in value and slope, and never beyond +-1.0 for any finite
+  // input (float rounding makes it exactly 1.0 past |x| of about 3). render()
+  // applies it to every sample it hands out.
+  static float softClip(float x);
   static constexpr double kMinHostRate = 8000.0, kMaxHostRate = 384000.0;
 
   // Whole-machine snapshot, for restoring a session exactly (a DAW project).
@@ -176,7 +199,10 @@ class Machine : private Bus {
   FilterBank filters_;
   uint32_t masterRem_ = 0;  // master clocks owed to the DOC, x kCpuClockHz
   std::unique_ptr<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
-  std::deque<uint8_t> midiIn_;
+  std::array<uint8_t, kMidiQueueCapacity> midiRing_{};  // MIDI input ring (saved, oldest first)
+  size_t midiHead_ = 0;         // index of the oldest queued byte
+  size_t midiCount_ = 0;        // bytes queued
+  uint64_t midiOverflows_ = 0;  // bytes queueMidi dropped (host diagnostics, not saved)
   uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives
   std::function<void(uint16_t, const Regs&)> trace_;  // host-side, not saved
 

@@ -18,6 +18,8 @@ add_executable(mirage_tests
   test_snapshot.cpp
   test_sha1.cpp
   test_cli_run.cpp
+  test_realtime.cpp
+  alloc_counter.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_cli_core Catch2::Catch2WithMain)
 target_include_directories(mirage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../engine/src)

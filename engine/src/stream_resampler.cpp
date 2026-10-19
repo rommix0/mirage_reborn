@@ -59,6 +59,7 @@ double clampRate(double hz) {
 StreamResampler::StreamResampler(double outRate)
     : outRate_(clampRate(outRate)), inRate_(outRate_), lastRequested_(outRate_) {
   (void)kernel();
+  changes_.reserve(kMaxChanges + 1);  // setInputRate never allocates afterwards
 }
 
 void StreamResampler::setOutputRate(double hz) { outRate_ = clampRate(hz); }
@@ -196,7 +197,7 @@ void StreamResampler::load(StateReader& r) {
   count_ = count;
   posInt_ = posInt;
   posFrac_ = posFrac;
-  changes_ = std::move(changes);
+  changes_.assign(changes.begin(), changes.end());  // keeps the reserved capacity
   ring_ = ring;
 }
 
