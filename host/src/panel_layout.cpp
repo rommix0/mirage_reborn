@@ -6,7 +6,8 @@ namespace mirage {
 
 namespace {
 
-// Starting geometry from the plan's Panel layout section (1000 x 300 panel units).
+// Geometry from the plan's Panel layout section (1000 x 300 panel units), refined against
+// the rendered panel (Mirage --panel-png).
 constexpr float kButtonW = 40, kButtonH = 20;
 
 // Column centre x.
@@ -61,12 +62,16 @@ constexpr std::array<PanelHeading, 6> kHeadings = {{
 
 constexpr PanelGeometry kGeometry = {
     /*width*/ 1000, /*height*/ 300,
-    /*display*/ {186, 34, 100, 58},
-    /*volume*/ {kColSlider - 10, 40, 20, 160},
+    /*display*/ {190, 34, 100, 58},
+    /*volume*/ {kColSlider - 16, 40, 32, 156},  // ticks at its left, the fader slot down its centre
     /*driveSlot*/ {140, 250, 280, 20},
     /*driveLed*/ {436, 256, 8, 8},  // centred on (440, 260)
-    /*ensoniqBadge*/ {20, 180, 100, 30},
-    /*mirageLogo*/ {680, 60, 280, 90},
+    /*ensoniqBadge*/ {20, 148, 96, 26},  // centred on the pinstripe
+    /*mirageLogo*/ {680, 50, 280, 80},
+    /*mirageSubtitle*/ {680, 136, 280, 12},
+    /*rowRuleY*/ {(kRow1 + kRow2) / 2 - 6, (kRow2 + kRow3) / 2 - 6},  // above the next row's labels
+    /*pinstripeY*/ (kRow3 + kRow4) / 2 - 6,
+    /*headingRuleY*/ 204,
     /*headingY*/ 214,
     /*lipY*/ 230,
 };

@@ -6,6 +6,7 @@
 
 #include "AudioEngine.h"
 #include "MainWindow.h"
+#include "PanelComponent.h"
 #include "Settings.h"
 #include "mirage/boot_rom.h"
 #include "mirage/realtime_host.h"
@@ -20,13 +21,19 @@ juce::String sha1Hex(const std::array<uint8_t, 20>& sha) {
   return s;
 }
 
-// Renders the main window's content at 1200 px wide to a PNG (--panel-png).
-// Needs neither an audio device nor the ROM.
+// Renders the front panel at 1200 px wide to a PNG (--panel-png), showing a
+// fixed sample state: "2." "1" on the display (the left dot is the Param
+// indicator), a disk in and the drive LED on. Needs neither an audio device nor
+// the ROM.
 int renderPanelPng(const juce::String& path) {
-  MirageContent content(nullptr, nullptr);
+  mirage::HostStatus status;
+  status.display = {0xDB, 0x06};
+  status.driveActive = true;
+  status.diskPresent = true;
+  PanelComponent panel(status, "Sound Disk 1.img");
   const int w = 1200;
-  content.setSize(w, juce::roundToInt(w * (double)content.getHeight() / content.getWidth()));
-  auto image = content.createComponentSnapshot(content.getLocalBounds(), true, 1.0f);
+  panel.setSize(w, juce::roundToInt(w * (double)panel.getHeight() / panel.getWidth()));
+  auto image = panel.createComponentSnapshot(panel.getLocalBounds(), true, 1.0f);
   const auto file = juce::File::getCurrentWorkingDirectory().getChildFile(path);
   file.deleteFile();
   juce::FileOutputStream out(file);

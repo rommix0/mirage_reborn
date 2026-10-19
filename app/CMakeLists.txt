@@ -22,6 +22,7 @@ juce_add_gui_app(MirageApp
 target_sources(MirageApp PRIVATE
   src/Main.cpp
   src/MainWindow.cpp
+  src/PanelComponent.cpp
   src/AudioEngine.cpp
   src/Settings.cpp)
 

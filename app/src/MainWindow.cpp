@@ -1,23 +1,24 @@
 #include "MainWindow.h"
 
+#include <optional>
+
 // ---- MirageContent ---------------------------------------------------------
 
-class MirageContent::Placeholder : public juce::Component {
- public:
-  void paint(juce::Graphics& g) override {
-    g.fillAll(juce::Colour(0xff1c1c20));
-    g.setColour(juce::Colour(0xffd8d8d8));
-    g.setFont(juce::FontOptions(48.0f, juce::Font::bold));
-    g.drawText("Mirage", getLocalBounds(), juce::Justification::centred);
-  }
-};
-
-MirageContent::MirageContent(mirage::RealtimeHost* host, AudioEngine* engine)
-    : host_(host), engine_(engine), panel_(std::make_unique<Placeholder>()) {
+MirageContent::MirageContent(mirage::RealtimeHost& host, AudioEngine& engine)
+    : host_(host), engine_(engine), panel_(std::make_unique<PanelComponent>(host)) {
+  auto& volume = panel_->volumeSlider();
+  volume.setValue(engine_.volume(), juce::dontSendNotification);
+  volume.onValueChange = [this] { engine_.setVolume(float(panel_->volumeSlider().getValue())); };
   addAndMakeVisible(*panel_);
-  setSize(960, 208 + kStripHeight);
+  const auto& geo = mirage::panelGeometry();
+  setSize(juce::roundToInt(geo.width), juce::roundToInt(geo.height) + kStripHeight);
   text_ = buildText();
   startTimerHz(10);
+}
+
+void MirageContent::setDiskName(const juce::String& name) {
+  diskName_ = name;
+  panel_->setDiskName(name);
 }
 
 void MirageContent::resized() {
@@ -49,23 +50,18 @@ MirageContent::StripText MirageContent::buildText() const {
   StripText t;
   t.left = "No disk";
   t.middle = "No audio device";
-  if (host_ != nullptr) {
-    const auto s = host_->status();
-    if (s.diskPresent) {
-      t.left = diskName_.isNotEmpty() ? diskName_ : juce::String("Disk");
-      if (s.diskDirty) t.left << " (modified)";
-    }
-    juce::StringArray problems;
-    if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
-    if (s.midiDropped != 0)
-      problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
-    t.right = problems.joinIntoString("   ");
+  const auto s = host_.status();
+  if (s.diskPresent) {
+    t.left = diskName_.isNotEmpty() ? diskName_ : juce::String("Disk");
+    if (s.diskDirty) t.left << " (modified)";
   }
-  if (engine_ != nullptr) {
-    if (auto* dev = engine_->devices().getCurrentAudioDevice())
-      t.middle = dev->getName() + " @ " + juce::String(juce::roundToInt(dev->getCurrentSampleRate())) +
-                 " Hz   CPU " + juce::String(juce::roundToInt(engine_->cpuLoad() * 100.0)) + "%";
-  }
+  juce::StringArray problems;
+  if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
+  if (s.midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
+  t.right = problems.joinIntoString("   ");
+  if (auto* dev = engine_.devices().getCurrentAudioDevice())
+    t.middle = dev->getName() + " @ " + juce::String(juce::roundToInt(dev->getCurrentSampleRate())) +
+               " Hz   CPU " + juce::String(juce::roundToInt(engine_.cpuLoad() * 100.0)) + "%";
   return t;
 }
 
@@ -77,13 +73,15 @@ MainWindow::MainWindow(mirage::RealtimeHost& host, AudioEngine& engine, Settings
       engine_(engine),
       settings_(settings) {
   setUsingNativeTitleBar(true);
-  content_ = new MirageContent(&host, &engine);
+  content_ = new MirageContent(host, engine);
   setContentOwned(content_, true);
   setResizable(true, true);
+  setResizeLimits(500, 200, 8000, 4000);  // the panel letterboxes to keep its aspect ratio
 
   commands_.registerAllCommandsForTarget(this);
   commands_.setFirstCommandTarget(this);
   addKeyListener(commands_.getKeyMappings());
+  addKeyListener(this);
   setMenuBar(this);
 
   centreWithSize(getWidth(), getHeight());
@@ -91,11 +89,58 @@ MainWindow::MainWindow(mirage::RealtimeHost& host, AudioEngine& engine, Settings
 }
 
 MainWindow::~MainWindow() {
+  removeKeyListener(this);
   setMenuBar(nullptr);
   clearContentComponent();
 }
 
 void MainWindow::closeButtonPressed() { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
+
+void MainWindow::activeWindowStatusChanged() {
+  juce::DocumentWindow::activeWindowStatusChanged();
+  // Key-up events go to the active window, so let go of everything held.
+  if (!isActiveWindow()) releaseHeldKeys(true);
+}
+
+bool MainWindow::keyPressed(const juce::KeyPress& key, juce::Component*) {
+  using juce::KeyPress;
+  const auto mods = key.getModifiers();
+  if (mods.isCtrlDown() || mods.isAltDown() || mods.isCommandDown()) return false;  // menus
+  // Modal components include the alert and dialog windows and JUCE's
+  // stand-in for a native file chooser.
+  if (juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0) return false;
+  const int code = key.getKeyCode();
+  std::optional<mirage::PanelKey> panelKey;
+  if (code == KeyPress::upKey)
+    panelKey = mirage::panelKeyForShortcut(mirage::ShortcutKey::Up);
+  else if (code == KeyPress::downKey)
+    panelKey = mirage::panelKeyForShortcut(mirage::ShortcutKey::Down);
+  else if (code == KeyPress::returnKey)
+    panelKey = mirage::panelKeyForShortcut(mirage::ShortcutKey::Return);
+  else if (code == KeyPress::escapeKey)
+    panelKey = mirage::panelKeyForShortcut(mirage::ShortcutKey::Escape);
+  else
+    panelKey = mirage::panelKeyForChar(char32_t(key.getTextCharacter()));
+  if (!panelKey) return false;
+  for (const HeldKey& h : held_)
+    if (h.keyCode == code) return true;  // auto-repeat
+  held_.push_back({code, *panelKey});
+  content_->panel().press(*panelKey, true);
+  return true;
+}
+
+bool MainWindow::keyStateChanged(bool, juce::Component*) {
+  releaseHeldKeys(false);
+  return false;
+}
+
+void MainWindow::releaseHeldKeys(bool all) {
+  for (size_t i = held_.size(); i-- > 0;) {
+    if (!all && juce::KeyPress::isKeyCurrentlyDown(held_[i].keyCode)) continue;
+    content_->panel().press(held_[i].key, false);
+    held_.erase(held_.begin() + std::ptrdiff_t(i));
+  }
+}
 
 juce::StringArray MainWindow::getMenuBarNames() { return {"File", "Machine", "MIDI", "Audio"}; }
 
