@@ -23,6 +23,7 @@ namespace mirage {
 struct HostStatus {
   DisplayState display;
   bool driveActive = false, diskPresent = false, diskDirty = false;
+  uint64_t diskWrites = 0;  // the inserted disk's DiskImage::writeCount(); 0 with no disk
   uint64_t illegalOps = 0, midiDropped = 0, cycles = 0;
 };
 
@@ -185,7 +186,7 @@ class RealtimeHost {
   // Published status (relaxed: each is a separate value; see HostStatus).
   std::atomic<uint16_t> display_{0};  // left | right << 8
   std::atomic<bool> driveActive_{false}, diskPresent_{false}, diskDirty_{false};
-  std::atomic<uint64_t> illegalOps_{0}, cycles_{0};
+  std::atomic<uint64_t> diskWrites_{0}, illegalOps_{0}, cycles_{0};
   std::atomic<uint64_t> midiDropped_{0};  // added to by the MIDI-input and audio threads
 };
 

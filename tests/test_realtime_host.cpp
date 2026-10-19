@@ -355,11 +355,13 @@ TEST_CASE("host copy returns the disk contents and mark-saved clears dirty only 
 
   REQUIRE(host.postInsert(filledDisk(0x11)));
   block(host, 64);
+  CHECK(host.status().diskWrites == 0);
   // The OS writes a sector (tests write it directly, between blocks).
   const std::vector<uint8_t> sector(1024, 0x5A);
   host.machineForTest().disk()->writeSector(3, 1, sector);
   block(host, 64);
   CHECK(host.status().diskDirty);
+  CHECK(host.status().diskWrites == 1);
 
   REQUIRE(host.postCopyDisk(std::move(none->disk)));
   block(host, 64);
@@ -378,6 +380,7 @@ TEST_CASE("host copy returns the disk contents and mark-saved clears dirty only 
   REQUIRE(host.postMarkSaved(copy->writeCount));
   block(host, 64);
   CHECK(host.status().diskDirty);
+  CHECK(host.status().diskWrites == 2);
   CHECK(host.machineForTest().disk()->dirty());
   REQUIRE(host.postMarkSaved(2));
   block(host, 64);

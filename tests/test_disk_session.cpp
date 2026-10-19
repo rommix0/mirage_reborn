@@ -61,7 +61,8 @@ fs::path makeImage(const TempDir& tmp, const std::string& name, uint8_t fill) {
 
 struct Rig {
   RealtimeHost host{kIdleRom};
-  DiskSession session{host};
+  double now = 0.0;  // the session's clock, in seconds; tests move it by hand
+  DiskSession session{host, [this] { return now; }};
   Rig() { host.prepare(64, 48000); }
   void pump() {
     std::array<float, 64> buf{};
@@ -225,6 +226,97 @@ TEST_CASE("session save as switches the path") {
   REQUIRE(rig.finishSave().ok);
   CHECK(readBytes(copy)[0] == 0x78);
   CHECK(readBytes(original)[0] == 0x00);
+}
+
+TEST_CASE("session is clean right after a successful save, before the host confirms") {
+  TempDir tmp("mirage_session_clean_after_save");
+  const auto file = makeImage(tmp, "a.img", 0x00);
+  Rig rig;
+  REQUIRE(rig.session.open(file).empty());
+  rig.pump();
+  rig.osWrite(0x01);
+  rig.pump();
+  REQUIRE(rig.session.needsSaveBeforeReplacing());
+  REQUIRE(rig.session.startSave());
+  REQUIRE(rig.finishSave().ok);
+  // The mark-saved is not applied yet (no process() since), and the published
+  // status still says dirty, but the saved copy holds every write.
+  REQUIRE(rig.host.status().diskDirty);
+  CHECK_FALSE(rig.session.needsSaveBeforeReplacing());
+  CHECK(rig.session.title() == "a.img");
+  // A newer write makes it modified again.
+  rig.pump();
+  rig.osWrite(0x02);
+  rig.pump();
+  CHECK(rig.session.needsSaveBeforeReplacing());
+  CHECK(rig.session.title() == "a.img (modified)");
+}
+
+TEST_CASE("session keeps modified when the OS writes between the copy and the mark") {
+  TempDir tmp("mirage_session_write_race");
+  const auto file = makeImage(tmp, "a.img", 0x00);
+  Rig rig;
+  REQUIRE(rig.session.open(file).empty());
+  rig.pump();
+  rig.osWrite(0x11);
+  rig.pump();
+  REQUIRE(rig.session.startSave());
+  rig.pump();         // the copy is taken
+  rig.osWrite(0x22);  // a write the copy does not hold
+  const auto outcome = rig.session.poll();  // the file is written, the mark posted
+  REQUIRE(outcome.has_value());
+  REQUIRE(outcome->ok);
+  rig.pump();  // the mark is ignored: the write count moved on
+  CHECK(rig.host.status().diskDirty);
+  CHECK(rig.session.needsSaveBeforeReplacing());
+  CHECK(rig.session.title() == "a.img (modified)");
+  CHECK(readBytes(file)[0] == 0x11);  // the pre-write bytes
+}
+
+TEST_CASE("session save times out when the audio thread is not running") {
+  TempDir tmp("mirage_session_timeout");
+  const auto file = makeImage(tmp, "a.img", 0x00);
+  Rig rig;
+  REQUIRE(rig.session.open(file).empty());
+  rig.pump();
+  rig.osWrite(0x33);
+  rig.pump();
+  REQUIRE(rig.session.startSave());
+  // No process() calls: the copy never comes back.
+  rig.now = DiskSession::kSaveTimeoutSeconds - 0.1;
+  CHECK_FALSE(rig.session.poll().has_value());
+  CHECK(rig.session.saving());
+  rig.now = DiskSession::kSaveTimeoutSeconds;
+  const auto outcome = rig.session.poll();
+  REQUIRE(outcome.has_value());
+  CHECK_FALSE(outcome->ok);
+  CHECK(outcome->message ==
+        "The audio engine is not running; the disk was not saved. Check Audio Settings.");
+  CHECK(outcome->path == file);
+  CHECK_FALSE(rig.session.saving());
+  CHECK(readBytes(file)[0] == 0x00);
+
+  SECTION("a late copy is freed, and a new save still works") {
+    rig.pump();  // the audio thread resumes: the stale copy comes back
+    CHECK_FALSE(rig.session.poll().has_value());
+    CHECK_FALSE(rig.host.takeReturnedDisk().has_value());  // freed by poll()
+    CHECK(readBytes(file)[0] == 0x00);                      // and never written
+    CHECK(rig.session.needsSaveBeforeReplacing());
+    REQUIRE(rig.session.startSave());
+    const SaveOutcome again = rig.finishSave();
+    CHECK(again.ok);
+    CHECK(readBytes(file)[0] == 0x33);
+  }
+  SECTION("a new save started before the late copy returns takes its own copy") {
+    REQUIRE(rig.session.startSave());
+    rig.pump();  // both copies come back in one block, the stale one first
+    const auto again = rig.session.poll();
+    REQUIRE(again.has_value());
+    CHECK(again->ok);
+    CHECK_FALSE(rig.session.poll().has_value());
+    CHECK_FALSE(rig.host.takeReturnedDisk().has_value());
+    CHECK(readBytes(file)[0] == 0x33);
+  }
 }
 
 TEST_CASE("session save with no disk reports it") {

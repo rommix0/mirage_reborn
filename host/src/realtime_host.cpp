@@ -226,6 +226,7 @@ void RealtimeHost::publishStatus() {
   const DiskImage* disk = machine_->disk();
   diskPresent_.store(disk != nullptr, kRelaxed);
   diskDirty_.store(disk && disk->dirty(), kRelaxed);
+  diskWrites_.store(disk ? disk->writeCount() : 0, kRelaxed);
   illegalOps_.store(machine_->cpu().illegalCount(), kRelaxed);
   cycles_.store(machine_->cycles(), kRelaxed);
 }
@@ -319,6 +320,7 @@ HostStatus RealtimeHost::status() const {
   s.driveActive = driveActive_.load(kRelaxed);
   s.diskPresent = diskPresent_.load(kRelaxed);
   s.diskDirty = diskDirty_.load(kRelaxed);
+  s.diskWrites = diskWrites_.load(kRelaxed);
   s.illegalOps = illegalOps_.load(kRelaxed);
   s.midiDropped = midiDropped_.load(kRelaxed);
   s.cycles = cycles_.load(kRelaxed);
