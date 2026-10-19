@@ -36,8 +36,11 @@ class StateWriter {
 };
 
 // Reads what StateWriter wrote. Overrun or tag mismatch throws StateError.
+// The reader only views the bytes it is given, so they must outlive it; a
+// temporary vector is refused at compile time.
 class StateReader {
  public:
+  StateReader(std::vector<uint8_t>&&) = delete;
   explicit StateReader(std::span<const uint8_t> data) : data_(data) {}
   uint8_t u8();
   uint16_t u16();

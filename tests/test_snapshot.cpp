@@ -44,6 +44,27 @@ uint32_t getU32(const std::vector<uint8_t>& b, size_t at) {
          uint32_t(b[at + 3]) << 24;
 }
 
+void setU64(std::vector<uint8_t>& b, size_t at, uint64_t v) {
+  for (int i = 0; i < 8; ++i) b[at + size_t(i)] = uint8_t(v >> (8 * i));
+}
+
+// The offsets of the MCHN section's fields: the 28-byte header (magic, version,
+// SHA-1), the "MCHN" tag, then u8 bank, u64 cycles, u32 credit.
+constexpr size_t kCreditAt = 28 + 4 + 1 + 8;
+
+// The one place in the blob that holds `value` as a little-endian u64.
+size_t findU64(const std::vector<uint8_t>& b, uint64_t value) {
+  std::array<uint8_t, 8> needle{};
+  for (int i = 0; i < 8; ++i) needle[size_t(i)] = uint8_t(value >> (8 * i));
+  size_t found = size_t(-1), hits = 0;
+  for (auto it = b.begin(); (it = std::search(it, b.end(), needle.begin(), needle.end())) != b.end(); ++it) {
+    found = size_t(it - b.begin());
+    ++hits;
+  }
+  REQUIRE(hits == 1);
+  return found;
+}
+
 void note(Machine& m, uint8_t status, uint8_t key, uint8_t vel) {
   const uint8_t msg[] = {status, key, vel};
   m.queueMidi(msg);
@@ -76,6 +97,99 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 2") {
   CHECK(getU32(snap, 0) == fourcc("MIRG"));
   CHECK(getU32(snap, 4) == Machine::kSnapshotVersion);
   CHECK(Machine::kSnapshotVersion == 2);
+}
+
+TEST_CASE("snapshot with an out-of-range credit is rejected and the machine is unchanged") {
+  Machine src(idleRom());
+  src.powerOn();
+  src.runCycles(1234);
+  const auto snap = src.saveState();
+  CHECK(getU32(snap, kCreditAt) <= 64);
+
+  Machine m(idleRom());
+  m.powerOn();
+  m.runCycles(77);
+  const auto before = m.saveState();
+  const auto cycles = m.cycles();
+  for (uint32_t credit : {65u, 1000u, 0xFFFFFFFFu}) {
+    INFO("credit " << credit);
+    auto bad = snap;
+    setU32(bad, kCreditAt, credit);
+    CHECK_THROWS_AS(m.loadState(bad), StateError);
+    CHECK(m.saveState() == before);
+    CHECK(m.cycles() == cycles);
+  }
+  auto edge = snap;
+  setU32(edge, kCreditAt, 64);  // the largest credit is still accepted
+  m.loadState(edge);
+}
+
+TEST_CASE("snapshot with a far-future next-MIDI cycle is rejected") {
+  Machine src(idleRom());
+  src.powerOn();
+  src.runCycles(5000);
+  const uint64_t cycles = src.cycles();
+  note(src, 0x90, 60, 100);
+  const auto snap = src.saveState();
+  const size_t at = findU64(snap, cycles + 640);  // the first byte is due 640 cycles on
+
+  Machine m(idleRom());
+  m.powerOn();
+  m.runCycles(77);
+  const auto before = m.saveState();
+  const auto rejects = [&](uint64_t next) {
+    INFO("nextMidiCycle " << next);
+    auto bad = snap;
+    setU64(bad, at, next);
+    CHECK_THROWS_AS(m.loadState(bad), StateError);
+    CHECK(m.saveState() == before);
+  };
+  rejects(cycles + 641);
+  rejects(cycles + 1000000);
+  rejects(0xFFFFFFFFFFFFFFFFull);
+  rejects(cycles - 64);  // behind by a whole 64 cycles: no instruction takes that long
+  rejects(0);
+
+  // The ends of the legal range load.
+  for (uint64_t next : {cycles - 63, cycles, cycles + 640}) {
+    INFO("nextMidiCycle " << next);
+    auto ok = snap;
+    setU64(ok, at, next);
+    m.loadState(ok);
+    CHECK(m.midiQueueDepth() == 3);
+  }
+
+  // With nothing queued the field is a stale leftover and is not checked.
+  note(src, 0x80, 60, 0);
+  src.flushMidi();
+  auto stale = src.saveState();
+  setU64(stale, findU64(stale, cycles + 640), 0xFFFFFFFFFFFFFFFFull);
+  m.loadState(stale);
+  CHECK(m.midiQueueDepth() == 0);
+}
+
+TEST_CASE("snapshot: every state a running machine reaches with MIDI queued loads back") {
+  // The loadState bounds on credit and the next-MIDI cycle must never reject a
+  // snapshot the machine itself wrote: queue at random moments (idle line and
+  // busy line), run for random spans, and round-trip each time.
+  Machine m(idleRom());
+  Machine other(idleRom());
+  m.powerOn();
+  uint32_t seed = 12345;
+  const auto rnd = [&seed](uint32_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return (seed >> 8) % n;
+  };
+  for (int i = 0; i < 400; ++i) {
+    if (rnd(3) == 0) {
+      std::vector<uint8_t> bytes(1 + rnd(4), 0xF8);
+      m.queueMidi(bytes);
+    }
+    m.runCycles(1 + rnd(1500));
+    const auto snap = m.saveState();
+    other.loadState(snap);
+    REQUIRE(other.saveState() == snap);
+  }
 }
 
 TEST_CASE("snapshot: the ROM's SHA-1 follows the version, and a different ROM is rejected") {

@@ -1,5 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
+#include <type_traits>
+#include <vector>
+
 #include "mirage/state_io.h"
 
 using namespace mirage;
@@ -34,4 +38,14 @@ TEST_CASE("state is little-endian and bytes round-trip") {
   REQUIRE(out[0]==7); REQUIRE(out[2]==9);
   REQUIRE(r.atEnd());
   REQUIRE_THROWS_AS(r.bytes(out), StateError);
+}
+
+TEST_CASE("StateReader cannot be built from a temporary vector") {
+  // The reader only views its bytes, so a temporary would leave it dangling.
+  static_assert(!std::is_constructible_v<StateReader, std::vector<uint8_t>&&>);
+  static_assert(std::is_constructible_v<StateReader, const std::vector<uint8_t>&>);
+  static_assert(std::is_constructible_v<StateReader, std::vector<uint8_t>&>);
+  const std::vector<uint8_t> buf = {1, 2};
+  StateReader r(buf);
+  REQUIRE(r.u16() == 0x0201);
 }

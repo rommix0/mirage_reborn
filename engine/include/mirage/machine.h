@@ -98,11 +98,23 @@ class Machine : private Bus {
   DiskImage* disk() { return disk_.get(); }
   const DiskImage* disk() const { return disk_.get(); }
   bool driveActive() const { return wd_.motor(); }
-  Wd1772& fdc() { return wd_; }  // diagnostics: sectorsRead(), diskChanged()
+  // Read-only views of the chips, for diagnostics (sectorsRead(), diskChanged(),
+  // sampleRate()). They are const so a host cannot change chip state behind
+  // the Machine's back (its IRQ/NMI wiring would go stale); see debugWrite().
+  const Wd1772& fdc() const { return wd_; }
   // The DOC sees all 128 KB of sample RAM and is clocked by the 8 MHz master
   // clock. Its onFrame and adcRead callbacks belong to the Machine (they drive
   // the filters and the A/D mux); do not replace them.
-  Doc5503& doc() { return doc_; }
+  const Doc5503& doc() const { return doc_; }
+  // The CPU's view of the address space, with the same I/O side effects as a
+  // real CPU access, for tests and diagnostics. A read of $ECE0 pops the DOC
+  // interrupt FIFO, a read of the FDC data register clears DRQ, a write to a
+  // chip register acts on the chip, and the IRQ/NMI/FIRQ lines are updated
+  // afterwards. peek() is the side-effect-free read. DOC register r is at
+  // $EC00 + r. Not for the audio thread while the machine is running on
+  // another thread.
+  uint8_t debugRead(uint16_t addr) { return read(addr); }
+  void debugWrite(uint16_t addr, uint8_t value) { write(addr, value); }
   const FilterBank& filters() const { return filters_; }
   // Host audio tap (not saved): the filtered voice mix, once per DOC scan at
   // doc().sampleRate(). One full-volume oscillator through an open filter
@@ -162,7 +174,9 @@ class Machine : private Bus {
   // true inside render().
   // A snapshot of a different version, one taken with a different boot ROM
   // (StateError "snapshot was taken with a different boot ROM"), a wrong magic, a truncated or corrupt
-  // blob or trailing bytes throw StateError and leave the machine untouched.
+  // blob or trailing bytes throw StateError and leave the machine untouched, as do
+  // values no running machine can have: a cycle credit over 64, or (with MIDI
+  // queued) a next-delivery cycle outside (cycles - 64, cycles + 640].
   std::vector<uint8_t> saveState() const;
   void loadState(std::span<const uint8_t> data);
   // SHA-1 of the boot ROM, computed once by the constructor.

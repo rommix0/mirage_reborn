@@ -289,7 +289,7 @@ TEST_CASE("render: silence from an idle machine, and the host rate can change") 
   std::vector<float> v(4800);
   m->render(v.data(), v.size(), 48000);
   m->render(v.data(), 2205, 22050);
-  m->doc().write(0xE1, 0x3E);  // 16 oscillators: the scan rate changes under the stream
+  m->debugWrite(0xECE1, 0x3E);  // 16 oscillators: the scan rate changes under the stream
   m->render(v.data(), v.size(), 96000);
   CHECK(std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); }));
   CHECK(rms(v, 0, v.size()) < 1e-3);

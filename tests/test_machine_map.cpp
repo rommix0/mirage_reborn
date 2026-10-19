@@ -390,7 +390,7 @@ TEST_CASE("machine DOC registers are mapped at $EC00-$ECEF") {
   m.runCycles(30);
   CHECK(m.peek(0x8000) == 0x5A);  // wavetable pointer of oscillator 5
   CHECK(m.peek(0x8001) == 0xC1);  // OER after reset: X bits read 1
-  CHECK(m.doc().read(0x85) == 0x5A);
+  CHECK(m.debugRead(0xEC85) == 0x5A);
   CHECK(m.peek(0xEC85) == 0xFF);  // peek has no I/O side effects
 }
 
@@ -402,10 +402,10 @@ TEST_CASE("machine DOC reads sample RAM; BS selects the upper 64 KB") {
   Machine m(rom);
   m.powerOn();
   m.runCycles(100);
-  CHECK(m.doc().read(0x60) == 0x99);
-  m.doc().write(0xC0, 0x00);  // BS = 0
+  CHECK(m.debugRead(0xEC60) == 0x99);
+  m.debugWrite(0xECC0, 0x00);  // BS = 0
   m.runCycles(20);
-  CHECK(m.doc().read(0x60) == 0x77);
+  CHECK(m.debugRead(0xEC60) == 0x77);
 }
 
 TEST_CASE("machine DOC interrupt reaches the CPU IRQ line; the handler reads the OIR") {
@@ -448,7 +448,7 @@ TEST_CASE("machine save/load includes the DOC") {
   Machine other(rom);
   other.powerOn();
   other.loadState(snap);
-  CHECK(other.doc().read(0x85) == 0x5A);
+  CHECK(other.debugRead(0xEC85) == 0x5A);
   CHECK(other.doc().enabledOscillators() == 32);
   CHECK(other.saveState() == snap);
   m.runCycles(1001);

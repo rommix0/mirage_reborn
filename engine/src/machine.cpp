@@ -17,6 +17,11 @@ constexpr uint16_t kRamBase = 0x8000, kExpBase = 0xC000, kIoBase = 0xE000, kRomB
 constexpr uint32_t kQuarter = 0x8000;
 // E cycles per MIDI byte on the wire (640 at 2 MHz).
 constexpr uint64_t kMidiByteCycles = uint64_t(kMidiByteSeconds * kCpuClockHz + 0.5);
+// loadState bounds. A run overshoots its request by less than one instruction
+// (the longest is about 20 cycles); a queued MIDI byte may be due no more than
+// this many cycles in the past.
+constexpr uint32_t kMaxCredit = 64;
+constexpr uint64_t kMidiBehindSlack = 64;
 // A DOC channel sum (byte - 128) * volume as a voltage: one full-volume
 // oscillator swings about +-1.0.
 constexpr float kVoiceScale = 1.0f / 32768.0f;
@@ -389,12 +394,17 @@ void Machine::loadState(std::span<const uint8_t> data) {
   if (bank > 3) throw StateError("machine: bad sample bank");
   const uint64_t cycles = r.u64();
   const uint32_t credit = r.u32();
-  auto ram = ram_;
-  auto exp = exp_;
-  auto sample = sample_;
-  r.bytes(ram);
-  r.bytes(exp);
-  r.bytes(sample);
+  // Runs only ever overshoot by part of one instruction, so more than this is
+  // not a state the machine can have been in.
+  if (credit > kMaxCredit) throw StateError("machine: bad cycle credit");
+  // The RAM temporaries (160 KB with the sample RAM) live on the heap: loadState
+  // may run on a thread with a small stack.
+  auto ram = std::make_unique<decltype(ram_)>(ram_);
+  auto exp = std::make_unique<decltype(exp_)>(exp_);
+  auto sample = std::make_unique<decltype(sample_)>(sample_);
+  r.bytes(*ram);
+  r.bytes(*exp);
+  r.bytes(*sample);
   // Each device load commits only on success, but a later one can still fail
   // (or trailing data be found), so the devices are put back from a snapshot.
   StateWriter before;
@@ -430,6 +440,17 @@ void Machine::loadState(std::span<const uint8_t> data) {
     nextMidi = r.u64();
     const uint32_t n = r.u32();
     if (n > kMidiQueueCapacity) throw StateError("machine: bad MIDI queue");
+    // With bytes queued, the next arrival is one byte time after the previous
+    // one (or after queueMidi onto an idle line) and tickDevices delivers as
+    // soon as it is due, so it is always in (cycles, cycles + 640]. The lower
+    // bound allows 64 cycles of slack, far more than an instruction. Compared
+    // without unsigned wrap: cycles may be below 64. With nothing queued the
+    // field is a leftover and is not checked.
+    if (n != 0) {
+      const bool late = nextMidi <= cycles && cycles - nextMidi >= kMidiBehindSlack;
+      const bool early = nextMidi > cycles && nextMidi - cycles > kMidiByteCycles;
+      if (late || early) throw StateError("machine: bad next MIDI cycle");
+    }
     for (uint32_t i = 0; i < n; ++i) midi[i] = r.u8();  // a short file throws here
     midiCount = n;
     panel_.load(r);
@@ -451,9 +472,9 @@ void Machine::loadState(std::span<const uint8_t> data) {
   cycles_ = cycles;
   acia_.tick(0, cycles_);  // the ACIA stamps writes with the last tick's cycle
   credit_ = credit;
-  ram_ = ram;
-  exp_ = exp;
-  sample_ = sample;
+  ram_ = *ram;
+  exp_ = *exp;
+  sample_ = *sample;
   nextMidiCycle_ = nextMidi;
   masterRem_ = masterRem;
   midiRing_ = midi;
