@@ -319,3 +319,15 @@ TEST_CASE("disk image saveFile of a disk with an unformatted track throws and le
   CHECK_FALSE(fs::exists(tmpSibling(target)));
   fs::remove_all(dir);
 }
+
+TEST_CASE("disk image saveFile onto a directory target throws, removes the .tmp and leaves the directory intact") {
+  namespace fs = std::filesystem;
+  const auto dir = freshTempDir("mirage_disk_atomic_dirtarget");
+  const auto target = dir / "disk.img";
+  fs::create_directories(target);
+  auto d = DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes));
+  CHECK_THROWS_AS(d.saveFile(target), DiskImageError);
+  CHECK_FALSE(fs::exists(tmpSibling(target)));
+  CHECK(fs::is_directory(target));
+  fs::remove_all(dir);
+}
