@@ -183,6 +183,9 @@ Queues (all lock-free single-producer, single-consumer):
 
 ## Acceptance-1 checklist (by ear, on your machine)
 
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-19).
+
 Boot timing on the emulated clock (`docs/hardware/boot-rom.md` §13.6): the ROM
 hands the OS off at about 4.1 s, the OS main loop starts at about 5.2 s, the
 lower sound finishes loading at about 12.6 s and the display settles by about
@@ -200,7 +203,7 @@ lower sound finishes loading at about 12.6 s and the display settles by about
 5. Play. Then load another sound from the panel (*Load Upper/Lower*, a digit,
    Enter, as the OS 3.2 manual describes) and play it.
 
-Judging the sound is yours: nothing here can listen to it.
+Re-run it after changes to the audio path or the app.
 
 ## Known limitations
 
