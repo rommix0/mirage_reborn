@@ -26,7 +26,7 @@ voice mix (+ audio input, silent in Plan 1) --> compressor --> A/D mux input 0
   controller's ruling); the real board's order of VCA and filter is not visible from code.
 - The filters run **per DOC scan** (`Doc5503::onFrame`, 29,411.76 Hz with the 32 oscillators the
   ROM enables), in emulated time, so an A/D conversion sees the analog mix at that instant.
-- `Machine::onMix` hands the mix to the host once per scan (Task 12 will resample it).
+- `Machine::onMix` hands the raw mix to the host once per scan; `Machine::render` turns it into audio (section 8).
 - **Input noise.** Each filter input gets white noise of amplitude 1e-4 (a few hundred µV on a
   5 V swing; the CEM3328 data sheet gives 200 µV rms output noise wide open). It is what starts a
   self-oscillation when the DOC is silent, as during the calibration (section 4). Deterministic
@@ -217,3 +217,36 @@ before Task 11, 1.38-1.45 s after (8 filters × 29.4 kHz, plus the A/D path).
   through voice 8's filter (section 3.3).
 - Whether reading `$E400-$E41F` strobes anything (SP clears CVs with `CLR`, which reads first;
   the model ignores reads).
+
+## 8. Audio output (`Machine::render`, Task 12)
+
+`render(out, frames, hostRate)` runs the machine for exactly `frames / hostRate` seconds (the
+fractional E cycles are carried between calls; `runCycles` credits its overshoot, so the long-run
+total is exact) and returns mono samples at `hostRate`:
+
+```
+voice mix (once per DOC scan) -> DC blocker -> x kOutputGain -> StreamResampler -> host samples
+```
+
+- **DC blocker:** y = x - x1 + R y1, R = 1 - 2 pi 5 Hz / scan rate (corner 5 Hz; the coefficient
+  follows the scan rate).
+- **Gain:** `Machine::kOutputGain` = 0.5, fixed. The mix of one full-volume oscillator through an
+  open filter peaks at 1.0 (section 1), so one voice peaks at 0.5 and two coincident full-volume
+  voices just reach full scale. More are not limited (`writeWav` clamps). Measured on SND-A01 at
+  velocity 100: 0.26 (key 44), 0.12 (key 60).
+- **Resampler:** `StreamResampler` (`stream_resampler.*`): Kaiser-windowed sinc (beta 9, 64 taps,
+  cutoff 0.94 of the input Nyquist, table of 256 phases per sample, linear interpolation). It
+  tracks position in input samples, so a change of the input rate (the scan rate follows the
+  oscillator-enable count) only changes the step; it is applied where the new-rate samples start
+  in the stream, nothing resets and nothing clicks. When the input is faster than the output the
+  kernel is stretched by out/in, which band-limits to the output Nyquist. Group delay 32 input
+  samples (about 1.1 ms at 29.4 kHz): the first output samples after power-on are silence. There
+  is no interpolation inside the oscillator model.
+- **Hand-out:** the resampler produces one output more or fewer than requested from call to call;
+  `render` keeps the surplus for the next call and repeats the last sample on a shortfall.
+- **State:** resampler, DC blocker, the cycle fraction and the undelivered samples are part of
+  `saveState()` (after the filter bank). Mix made by `runCycles()` outside `render()` is not
+  resampled.
+- **What it sounds like:** the boot calibration (6.26-7.57 s on SND-A01) is audible as eight
+  filter self-oscillation tones, RMS 0.13, peak 0.29; the model does not mute the output
+  during it. After boot the noise floor is below 1e-3 RMS.

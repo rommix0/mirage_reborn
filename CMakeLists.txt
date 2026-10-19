@@ -52,8 +52,7 @@ mirage_cli_test(cli_run_note_without_duration 2 "run|--note|60:100@1"
                 "-DERR=^bad value for --note: 60:100@1/$")
 mirage_cli_test(cli_run_bad_midi_hex 2 "run|--midi-hex|ZZ@1"
                 "-DERR=^bad value for --midi-hex: ZZ@1/$")
-mirage_cli_test(cli_run_wav_not_available_yet 1 "run|--wav|out.wav|--rate|48000"
-                "-DERR=^--wav: not available yet .Task 12./--rate: not available yet .Task 12./$")
+mirage_cli_test(cli_run_bad_rate 2 "run|--rate|100" "-DERR=^bad value for --rate: 100/$")
 mirage_cli_test(cli_run_snapshot_not_available_yet 1 "run|--snapshot-in|x.snap"
                 "-DERR=^--snapshot-in: not available yet .Task 13./$")
 mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
@@ -66,3 +65,12 @@ mirage_cli_test(cli_run_with_events 0
                 "run|--seconds|3|--key|Enter@1:2|--key|enter@2:0.5|--note|60:100@1:0.5|--midi-hex|90 3C 64@2|--key|Cancel@5"
                 "-DNEEDS=${MIRAGE_TEST_ROM}"
                 "-DOUT=^display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: 0/cycles: 60000[0-3][0-9]/$")
+# --wav: an unwritable path fails after the run (exit 1); a real render of SND-A01 writes
+# the WAV and reports it (22050 Hz x 10 s = 220500 samples).
+mirage_cli_test(cli_run_wav_unwritable 1
+                "run|--seconds|0.1|--wav|${CMAKE_CURRENT_BINARY_DIR}/no_such_dir/out.wav"
+                "-DNEEDS=${MIRAGE_TEST_ROM}" "-DERR=^cannot write .*out.wav/$")
+mirage_cli_test(cli_run_wav_snd_a01 0
+                "run|--disk|${MIRAGE_TEST_SND_A01}|--seconds|10|--rate|22050|--note|60:100@9:0.5|--wav|${CMAKE_CURRENT_BINARY_DIR}/cli_test.wav"
+                "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
+                "-DOUT=^wav: .*cli_test.wav 220500 samples at 22050 Hz, peak [0-9.]+, rms [0-9.]+/display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: [2-9][0-9]+/cycles: 200000[0-3][0-9]/$")

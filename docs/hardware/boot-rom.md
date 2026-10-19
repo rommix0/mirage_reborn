@@ -614,3 +614,33 @@ has the details and evidence).
 | SND-A01: the 8 calls of `$F571` end at 6.390, 6.525, 6.667, 6.810, 6.946, 7.085, 7.223 and 7.358 s, each with B = `$7A` and Y = `$82`/`$83` (converged); the stored offsets `$B068 + $4D * n` are all 0. `$B935` (pitch-wheel centre, `$900A` = `$60`), then the main loop `$B900` at 7.36 s. | `tests/test_boot.cpp` (`$F5AC` trace), trace |
 | The display lights at the main loop (7.37 s), is dark while the OS loads the lower sound (sectors 23-155, until about 35 s), and is steady at `DB 06` from about 35 s. The same as §13.1 shifted 63 s earlier. | `mirage_cli run --seconds T` |
 | `EnsoniqOS/os32` (the same OS as SND-A01) and `masos` (calibration loop at `$BDC0`) give the same calibration times and results; `masos` settles at `DB 06`, 155 sectors. The Soundprocess OS disk (loop at `$9630`) calibrates the same way, settles at `3F 06` with 142 sectors at about 34 s. | `boot:` tests for masos and the Soundprocess OS |
+
+### 13.5 Boot completion and the first note (Task 12)
+
+**When is the OS ready to play?** There is no panel key to press: the OS loads the first sound
+(the lower one) by itself at boot (§13.1). The audio tests wait for a condition instead of a fixed
+time (`tests/test_audio.cpp`, `bootedSnapshot`): the display lit (either digit non-zero, sampled
+every 10 ms) for 1 s running, no FDC sector read for 2 s running, and the drive motor off
+(`Machine::driveActive()` false), capped at 90 s of emulated time. SND-A01 meets it at **37.2 s**
+(the display is steady from about 35 s, the 2 s of FDC quiet follows). The test boots once per
+process, stores `saveState()` and every section loads that copy (a boot is about 5 s of wall
+time in Debug).
+
+**What the first note looks like in the DOC** (probe: `Doc5503::read` of `$00-$DF` every
+millisecond after `90 nn 64`; sound 1 of SND-A01, wheels at rest, so FC includes no bend):
+
+| Keys | What the OS programs |
+|---|---|
+| 44-56 | Oscillators 0-3 on DOC channel 0 (osc 0/1 and the detuned osc 2/3, FC differs by 1), wave at `$4800`: FC `$01A6` (44) ... `$034C` (56), exactly 2:1 per octave, 1.0595 per semitone. The OS plays the sample as a chain of power-of-two tables, one per interrupt: 2 KB at `$4800` (swap, IE), 4 KB at `$5000`, 8 KB at `$6000` (one-shot); about 0.47 s at key 48 and 0.6 s at key 44. The volume register falls by 1 about every 15 ms from the key-on. |
+| 57-60 | `$8000` (57), `$A800`/`$B000` (58-60): 3 KB, FC `$01E2` (58), `$01FF` (59 and 60). The second oscillator is one-shot, not swap, so the note ends when it reaches the zero marker at `$B3F0`: 0.2 s. Keys 59 and 60 have the same FC (a split boundary of the sound, not a pitch error in the model). |
+| 61-63, 64+, 72 ... | Other samples (`$B600`, `$D800`, upper-bank `$0000`/`$8000` for 72). Key 72 plays a 32 KB table and lasts 1.3 s, decaying. |
+
+No key of sound 1 sustains while held: the last segment of every chain is a one-shot (`ctl` `$0A`/`$0B`),
+so the OS has no loop to re-point it to. This is the answer to the question left open in §13.3
+(the voice halting at the zero marker is the OS's own programming, not a DOC fault). Whether the
+factory sound really has its loop switch off is not checked here (the sound-parameter block of the
+disk image is not decoded).
+
+Output level (`Machine::render`, gain 0.5, vel 100): key 44 peaks 0.26 (RMS 0.045 over the held
+second), key 60 peaks 0.12 for 0.2 s. During the boot calibration (§13.4, 6.26-7.57 s) the eight
+self-oscillating filters are audible: RMS 0.13, peak 0.29.

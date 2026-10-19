@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include "mirage/disk_image.h"
 #include "mirage/machine.h"
 #include "mirage/panel.h"
+#include "mirage/wav_writer.h"
 #include "non_interactive.h"
 #include "run_options.h"
 
@@ -191,9 +193,26 @@ int run(int argc, char** argv) {
     }
   }
   Machine& mm = *m;
-  cli::runSchedule(mm, o, [&trace, &mm](uint16_t pc, const Regs& r) {
-    traceLine(trace, mm, pc, r);
-  });
+  std::vector<float> audio;
+  cli::runSchedule(
+      mm, o, [&trace, &mm](uint16_t pc, const Regs& r) { traceLine(trace, mm, pc, r); },
+      o.wav.empty() ? nullptr : &audio);
+  if (!o.wav.empty()) {
+    try {
+      writeWav(o.wav, audio, o.rate);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "%s\n", e.what());
+      return 1;
+    }
+    double peak = 0, sumSq = 0;
+    for (float x : audio) {
+      peak = std::max(peak, double(std::fabs(x)));
+      sumSq += double(x) * x;
+    }
+    const double rms = audio.empty() ? 0.0 : std::sqrt(sumSq / double(audio.size()));
+    std::printf("wav: %s %zu samples at %d Hz, peak %.4f, rms %.4f\n", o.wav.c_str(),
+                audio.size(), o.rate, peak, rms);
+  }
 
   const DisplayState d = m->display();
   std::printf("display: %02X %02X\n", d.left, d.right);

@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -14,6 +15,7 @@
 #include "mirage/disk_image.h"
 #include "mirage/doc5503.h"
 #include "mirage/panel.h"
+#include "mirage/stream_resampler.h"
 #include "mirage/via6522.h"
 #include "mirage/voice_filter.h"
 #include "mirage/wd1772.h"
@@ -80,8 +82,25 @@ class Machine : private Bus {
   const FilterBank& filters() const { return filters_; }
   // Host audio tap (not saved): the filtered voice mix, once per DOC scan at
   // doc().sampleRate(). One full-volume oscillator through an open filter
-  // peaks at about 1.0.
+  // peaks at about 1.0. Raw: no DC blocking, gain or resampling.
   std::function<void(float)> onMix;
+
+  // Audio output. Runs the emulation for exactly frames / hostRate seconds
+  // (the fractional E cycles of each call are carried to the next, so the
+  // total over many calls tracks the requested time) and writes `frames` mono
+  // samples at hostRate. The mix is DC-blocked (one-pole high-pass, about
+  // 5 Hz), scaled by kOutputGain and resampled from doc().sampleRate(), which
+  // can change while running, by a StreamResampler. A single full-volume
+  // oscillator through an open filter peaks at kOutputGain; the stream is not
+  // clipped, so several loud voices can exceed 1.0 (the WAV writer clamps).
+  // The resampler's group delay (32 DOC scans, about 1 ms) means the first
+  // samples after power-on are silence. Mix samples made by runCycles() outside
+  // render() are not part of the audio stream. hostRate may differ between
+  // calls (it is clamped to 1 Hz-10 MHz).
+  void render(float* out, size_t frames, double hostRate);
+  // Output scale of render(): headroom for two coincident full-volume
+  // oscillators before the stream passes +-1.0.
+  static constexpr float kOutputGain = 0.5f;
 
   // The saved state includes the FDC, the DOC (with its A/D conversion), the
   // filter bank and the inserted disk (or "no disk").
@@ -101,6 +120,10 @@ class Machine : private Bus {
   void updateNmi();
   // The CPU FIRQ line is the ACIA IRQ output.
   void updateFirq();
+  // render(): one raw mix sample from a DOC scan into the audio stream.
+  void pushMix(float mix);
+  void saveAudio(StateWriter&) const;
+  void loadAudio(StateReader&);  // commits only on success
 
   std::array<uint8_t, kBootRomSize> rom_{};
   std::array<uint8_t, 0x4000> ram_{};   // $8000-$BFFF
@@ -121,6 +144,14 @@ class Machine : private Bus {
   std::deque<uint8_t> midiIn_;
   uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives
   std::function<void(uint16_t, const Regs&)> trace_;  // host-side, not saved
+
+  // Audio path (saved).
+  StreamResampler resampler_{48000.0};
+  float dcIn_ = 0.0f, dcOut_ = 0.0f;  // DC blocker: previous input and output
+  double renderCycleFrac_ = 0.0;      // E cycles owed from render() calls, < 1
+  std::vector<float> pending_;        // resampled samples not yet handed out
+  float lastOut_ = 0.0f;              // last sample handed out (held on an underrun)
+  bool rendering_ = false;            // inside render(): pushMix feeds pending_
 };
 
 }  // namespace mirage

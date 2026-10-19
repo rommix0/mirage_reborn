@@ -156,8 +156,13 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
       const auto at = parseSeconds(t);
       if (bytes.empty() || !at) return bad(opt, v);
       midi.push_back({toCycles(*at), RunEvent::Kind::Midi, {}, std::move(bytes)});
-    } else if (opt == "--wav" || opt == "--rate") {
-      unavailable += std::string(opt) + ": not available yet (Task 12)\n";
+    } else if (opt == "--wav") {
+      if (v.empty()) return bad(opt, v);
+      o.wav = v;
+    } else if (opt == "--rate") {
+      const auto r = parseUint(v, 768000, 10);
+      if (!r || *r < 1000) return bad(opt, v);
+      o.rate = int(*r);
     } else if (opt == "--snapshot-out" || opt == "--snapshot-in") {
       unavailable += std::string(opt) + ": not available yet (Task 13)\n";
     } else {
@@ -180,15 +185,33 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
 }
 
 void runSchedule(Machine& m, const RunOptions& o,
-                 const std::function<void(uint16_t pc, const Regs&)>& trace) {
+                 const std::function<void(uint16_t pc, const Regs&)>& trace,
+                 std::vector<float>* audio) {
   // `now` counts requested cycles: runCycles credits its overshoot against the
   // next request, so the slice must not be re-derived from cycles().
   uint64_t now = 0;
-  for (const RunEvent& e : o.events) {
-    if (e.cycle > now) {
-      m.runCycles(e.cycle - now);
-      now = e.cycle;
+  // Audio: the slice to a cycle count is the whole frames up to the nearest
+  // frame boundary; framesDone counts the frames rendered so far.
+  uint64_t framesDone = 0;
+  const auto framesAt = [&o](uint64_t cycle) {
+    return uint64_t(double(cycle) * o.rate / kCpuClockHz + 0.5);
+  };
+  const auto advanceTo = [&](uint64_t cycle) {
+    if (!audio) {
+      if (cycle > now) m.runCycles(cycle - now);
+      now = std::max(now, cycle);
+      return;
     }
+    const uint64_t target = framesAt(cycle);
+    if (target > framesDone) {
+      const size_t at = audio->size();
+      audio->resize(at + size_t(target - framesDone));
+      m.render(audio->data() + at, size_t(target - framesDone), o.rate);
+      framesDone = target;
+    }
+  };
+  for (const RunEvent& e : o.events) {
+    advanceTo(e.cycle);
     switch (e.kind) {
       case RunEvent::Kind::TraceOn: m.setTrace(trace); break;
       case RunEvent::Kind::KeyDown: m.setKey(e.key, true); break;
@@ -196,7 +219,7 @@ void runSchedule(Machine& m, const RunOptions& o,
       case RunEvent::Kind::Midi: m.queueMidi(e.midi); break;
     }
   }
-  if (o.endCycle > now) m.runCycles(o.endCycle - now);
+  advanceTo(o.endCycle);
   m.setTrace(nullptr);
 }
 

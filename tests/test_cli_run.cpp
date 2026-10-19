@@ -146,13 +146,52 @@ TEST_CASE("cli run usage errors and unavailable options") {
     CHECK(e.exitCode == 2);
     CHECK(e.message.empty());
   }
-  SECTION("--wav/--rate and --snapshot-* are not available yet") {
-    const auto e = parseFails({"--wav", "o.wav", "--rate", "48000", "--snapshot-out", "s"});
+  SECTION("--snapshot-* is not available yet") {
+    const auto e = parseFails({"--snapshot-out", "s", "--snapshot-in", "t"});
     CHECK(e.exitCode == 1);
     CHECK(e.message ==
-          "--wav: not available yet (Task 12)\n--rate: not available yet (Task 12)\n"
-          "--snapshot-out: not available yet (Task 13)\n");
+          "--snapshot-out: not available yet (Task 13)\n"
+          "--snapshot-in: not available yet (Task 13)\n");
   }
+}
+
+TEST_CASE("cli run --wav and --rate") {
+  SECTION("defaults: no WAV, 48 kHz") {
+    const auto o = parseOk({});
+    CHECK(o.wav.empty());
+    CHECK(o.rate == 48000);
+  }
+  SECTION("both given") {
+    const auto o = parseOk({"--wav", "out.wav", "--rate", "44100"});
+    CHECK(o.wav == "out.wav");
+    CHECK(o.rate == 44100);
+  }
+  SECTION("bad values are usage errors") {
+    for (const char* rate : {"0", "999", "768001", "-5", "abc", "", "44100.5"}) {
+      INFO(rate);
+      const auto e = parseFails({"--rate", rate});
+      CHECK(e.exitCode == 2);
+      CHECK(e.message == std::string("bad value for --rate: ") + rate);
+    }
+    CHECK(parseFails({"--wav", ""}).message == "bad value for --wav: ");
+  }
+}
+
+TEST_CASE("cli runSchedule with audio renders every sample and lands events on time") {
+  std::vector<uint8_t> rom(4096, 0x12);
+  rom[0] = 0x20;
+  rom[1] = 0xFE;
+  rom[0xFFE] = 0xF0;
+  rom[0xFFF] = 0x00;
+  Machine m(rom);
+  m.powerOn();
+  const auto o = parseOk({"--seconds", "0.5", "--rate", "44100", "--wav", "x.wav", "--midi-hex",
+                          "F8@0.1", "--key", "Enter@0.25:0.01"});
+  std::vector<float> audio;
+  cli::runSchedule(m, o, nullptr, &audio);
+  CHECK(audio.size() == 22050);
+  CHECK(m.cycles() >= o.endCycle);
+  CHECK(m.cycles() < o.endCycle + 8);
 }
 
 TEST_CASE("cli runSchedule runs to the end in slices and applies events") {

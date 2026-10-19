@@ -10,6 +10,8 @@ add_library(mirage_engine STATIC
   src/wd1772.cpp
   src/doc5503.cpp
   src/voice_filter.cpp
+  src/stream_resampler.cpp
+  src/wav_writer.cpp
   src/machine.cpp
   src/disasm6809.cpp
 )

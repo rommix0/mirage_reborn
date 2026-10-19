@@ -1,6 +1,7 @@
 #include "mirage/machine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include "mirage/clocks.h"
@@ -21,6 +22,10 @@ constexpr uint32_t kMaxMidiQueue = 1u << 24;
 constexpr float kVoiceScale = 1.0f / 32768.0f;
 // The line input has nothing connected (Plan 1): the A/D reads mid-scale.
 constexpr uint8_t kLineInputIdle = 0x80;
+// Audio DC blocker corner and the bounds on host-side audio state in a save.
+constexpr double kDcBlockHz = 5.0;
+constexpr uint32_t kMaxPendingAudio = 1u << 16;
+constexpr double kMinHostRate = 1.0, kMaxHostRate = 1e7;
 }  // namespace
 
 Machine::Machine(std::span<const uint8_t> bootRom)
@@ -54,6 +59,7 @@ Machine::Machine(std::span<const uint8_t> bootRom)
     for (int ch = 0; ch < FilterBank::kVoices; ++ch) v[ch] = float(sums[ch]) * kVoiceScale;
     float mix = 0.0f;
     filters_.process(in, doc_.sampleRate(), mix);
+    if (rendering_) pushMix(mix);
     if (onMix) onMix(mix);
   };
   // DOC A/D input: the analog mux on VIA PB3:PB2 (boot-rom.md 2.1, filters.md 3).
@@ -82,6 +88,10 @@ void Machine::powerOn() {
   masterRem_ = 0;
   midiIn_.clear();
   nextMidiCycle_ = 0;
+  resampler_.reset();
+  dcIn_ = dcOut_ = lastOut_ = 0.0f;
+  renderCycleFrac_ = 0.0;
+  pending_.clear();
   updateFirq();
   panel_.clearDisplay();
   cpu_.powerOn();
@@ -107,6 +117,40 @@ void Machine::runCycles(uint64_t eCycles) {
     tickDevices(uint32_t(c));
   }
   credit_ = uint32_t(done - eCycles);
+}
+
+void Machine::pushMix(float mix) {
+  // One-pole DC blocker y = x - x1 + R y1 (corner kDcBlockHz at the scan rate),
+  // then the fixed output gain.
+  const double rate = doc_.sampleRate();
+  const float r = float(1.0 - 2.0 * 3.14159265358979323846 * kDcBlockHz / rate);
+  const float y = mix - dcIn_ + r * dcOut_;
+  dcIn_ = mix;
+  dcOut_ = y;
+  resampler_.setInputRate(rate);
+  resampler_.push(y * kOutputGain);
+  float s;
+  while (resampler_.pop(s)) pending_.push_back(s);
+}
+
+void Machine::render(float* out, size_t frames, double hostRate) {
+  hostRate = std::clamp(hostRate, kMinHostRate, kMaxHostRate);
+  resampler_.setOutputRate(hostRate);
+  renderCycleFrac_ += double(frames) * double(kCpuClockHz) / hostRate;
+  const double whole = std::floor(renderCycleFrac_);
+  renderCycleFrac_ -= whole;
+  pending_.reserve(pending_.size() + frames + 16);
+  rendering_ = true;
+  runCycles(uint64_t(whole));
+  rendering_ = false;
+  // Hand out `frames` samples. The resampler's output count wanders by one
+  // around the request; a shortfall repeats the last sample, a surplus waits
+  // for the next call.
+  const size_t n = std::min(frames, pending_.size());
+  std::copy_n(pending_.begin(), n, out);
+  pending_.erase(pending_.begin(), pending_.begin() + std::ptrdiff_t(n));
+  if (n) lastOut_ = out[n - 1];
+  std::fill(out + n, out + frames, lastOut_);
 }
 
 uint8_t Machine::peek(uint16_t addr) {
@@ -252,6 +296,7 @@ std::vector<uint8_t> Machine::saveState() const {
   doc_.save(w);
   w.u32(masterRem_);
   filters_.save(w);
+  saveAudio(w);
   wd_.save(w);
   w.u8(disk_ ? 1 : 0);
   if (disk_) disk_->save(w);
@@ -261,6 +306,41 @@ std::vector<uint8_t> Machine::saveState() const {
   for (uint8_t b : midiIn_) w.u8(b);
   panel_.save(w);
   return w.take();
+}
+
+void Machine::saveAudio(StateWriter& w) const {
+  w.tag(fourcc("AUDO"));
+  resampler_.save(w);
+  w.f64(double(dcIn_));
+  w.f64(double(dcOut_));
+  w.f64(double(lastOut_));
+  w.f64(renderCycleFrac_);
+  w.u32(uint32_t(pending_.size()));
+  for (float f : pending_) w.f64(double(f));
+}
+
+void Machine::loadAudio(StateReader& r) {
+  r.tag(fourcc("AUDO"));
+  StreamResampler resampler = resampler_;
+  resampler.load(r);
+  const auto sample = [&r] {
+    const double v = r.f64();
+    if (!std::isfinite(v)) throw StateError("machine: bad audio sample");
+    return float(v);
+  };
+  const float dcIn = sample(), dcOut = sample(), lastOut = sample();
+  const double frac = r.f64();
+  if (!(frac >= 0.0 && frac < 1.0)) throw StateError("machine: bad audio cycle remainder");
+  const uint32_t n = r.u32();
+  if (n > kMaxPendingAudio) throw StateError("machine: bad pending audio");
+  std::vector<float> pending;
+  for (uint32_t i = 0; i < n; ++i) pending.push_back(sample());
+  resampler_ = resampler;
+  dcIn_ = dcIn;
+  dcOut_ = dcOut;
+  lastOut_ = lastOut;
+  renderCycleFrac_ = frac;
+  pending_ = std::move(pending);
 }
 
 void Machine::loadState(std::span<const uint8_t> data) {
@@ -286,6 +366,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   wd_.save(before);
   doc_.save(before);
   filters_.save(before);
+  saveAudio(before);
   uint64_t nextMidi = 0;
   uint32_t masterRem = 0;
   std::deque<uint8_t> midi;
@@ -297,6 +378,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     masterRem = r.u32();
     if (masterRem >= kCpuClockHz) throw StateError("machine: bad DOC clock remainder");
     filters_.load(r);
+    loadAudio(r);
     wd_.load(r);
     const uint8_t hasDisk = r.u8();
     if (hasDisk > 1) throw StateError("machine: bad disk flag");
@@ -318,6 +400,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     wd_.load(back);
     doc_.load(back);
     filters_.load(back);
+    loadAudio(back);
     throw;
   }
   bank_ = bank;
