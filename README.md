@@ -32,3 +32,24 @@ lower sound's 133 sectors take about 7.4 s); a note fired earlier (for example
 example's note at 16-19 s peaks near 0.28; the file's overall peak of 0.29 is
 the boot calibration tones). Boot timing is in `docs/hardware/boot-rom.md`
 sections 13.5 and 13.6.
+
+## The standalone app (`app/`)
+
+A JUCE 8 app (window, menus, audio and MIDI devices) around the same engine.
+Building it fetches JUCE (git, tag 8.0.4) on the first configure; the first
+build takes several minutes. Skip it with `-DMIRAGE_BUILD_APP=OFF`.
+
+```
+cmake --build emulator/build --config Release --target MirageApp
+emulator/build/app/MirageApp_artefacts/Release/Mirage.exe
+```
+
+On start it loads the boot ROM from the saved path, then from
+`MIRAGE_ASSET_ROOT/Ensoniq Mirage EPROM Firmware/mirage.bin`, and otherwise
+asks for it (a 4096-byte file; a ROM with a different SHA-1 is allowed but
+warned about). Settings are kept in `%APPDATA%/MirageEmulator`.
+`Mirage.exe --panel-png out.png` renders the window content to a PNG and exits.
+
+Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
+engine and `mirage_host` contain no JUCE code, so the licence choice for any
+other front end (for example a VST3) stays open.
