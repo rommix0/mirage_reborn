@@ -22,11 +22,13 @@ asset skip when it is missing.
 ## Rendering a note to a WAV
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A04.img" --note 48:100@40:3 --seconds 45 --wav a04.wav
+mirage_cli run --disk "../Factory Library/IMG/SND-A04.img" --note 48:100@16:3 --seconds 20 --wav a04.wav
 ```
 
-The OS needs about 35-37 s of emulated time after power-on to load the disk's
-first sound in the current floppy-controller model; a note fired earlier (for
-example `--note 60:100@3:2`) plays nothing. Start notes at 40 s or later (this
-example's note at 40-43 s peaks near 0.29). Boot timing is in
-`docs/hardware/boot-rom.md` section 13.5.
+The OS needs about 14.6 s of emulated time after power-on to load the disk's
+first sound (the controller model reads about 30 sectors/s from a track; the
+lower sound's 133 sectors take about 7.4 s); a note fired earlier (for example
+`--note 60:100@3:2`) plays nothing. Start notes at 16 s or later (this
+example's note at 16-19 s peaks near 0.28; the file's overall peak of 0.29 is
+the boot calibration tones). Boot timing is in `docs/hardware/boot-rom.md`
+sections 13.5 and 13.6.

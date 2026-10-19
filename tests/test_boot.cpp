@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "asset_paths.h"
+#include "booted_machine.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 
@@ -97,7 +98,8 @@ BootRun boot(Machine& m, uint64_t seconds, bool untilSettled = false) {
 }
 
 // The OS calibrated all 8 filters, each converging (filters.md 4) near the
-// OS's centre CV $7A, and the last one finished by `bySeconds`.
+// OS's centre CV $7A, and the last one finished by `bySeconds` (5.17 s measured
+// with the cumulative sector layout, fdc.md; 7.36 s before it).
 void checkCalibrated(const BootRun& r, double bySeconds) {
   REQUIRE(r.calibrations.size() == 8);
   for (const Calibration& c : r.calibrations) {
@@ -148,10 +150,10 @@ TEST_CASE("boot: SND-A01 loads the OS and runs it from RAM", "[assets]") {
 
 // The OS calls the ROM's filter calibration $F571 once per filter, which
 // times each filter's self-oscillation through the DOC A/D (filters.md 4),
-// then enters its main loop and scans the display (about 7.4 s). The display
-// goes dark again while the OS loads the lower sound (from about 7.4 s to 35 s
-// with the FDC model's one sector per revolution, fdc.md), so it is sampled
-// over the whole 10 s.
+// then enters its main loop and scans the display (about 5.2 s). The display
+// goes dark again while the OS loads the lower sound (from about 5.2 s to
+// 12.6 s with the FDC model's cumulative sector layout, fdc.md), so it is
+// sampled over the whole 10 s.
 TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
@@ -165,7 +167,7 @@ TEST_CASE("boot: SND-A01 lights the display within 10 s", "[assets]") {
 }
 
 // The whole boot: the OS calibrates the 8 filters within about a second of
-// its start (6.25 s), then loads the lower sound and settles.
+// its start (4.06 s), then loads the lower sound and settles (14.6 s).
 TEST_CASE("boot: SND-A01 calibrates its filters and finishes booting", "[assets]") {
   LOAD_ROM(rom);
   const auto disk = assetPath(kSndA01);
@@ -173,13 +175,21 @@ TEST_CASE("boot: SND-A01 calibrates its filters and finishes booting", "[assets]
   Machine m(rom);
   m.insertDisk(DiskImage::loadFile(disk));
   m.powerOn();
-  const BootRun r = boot(m, 60, true);
-  checkCalibrated(r, 8.0);
-  CHECK(r.cycles < 60 * kSecond);  // settled before the cap
+  const BootRun r = boot(m, 30, true);
+  checkCalibrated(r, 6.0);
+  CHECK(r.cycles < 20 * kSecond);  // settled (14.6 s measured) before the cap
   CHECK(r.sawLit);
   CHECK_FALSE(r.sawUd);
   CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound
   CHECK(m.cpu().illegalCount() == 0);
+}
+
+// The lower sound loads in seconds, not half a minute (boot-rom.md 13.6).
+TEST_CASE("boot: SND-A01 settles with its lower sound loaded in under 15 s", "[assets]") {
+  const auto disk = assetPath(kSndA01);
+  REQUIRE_ASSET(disk);
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  CHECK(mirage_test::bootedSnapshot("SND-A01.img").seconds < 15.0);
 }
 
 // Other operating systems call the same ROM calibration from their own code
@@ -191,10 +201,10 @@ TEST_CASE("boot: EnsoniqOS masos calibrates its filters and boots", "[assets]") 
   Machine m(rom);
   m.insertDisk(DiskImage::loadFile(disk));
   m.powerOn();
-  const BootRun r = boot(m, 60, true);
-  checkCalibrated(r, 8.0);
+  const BootRun r = boot(m, 30, true);
+  checkCalibrated(r, 6.0);
   CHECK(r.jumpedTo800E);
-  CHECK(r.cycles < 60 * kSecond);
+  CHECK(r.cycles < 20 * kSecond);  // 14.6 s measured
   CHECK(r.sawLit);
   CHECK_FALSE(r.sawUd);
   CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound
@@ -208,10 +218,10 @@ TEST_CASE("boot: the Soundprocess OS disk calibrates its filters and boots", "[a
   Machine m(rom);
   m.insertDisk(DiskImage::loadFile(disk));
   m.powerOn();
-  const BootRun r = boot(m, 60, true);
-  checkCalibrated(r, 8.0);
+  const BootRun r = boot(m, 30, true);
+  checkCalibrated(r, 6.0);
   CHECK(r.jumpedTo800E);
-  CHECK(r.cycles < 60 * kSecond);
+  CHECK(r.cycles < 20 * kSecond);  // 13.3 s measured
   CHECK(r.sawLit);
   CHECK_FALSE(r.sawUd);
   CHECK(m.fdc().sectorsRead() > kBootSectors);  // the OS loaded a sound

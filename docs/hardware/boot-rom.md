@@ -612,7 +612,7 @@ has the details and evidence).
 | Observation | Evidence |
 |---|---|
 | SND-A01: the 8 calls of `$F571` end at 6.390, 6.525, 6.667, 6.810, 6.946, 7.085, 7.223 and 7.358 s, each with B = `$7A` and Y = `$82`/`$83` (converged); the stored offsets `$B068 + $4D * n` are all 0. `$B935` (pitch-wheel centre, `$900A` = `$60`), then the main loop `$B900` at 7.36 s. | `tests/test_boot.cpp` (`$F5AC` trace), trace |
-| The display lights at the main loop (7.37 s), is dark while the OS loads the lower sound (sectors 23-155, until about 35 s), and is steady at `DB 06` from about 35 s. The same as §13.1 shifted 63 s earlier. | `mirage_cli run --seconds T` |
+| The display lights at the main loop (7.37 s), is dark while the OS loads the lower sound (sectors 23-155, until about 35 s), and is steady at `DB 06` from about 35 s. The same as §13.1 shifted 63 s earlier. (Timings before the cumulative FDC sector layout; see §13.6 for the current ones.) | `mirage_cli run --seconds T` |
 | `EnsoniqOS/os32` (the same OS as SND-A01) and `masos` (calibration loop at `$BDC0`) give the same calibration times and results; `masos` settles at `DB 06`, 155 sectors. The Soundprocess OS disk (loop at `$9630`) calibrates the same way, settles at `3F 06` with 142 sectors at about 34 s. | `boot:` tests for masos and the Soundprocess OS |
 
 ### 13.5 Boot completion and the first note (Task 12)
@@ -622,7 +622,8 @@ has the details and evidence).
 time (`tests/test_audio.cpp`, `bootedSnapshot`): the display lit (either digit non-zero, sampled
 every 10 ms) for 1 s running, no FDC sector read for 2 s running, and the drive motor off
 (`Machine::driveActive()` false), capped at 90 s of emulated time. SND-A01 meets it at **37.2 s**
-(the display is steady from about 35 s, the 2 s of FDC quiet follows). The test boots once per
+(the display is steady from about 35 s, the 2 s of FDC quiet follows; with the cumulative sector
+layout it is **14.6 s**, §13.6). The test boots once per
 process, stores `saveState()` and every section loads that copy (a boot is about 5 s of wall
 time in Debug).
 
@@ -644,3 +645,40 @@ disk image is not decoded).
 Output level (`Machine::render`, gain 0.5, vel 100): key 44 peaks 0.26 (RMS 0.045 over the held
 second), key 60 peaks 0.12 for 0.2 s. During the boot calibration (§13.4, 6.26-7.57 s) the eight
 self-oscillating filters are audible: RMS 0.13, peak 0.29.
+
+### 13.6 With the cumulative FDC sector layout (Plan 2, Task 1)
+
+The WD1772 model first spread the six sector slots evenly (k/6 of a revolution, 1041 bytes
+apart). A 1024-byte sector takes 1074 byte times, so after every big sector the next ID field had
+just passed and the OS waited almost a revolution per sector. The slots now sit at cumulative byte
+offsets (gap 1 = 16, gap 3 = 50 bytes; fdc.md "Track layout"), which leaves the OS 1.6 ms between
+the end of one sector and the next ID field. Nothing in the OS or ROM changed; the sound loads in
+seconds because the controller no longer misses every second window. Measured with
+`mirage_cli run --disk SND-A01.img --seconds T` and a trace of `$800E`, `$F5AC`, `$B900` and
+`$9F6F`:
+
+| Time | What happens |
+|---|---|
+| 4.06 s | `JMP $800E`: the ROM has loaded the OS (22 sectors; 21 at 4 s, 22 at 5 s) |
+| 4.20-5.17 s | The 8 filter calibrations end at 4.200, 4.337, 4.474, 4.611, 4.748, 4.884, 5.026 and 5.166 s (the same 0.14 s each, B = `$7A`, Y = `$81`-`$83`) |
+| 5.17 s | Main loop `$B900`; the display lights for 30 ms, then goes dark while the OS loads the lower sound (38 sectors at 7.5 s, 91 at 10 s, 140 at 12 s) |
+| 12.55 s | Sector 155 (the last) is read |
+| 12.56 s | `$9F6F` re-init, the display is steady at `DB 06` |
+| 14.56 s | Settled by the `bootedSnapshot` rule (lit for 1 s, no sector for 2 s, motor off) |
+
+| Quantity | Before (k/6 layout) | After (cumulative layout) |
+|---|---|---|
+| `$800E` hand-off | 6.25 s | 4.06 s |
+| Last calibration / main loop | 7.36 s | 5.17 s |
+| Last sector (155) read | about 35 s | 12.55 s |
+| SND-A01 settled (`bootedSnapshot`) | 37.2 s | 14.56 s |
+| `masos` settled (`boot()` rule, no motor test) | about 37 s | 14.58 s |
+| Soundprocess OS disk settled | about 34 s | 13.28 s |
+
+The lower sound's 133 sectors take 7.4 s (18 sectors/s overall, including track steps and the
+OS's own work), against 28 s before. The 200-cycle INTRQ-to-next-command latency of the
+back-to-back test is far inside gap 3. The settle time is still dominated by the ROM's own load
+(4 s, mostly seeks between the one-sector-per-track reads of tracks 2-10) and the fixed 3 s the
+`bootedSnapshot` rule adds, not by the FDC layout. Tests: `boot: SND-A01 settles with its lower
+sound loaded in under 15 s`, `wd1772 reads sectors 0-5 of a track in under two revolutions back to
+back`.

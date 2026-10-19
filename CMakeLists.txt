@@ -58,6 +58,8 @@ mirage_cli_test(cli_run_snapshot_in_with_disk 2 "run|--disk|d.img|--snapshot-in|
 mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
                 "-DERR=^no-such-rom.bin: cannot read a 4096-byte boot ROM/$")
 # Real runs (skipped without the user's ROM / disk).
+# At 10 s SND-A01 has read 91 sectors (the OS is loading the lower sound; fdc.md layout), so
+# the sector regexes below allow 20 to 99.
 mirage_cli_test(cli_run_snd_a01_10s 0 "run|--disk|${MIRAGE_TEST_SND_A01}|--seconds|10"
                 "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
                 "-DOUT=^display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: [2-9][0-9]+/cycles: 200000[0-3][0-9]/$")

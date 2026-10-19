@@ -32,6 +32,27 @@ constexpr uint32_t kPreDataBytes = 16;   // 12 x $00, A1 A1 A1 FB
 constexpr uint32_t kFirstReadByte = kIdBytes + kWriteGapBytes + kPreDataBytes + 1;
 constexpr uint32_t kAddressFirstByte = 5;  // after A1 A1 A1 FE and the track byte
 
+// Track layout in byte times. One revolution is 6250 bytes. Slot k's ID field
+// starts at the cumulative offset of everything before it, so the gap after a
+// sector is a gap 3 of 50 bytes. (The first model spaced slots 1/6 of a
+// revolution apart, 1041 bytes, which is less than a 1024-byte sector's 1074
+// bytes: the next sector's ID had always just passed, so every back-to-back
+// read cost a whole extra revolution.) This is a model choice; the real
+// Mirage format's gap lengths are not documented. See fdc.md.
+constexpr uint32_t kTrackBytes = kDiskIndexCycles / kFdcByteCycles;  // 6250
+constexpr uint32_t kGap1 = 16;  // index to the first ID field
+constexpr uint32_t slotBytes(int id) {  // ID + gap 2 + sync/DAM + data + CRC
+  return kIdBytes + kWriteGapBytes + kPreDataBytes + (id < 5 ? 1024u : 512u) + 2;
+}
+constexpr uint32_t kGap3 = (kTrackBytes - kGap1 - 5 * slotBytes(0) - slotBytes(5)) / 6;  // 50
+constexpr uint32_t slotStart(int k) {  // in cycles from the index pulse
+  uint32_t bytes = kGap1;
+  for (int j = 0; j < k; ++j) bytes += slotBytes(j) + kGap3;
+  return bytes * kFdcByteCycles;
+}
+static_assert(kGap3 == 50 && slotBytes(0) == 1074 && slotBytes(5) == 562);
+static_assert(slotStart(5) + (slotBytes(5) + kGap3) * kFdcByteCycles <= kDiskIndexCycles);
+
 uint16_t crcCcitt(const uint8_t* p, size_t n) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < n; ++i) {
@@ -357,9 +378,9 @@ void Wd1772::startBody() {
   }
 }
 
-// Slot k's ID field starts k/6 of the way round the track.
+// Slot k's ID field starts at slotStart(k) cycles after the index pulse.
 uint32_t Wd1772::delayToSlot(int slot) const {
-  const uint32_t start = uint32_t(uint64_t(slot) * kDiskIndexCycles / kSlots);
+  const uint32_t start = slotStart(slot);
   return start >= rot_ ? start - rot_ : start + kDiskIndexCycles - rot_;
 }
 

@@ -28,8 +28,8 @@ inline std::vector<uint8_t> bootRomBytes() {
 // Boots a factory disk image (the OS auto-loads the lower sound) until it has
 // settled, and returns the machine state at that point. Settled = the drive
 // motor is off, the display has been lit for a second and no sector has been
-// read for two (docs/hardware/boot-rom.md 13.5). Capped at 90 s of emulated
-// time.
+// read for two (docs/hardware/boot-rom.md 13.5). SND-A01 settles at 14.6 s
+// (13.6); capped at 90 s of emulated time.
 struct Booted {
   std::vector<uint8_t> state;
   double seconds = 0;

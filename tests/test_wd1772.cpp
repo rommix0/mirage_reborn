@@ -316,6 +316,34 @@ TEST_CASE("wd1772 multi-sector read runs through sector 5 and ends with RNF") {
   for (size_t i = 0; i < 1024; ++i) REQUIRE(got[2 * 1024 + i] == uint8_t(i & 0xFF));
 }
 
+TEST_CASE("wd1772 reads sectors 0-5 of a track in under two revolutions back to back") {
+  // Sector slots sit at cumulative byte offsets (ID + gaps + data), so the next
+  // sector's ID field is still ahead of the head when the OS issues its next
+  // command a NMI-handler's worth (kOsLatency) after INTRQ.
+  constexpr uint32_t kOsLatency = 200;
+  Rig r;
+  r.seek(3);
+  uint64_t cycles = 0;
+  for (int sector = 0; sector < 6; ++sector) {
+    r.fdc.write(2, uint8_t(sector));
+    r.fdc.write(0, 0x88);  // Read Sector, h=1
+    while (!r.fdc.intrq()) {
+      if (r.fdc.drq()) (void)r.fdc.read(3);
+      r.fdc.tick(1);
+      ++cycles;
+      if (cycles >= 8ull * kRev) FAIL("sector " << sector << " never completed");
+    }
+    const uint8_t st = r.fdc.read(0);  // clears INTRQ
+    REQUIRE((st & 0x5D) == 0);         // no RNF, CRC error or lost data
+    if (sector < 5) {
+      r.fdc.tick(kOsLatency);
+      cycles += kOsLatency;
+    }
+  }
+  CHECK(r.fdc.sectorsRead() == 6);
+  CHECK(cycles < 2ull * kRev);
+}
+
 TEST_CASE("wd1772 no disk: Read Sector never hangs the host and stays busy; no index pulses") {
   Rig r;
   r.fdc.setDisk(nullptr);

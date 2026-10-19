@@ -179,6 +179,8 @@ took until 70.27 s. The display lights at the main loop (7.37 s), goes dark whil
 the lower sound (sectors 23-155, until about 35 s with the FDC model's one sector per
 revolution, fdc.md), and is steady at `DB 06` from about 35 s. masos: same times, steady
 `DB 06`. SP: same calibration times, steady `3F 06` ("01") at about 34 s, 142 sectors.
+(These times are from the FDC's first sector layout. With the cumulative layout the OS entry is
+at 4.06 s, the last calibration at 5.17 s and the display steady at 12.6 s; boot-rom.md 13.6.)
 
 **Wheel centre.** `$B935` averages three pitch-wheel conversions into `$900A` as
 (sum of 3) / 4, i.e. `$60` for `kPitchWheelRest` = `$80`, and the main loop subtracts it from

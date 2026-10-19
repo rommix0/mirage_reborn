@@ -29,17 +29,37 @@ internal motor line, not the drive motor.
 
 ## Track layout seen by the controller
 
-Six sector slots per revolution, ids 0-5, starting at k/6 of a revolution (even spacing). A slot
-starts with the ID field (10 bytes: `A1 A1 A1 FE`, track, side 0, sector, size code, CRC-CCITT of
-those eight bytes), then gap 2 (22 bytes), 12 zeros, `A1 A1 A1 FB` (data begins 48 bytes in), the
-data, and 2 CRC bytes. Size code 3 = 1024 bytes (ids 0-4), 2 = 512 bytes (id 5), from
-`DiskImage::sectorSize`.
+Six sector slots per revolution, ids 0-5, laid out at **cumulative byte offsets** (one revolution
+is 6250 byte times, `kDiskIndexCycles / kFdcByteCycles`). A slot starts with the ID field (10
+bytes: `A1 A1 A1 FE`, track, side 0, sector, size code, CRC-CCITT of those eight bytes), then gap
+2 (22 bytes), 12 zeros, `A1 A1 A1 FB` (data begins 48 bytes in), the data, and 2 CRC bytes. Size
+code 3 = 1024 bytes (ids 0-4), 2 = 512 bytes (id 5), from `DiskImage::sectorSize`.
 
-A 1024-byte sector needs 1074 byte times but a slot is only 1041 apart, so after reading a big
-sector the next slot has already gone by: sequential reads cost about one revolution per sector.
-Measured with the real boot ROM and `SND-A01.img`: 22 sectors in 6.25 s of emulated time from power
-on (about 0.5 s spin-up, 5 sectors/s). The real format's gaps are not known; this is a model
-choice, not a measurement of a real drive.
+| Part | Bytes |
+|---|---|
+| Gap 1, index to the first ID field | 16 |
+| Slot, ids 0-4 (10 + 22 + 16 + 1024 + 2) | 1074 |
+| Slot, id 5 (10 + 22 + 16 + 512 + 2) | 562 |
+| Gap 3, after every sector: (6250 - 16 - 5 x 1074 - 562) / 6 | 50 |
+| Gap 4, last sector to the index (the remainder) | 2 |
+
+Slot k's ID field starts at `16 + sum over j < k of (slot(j) + 50)` byte times after the index
+pulse (16, 1140, 2264, 3388, 4512, 5636). A 1024-byte sector therefore ends 50 bytes (1.6 ms)
+before the next ID field, which is enough for an OS that issues its next Read Sector from the
+INTRQ NMI handler (the back-to-back test uses 200 cycles = 3 byte times).
+
+This replaced the first model, which put slot k at k/6 of a revolution (1041 bytes apart). A
+1024-byte sector needs 1074 byte times, so the next slot had always just gone by and sequential
+reads cost one revolution per sector (5 sectors/s). Now a track of six sectors reads in about
+0.99 revolutions (397,000 cycles from the first ID field to the last CRC, with a 200-cycle OS
+latency between sectors), about 30 sectors/s; reading all six back to back from an arbitrary
+head position takes under two revolutions (`wd1772 reads sectors 0-5 ... back to back`, 760,640
+cycles). The OS loads the lower sound of SND-A01 (133 sectors, with track steps) in about 7.4 s
+instead of 28 s (boot-rom.md 13.6).
+
+The real Mirage format's gap lengths are not known. The 16-byte gap 1 and 50-byte gap 3 are a
+model choice (gap 3 is simply what is left of the 6250-byte track); only the 22-byte gap 2 write
+window comes from the controller documentation. None of it is a measurement of a real drive.
 
 ## Choices where the sources are silent or disagree
 
