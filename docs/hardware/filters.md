@@ -18,7 +18,7 @@ Anything not read directly from code or a data sheet is marked **inferred** or *
 DOC channel n (sum of (byte-128)*volume / 32768) --+-- VoiceFilter n (cutoff CV n, resonance CV n) --+
   + filter input noise (1e-4)                                                                      |
                                               sum of the 8 filter outputs = the voice mix  <-------+
-voice mix (+ audio input, silent in Plan 1) --> compressor --> A/D mux input 0
+voice mix (+ audio input, always silent) --> compressor --> A/D mux input 0
 ```
 
 - **One CEM3328 per DOC channel** (8 channels = the 8 voices, CA & 7). The DOC volume register
@@ -130,7 +130,8 @@ calibration loop reads every 25 µs and could then never complete a conversion.
 OS `$9702-$974D` (sampling) selects mux 1 (`$14`) or, when `<$19` = 0, mux 0 (`$10`), and sets
 channel 7's filter: cutoff = `<$18` + `[$B283]` + `$5B`, resonance `[$96FF]`. `$B283` is filter
 7's calibration offset (`$B068 + 7 * $4D`, section 4). **Inferred:** while sampling, the input
-runs through voice 8's filter as the anti-alias filter. Not modelled until audio input exists.
+runs through voice 8's filter as the anti-alias filter. Not modelled: recording from audio input
+is out of scope (spec §3), and WAV import (spec §6.7) bypasses this path.
 
 ## 4. The boot calibration (ROM `$F571`)
 
@@ -213,7 +214,7 @@ before Task 11, 1.38-1.45 s after (8 filters × 29.4 kHz, plus the A/D path).
 
 - Per-chip spread of cutoff and resonance (calibration would return different offsets).
 - S/H droop and CV feedthrough.
-- The audio input and the input compressor's real curve; the routing of the sampling input
+- The audio input (out of scope, spec §3) and the input compressor's real curve; the routing of the sampling input
   through voice 8's filter (section 3.3).
 - Whether reading `$E400-$E41F` strobes anything (SP clears CVs with `CLR`, which reads first;
   the model ignores reads).

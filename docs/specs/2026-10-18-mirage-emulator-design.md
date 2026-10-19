@@ -10,8 +10,8 @@ open an original Mirage disk image, the emulated machine boots whatever
 operating system is on that disk, and you play it from a MIDI keyboard. Its
 sound and behaviour should match the hardware.
 
-The owner wants the Mirage's character (factory library, editing, sampling)
-on a modern computer. They don't own a real Mirage, so fidelity is judged by
+The owner wants the Mirage's character (factory library, editing, the
+sound of its 8-bit samples) on a modern computer. They don't own a real Mirage, so fidelity is judged by
 ear and against recordings.
 
 The standalone program comes first because it's the easiest way to confirm
@@ -24,7 +24,10 @@ third-party variants such as `resmos32`). The hardware boots whatever OS is on
 the disk. A native rewrite of one OS's behaviour would only ever behave like
 that one OS. So we emulate the **hardware**: CPU, memory, floppy controller,
 sound chip, I/O chips. The disk's own OS then runs unmodified. Loading,
-saving, editing, sampling and the sequencer all come from the running OS.
+saving, editing and the sequencer all come from the running OS. The one
+deliberate exception is WAV import (§6.7), which replaces live sampling: it
+writes converted audio straight into wave RAM, which is hardware, and touches
+nothing that belongs to the OS.
 
 Consequence: reverse engineering targets the hardware: the 4 KB boot ROM,
 the memory map, I/O chips and how the OS drives them. Disassembling OSes is a
@@ -52,9 +55,11 @@ per-OS tweak.
 3. **Edit, save, reload.** The panel changes parameters, the OS saves sounds
    to the inserted disk, *File → Save/Save As* writes the `.img`, and
    reopening shows the edit intact.
-4. **Samples from audio input.** The *Sample upper/lower* functions record from
-   the computer's audio input through the emulated converter, at the OS's own
-   rates and settings.
+4. **Samples from WAV files.** *File → Import WAV…* converts a WAV file to
+   Mirage 8-bit samples, at a sample rate and between start and end points
+   the user chooses, and writes it into wave RAM, where the OS plays and saves
+   it like a sample it recorded itself. *(Owner decision; replaces recording
+   from audio input.)*
 5. **Any OS.** Disks with other OSes (SoundProcess, MASOS, OS 3.2, resmos32)
    boot and work.
 6. **Formatting and blank disks.** *File → New Blank Disk* inserts an
@@ -69,7 +74,8 @@ With a MIDI keyboard:
    panel → play it. It sounds like a Mirage by ear.
 2. Edit a parameter → save the sound to disk → *Save As* a new `.img` → reopen
    → the edit persists.
-3. Record a short sample from audio input and play it across the keyboard.
+3. Import a short WAV into the lower half → play it across the keyboard →
+   save the sound to disk with the OS → reopen the image → it plays the same.
 4. Open `Soundprocess/Soundprocess OS/Soundprocess OS.img` (and the
    `EnsoniqOS/` images) → each boots and plays.
 5. *File → New Blank Disk*, boot `EnsoniqOS/fmt2` (or use an OS's format
@@ -81,16 +87,20 @@ With a MIDI keyboard:
 **Not in version 1:**
 - The VST3 plugin. It comes later as a second wrapper around the same engine.
 - macOS/Linux builds. The toolkit allows them later.
-- A circuit-exact model of the CEM3328 filters or the input anti-alias filter.
+- A circuit-exact model of the CEM3328 filters.
+- **Recording from the computer's audio input.** *(Owner decision.)* WAV
+  import replaces it. The OS's own sampling functions still run, but the
+  converter input reads as silence, as on a Mirage with nothing plugged in.
 
 **Never:**
 - **HFE support.** HFE files are low-level flux dumps. The owner has ruled
   this out permanently.
 - **Hard-coding any one OS's behaviour.** Nothing in the engine may assume a
-  particular OS: no patching OS code, no shortcuts that skip the OS (such as
-  loading samples directly into memory or synthesising notes outside the
-  emulated chips). Anything that only works with one OS is a failure, even if
-  it sounds right.
+  particular OS: no patching OS code, no writing OS parameters or OS RAM, no
+  shortcuts that skip the OS (such as synthesising notes outside the emulated
+  chips). Anything that only works with one OS is a failure, even if it sounds
+  right. WAV import (§6.7) writes wave RAM only, which every OS plays from, so
+  it stays within this rule.
 - **Silently overwriting the user's disk images** (see §6.5).
 
 ## 4. Constraints
@@ -131,18 +141,19 @@ With a MIDI keyboard:
 - **Filter:** liberties allowed. A good-sounding 4-pole resonant low-pass in
   the CEM3328's spirit: soft-saturating resonance that can self-oscillate, and
   the passband volume drop as resonance rises. It's driven by the per-voice
-  cutoff and resonance values the OS writes. The same liberty applies to the
-  sampling input's anti-alias filter (parameter 74).
+  cutoff and resonance values the OS writes.
 - **Window:** a replica of the hardware front panel (design "A"). That means
   the dark case, ensoniq/Mirage branding, red two-digit LED, a drive-activity
   light, and every hardware button in its real position with its real label.
   Menus sit above it: *File*, *Machine*, *MIDI* (input and output devices —
   output added as my call, since the OS's sequencer, MIDI thru and SysEx
-  dumps send MIDI), *Audio* (output and input devices).
+  dumps send MIDI), *Audio* (output device).
 - **Disk files:** chosen through standard open/save file dialogs. Loading
   and saving sounds otherwise behave exactly as the OS does them.
 - **Formats:** `.img` first; `.edm` after `.img` is confirmed; never `.hfe`.
-- **Sampling:** must record from the computer's audio input.
+- **Samples:** loaded from WAV files, not recorded. The user chooses the
+  conversion sample rate and the start and end points, because a real Mirage
+  has limited sample memory. Recording from audio input is left out.
 - **Source location:** everything lives under `Ensoniq Mirage/emulator/`.
 - **Verification:** by ear. There's no real Mirage to compare against.
 
@@ -155,9 +166,10 @@ Two layers:
 - **Engine** (plain C++, no GUI or audio toolkit dependency). The emulated
   machine: 6809 CPU, memory map, boot ROM, RAM, wave RAM, DOC 5503, WD1772 +
   disk image, 6522 VIA, 6850 ACIA (MIDI), keypad/display/LED wiring, filter CV
-  path, per-voice filters, output mixing, and the input converter path.
-  - **Inputs:** MIDI bytes, panel key presses/releases, audio-input samples,
-    disk image insert/eject.
+  path, per-voice filters, output mixing, the input converter (wheels; audio
+  input reads as silence), and the WAV-to-Mirage sample converter.
+  - **Inputs:** MIDI bytes, panel key presses/releases, disk image
+    insert/eject, wave RAM writes from WAV import.
   - **Outputs:** stereo/mono audio frames, display segment state, drive LED,
     MIDI out bytes.
 - **Front ends:**
@@ -187,8 +199,9 @@ The facts below are to be confirmed from the boot ROM and MAME. Items marked
   sample rate = clock / (8 × (enabled oscillators + 2)). The OS sets the
   oscillator count, so the output rate is whatever the running OS chooses.
   Channel-address bits route each oscillator to a voice's filter. The ADC
-  register is used for sampling. Early Mirages had an external AD7574 ADC
-  instead; emulate the variant that matches this boot ROM.
+  register reads the wheels and the (silent) audio input. Early Mirages had
+  an external AD7574 ADC instead; emulate the variant that matches this boot
+  ROM.
 - **WD1772 floppy controller:** enough command coverage and timing for every
   OS in the tree to read and write sectors, using Mirage disk geometry. That's
   80 tracks, single-sided, five 1024-byte sectors (IDs 0–4) plus one 512-byte
@@ -270,14 +283,51 @@ against `Tools/Ensoniq EDM2IMG…/tools/flopimage_convert.exe` output. If any
 header or reordering exists, the builder documents and handles it. Saving an
 `.edm` writes back in `.edm` format.
 
-### 6.7 Sampling
+### 6.7 WAV import *(owner decision; replaces sampling from audio input)*
 
-- **Input path.** The selected audio input feeds the emulated converter input
-  through the anti-alias filter stand-in (following parameter 74) and line/mic
-  scaling (parameter 75). The OS reads the converter on its own schedule, and
-  each read returns the input level at that emulated instant.
-- **What the OS controls.** Sample rate (parameter 73), threshold (76) and
-  multisampling (77) are entirely the OS's doing.
+*File → Import WAV…* opens a file dialog, then an import dialog. Clicking
+*Import* converts the file and writes it into wave RAM.
+
+- **What the user chooses** *(owner decision)*:
+  - **Sample rate** for the conversion. It is limited to the range the Mirage
+    itself samples at; the builder confirms the range from the Advanced
+    Sampler's Guide, roughly 10–33 kHz.
+  - **Start and end points** in the source file. The dialog shows a waveform,
+    the selected length in seconds, and how much of the target space that
+    length uses at the chosen rate.
+- **What I chose** *(my call)*:
+  - **Target:** the lower or upper half of wave RAM (64 KB each), plus a
+    start page within it (256 bytes per page; default page 0). The dialog
+    shows the last page the sample occupies, so the user can set the
+    wavesample start and end parameters on the panel to match. Several
+    imports into one half at different pages make a multisample by hand.
+  - **Too long:** a selection that doesn't fit before the end of the half is
+    cut off there, and the dialog says so before importing.
+  - **Conversion:** mix down to mono, low-pass and resample to the chosen
+    rate, optionally normalise the peak (on by default, because 8 bits leave
+    no headroom to waste), then quantise to unsigned 8-bit. Byte `$00` is
+    written as `$01`, because a zero byte halts the DOC.
+  - **Accepted files:** PCM WAV at 8, 16, 24 or 32 bits, 32-bit float, mono
+    or stereo, any sample rate. Anything else is refused with a clear
+    message.
+  - **Only wave RAM is written.** Bytes outside the imported range are left
+    as they were. The import never touches OS RAM or OS parameters, so it
+    works the same under every OS.
+  - **Not while the drive is busy.** Import is disabled while the drive
+    light is on, because the OS loads sounds from disk into wave RAM and the
+    two writes would trample each other.
+  - **Keeping it:** the imported sample lives in wave RAM like a freshly
+    recorded one. It is kept only once the user saves the sound to disk with
+    the OS, and is lost at reset like any other unsaved sample.
+- **What the OS still decides.** The OS doesn't know an import happened. Its
+  wavesample start, end, loop and tuning settings stay as they were, as on a
+  real Mirage after sampling, and the user sets them from the panel. Which
+  key plays the sample at its original pitch depends on the chosen rate and
+  the OS's tuning. The builder measures that relationship for OS 3.2 and
+  shows it in the dialog as a hint ("plays at original pitch around C4").
+- **Headless tool.** The CLI gets an import option (source file, rate, start
+  and end, half, page, emulated time), so imports can be tested and listened
+  to without the app.
 
 ### 6.8 The window
 
@@ -285,8 +335,8 @@ header or reordering exists, the builder documents and handles it. Saving an
 - **Keyboard shortcuts.** Optional, on top of clicking: digits → keypad,
   ↑/↓ → On-Yes/Off-No, Enter, Esc → Cancel. They mustn't steal keys while a
   file dialog is open.
-- **Level meter.** A small input-level meter shows during sampling. It sits
-  outside the replica panel area so the panel stays faithful.
+- **Import dialog.** The WAV import dialog (§6.7) is a separate window, so the
+  replica panel stays faithful.
 
 ### 6.9 Machine state (for the later VST3)
 
@@ -325,7 +375,8 @@ Each step ends in something checkable:
    play by MIDI keyboard (acceptance 1).
 7. Save/Save As end to end (acceptance 2), then New Blank Disk and
    formatting (acceptance 5).
-8. Sampling from audio input and the level meter (acceptance 3).
+8. WAV import: converter and CLI option first, then the import dialog
+   (acceptance 3).
 9. Other OSes (acceptance 4).
 10. EDM (acceptance 6).
 
@@ -337,7 +388,9 @@ Later: VST3 wrapper.
 - **Filter model specifics.** Within §5.
 - **Emulation scheduling.** Granularity and threading model.
 - **Panel art.** Exact layout once labels and positions are confirmed from
-  external references, plus the level meter's look.
+  external references, plus the import dialog's look.
+- **WAV conversion quality.** The resampling filter and the dither (if any)
+  used when converting to 8-bit.
 - **Diagnostics.** Logging and trace format, and the test-tool command syntax.
 - **Pacing the work.** Whether to pause emulation when the window loses focus
   or audio stops.

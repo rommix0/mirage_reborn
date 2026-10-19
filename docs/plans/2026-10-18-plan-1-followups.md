@@ -11,6 +11,8 @@ Plan 1, the engine core.
   sequential sectors don't each cost a revolution.
 - Effect: sound loading drops from about 35 s to about 7 s. Document it as a
   model choice in `docs/hardware/fdc.md`.
+- No turbo or fast-forward during loads. The owner chose realistic timing
+  (2026-10-18).
 
 **Real-time safety of `render()`**
 - Add `Machine::prepare(maxFrames, hostRate)`, which reserves `pending_`.
@@ -68,7 +70,12 @@ Plan 1, the engine core.
 - Other-OS sweep: WD1772 `$D4` index interrupt and the MO bit with h=1; DOC
   swap/AM/sync edge cases, including MAME's even-one-shot-starts-odd-swap
   partner rule, which nothing so far needs.
-- The sampling input goes through filter 7 (OS `$9702`). Not yet modelled.
+- WAV import (spec §6.7) replaces sampling from audio input (owner decision,
+  2026-10-18). Engine work: a wave RAM write API on `Machine` that the host
+  calls between slices, the WAV-to-8-bit converter (no JUCE dependency), and
+  a CLI import option. App work: *File → Import WAV…* and the import dialog.
+  The OS's own sampling path through filter 7 (OS `$9702`) stays unmodelled;
+  the converter input stays silent.
 
 ## Decisions made during Plan 1
 
