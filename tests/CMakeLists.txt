@@ -23,6 +23,7 @@ add_executable(mirage_tests
   test_midi_byte_parser.cpp
   test_panel_layout.cpp
   test_realtime_host.cpp
+  test_disk_session.cpp
   alloc_counter.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_host mirage_cli_core Catch2::Catch2WithMain)

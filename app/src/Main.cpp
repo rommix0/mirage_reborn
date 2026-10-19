@@ -68,9 +68,9 @@ class MirageApplication : public juce::JUCEApplication {
 
   void shutdown() override {
     if (engine_ != nullptr) {
+      // The MIDI devices are saved when the user picks them (MainWindow), so
+      // one absent at this launch stays saved.
       settings_.setAudioState(engine_->saveAudioState().get());
-      settings_.setMidiIn(engine_->midiInputId());
-      settings_.setMidiOut(engine_->midiOutputId());
       settings_.setVolume(engine_->volume());
     }
     if (window_ != nullptr) settings_.setWindowState(window_->getWindowStateAsString());
@@ -81,7 +81,17 @@ class MirageApplication : public juce::JUCEApplication {
     host_.reset();
   }
 
-  void systemRequestedQuit() override { quit(); }  // Task 11 adds the unsaved-disk prompt
+  // The close button, File > Exit and Windows ending the session all come here.
+  // With a window, it asks about unsaved disk changes first and quits only once
+  // they are saved or discarded. At logoff (WM_QUERYENDSESSION) JUCE returns
+  // at once: if the prompt is showing, Windows sees the app hold the session
+  // and offers to end it anyway; it never waits on us.
+  void systemRequestedQuit() override {
+    if (window_ != nullptr)
+      window_->requestQuit();
+    else
+      quit();
+  }
 
  private:
   // Starts the machine from `file` if it is a 4096-byte ROM.

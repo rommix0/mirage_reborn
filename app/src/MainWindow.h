@@ -2,12 +2,14 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "AudioEngine.h"
 #include "PanelComponent.h"
 #include "Settings.h"
+#include "mirage/disk_session.h"
 #include "mirage/realtime_host.h"
 
 // The window's content: the replica panel above a status strip. The panel's
@@ -40,6 +42,10 @@ class MirageContent : public juce::Component, private juce::Timer {
   StripText text_;
 };
 
+// File menu: Open, Save, Save As and Eject work through a DiskSession. Open,
+// Eject and Exit (and the close button) ask first when the disk has unsaved
+// changes. The title names the disk: "Mirage <em dash> SND-A01.img (modified)".
+//
 // Keyboard: the digits press 0..9, the up and down arrows On/Off, Return Enter
 // and Escape Cancel, one press per physical press, released when the key comes
 // up. Ignored while a modal dialog or file chooser is open; Ctrl and Alt
@@ -56,6 +62,9 @@ class MainWindow : public juce::DocumentWindow,
   void closeButtonPressed() override;
   void activeWindowStatusChanged() override;
   MirageContent& content() { return *content_; }
+  // Quits the app, after the unsaved-disk prompt when needed (a Save must
+  // succeed first). Ignored while that prompt is already showing.
+  void requestQuit();
 
  private:
   enum CommandIds {
@@ -89,6 +98,22 @@ class MainWindow : public juce::DocumentWindow,
 
   void showAudioSettings();
 
+  // Disk files.
+  void openDisk();
+  void insertDisk(const juce::File& file);
+  void saveDisk(std::function<void()> then = {});  // Save As when the disk has no file
+  void saveDiskAs(std::function<void()> then = {});
+  void startSave(const juce::File& file, std::function<void()> then);  // File(): its own file
+  void ejectDisk();
+  // Runs `then` at once if the disk has no unsaved changes. Otherwise asks
+  // "Save changes to X before <action>?" (Save / Don't Save / Cancel): Save
+  // runs `then` once the save succeeds, Don't Save runs it now, Cancel drops it.
+  void whenDiskSafe(const juce::String& action, std::function<void()> then);
+  void pollDisk();          // 10 Hz: finishes saves, frees returned disks
+  void refreshDiskState();  // title, drive label, menu enablement
+  juce::File diskFolder() const;  // where the file dialogs start
+  void showError(const juce::String& title, const juce::String& message);
+
   mirage::RealtimeHost& host_;
   AudioEngine& engine_;
   Settings& settings_;
@@ -100,4 +125,13 @@ class MainWindow : public juce::DocumentWindow,
     mirage::PanelKey key;
   };
   std::vector<HeldKey> held_;  // keyboard keys holding panel keys
+
+  mirage::DiskSession session_;
+  juce::TimedCallback diskTimer_{[this] { pollDisk(); }};
+  std::unique_ptr<juce::FileChooser> chooser_;
+  std::function<void()> afterSave_;  // runs when the save in flight succeeds
+  bool promptOpen_ = false;          // the unsaved-changes prompt is showing
+  bool menusHaveDisk_ = false, menusSaving_ = false;  // the state the menus last saw
+  // Deleted with the window: it refers to the engine's AudioDeviceManager.
+  juce::Component::SafePointer<juce::DialogWindow> audioSettings_;
 };
