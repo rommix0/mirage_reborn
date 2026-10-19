@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "path_text.h"
+
 namespace mirage {
 
 namespace {
@@ -45,7 +47,7 @@ void writeWav(const std::filesystem::path& path, std::span<const float> samples,
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
   f.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
   f.flush();
-  if (!f) throw std::runtime_error("cannot write " + path.string());
+  if (!f) throw std::runtime_error("cannot write " + pathText(path));
 }
 
 }  // namespace mirage

@@ -4,15 +4,18 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <numbers>
 #include <vector>
 
@@ -445,4 +448,68 @@ TEST_CASE("render: SND-A04 strings sustain while held and stop after release", "
     CHECK(kHost / pLow == Catch::Approx(131.05).epsilon(0.03));
     CHECK(kHost / pHigh == Catch::Approx(261.55).epsilon(0.03));
   }
+}
+
+TEST_CASE("render: a bad host rate writes silence, advances nothing and returns promptly") {
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (double rate : {nan, inf, -inf, 0.0, -1.0, 7999.0, 384001.0, 1e7}) {
+    INFO("rate " << rate);
+    auto m = idleMachine();
+    m->runCycles(1000);
+    const uint64_t before = m->cycles();
+    const auto state = m->saveState();
+    std::vector<float> v(512, 0.7f);
+    const auto t0 = std::chrono::steady_clock::now();
+    m->render(v.data(), v.size(), rate);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+    CHECK(std::all_of(v.begin(), v.end(), [](float x) { return x == 0.0f; }));
+    CHECK(m->cycles() == before);
+    CHECK(m->saveState() == state);
+  }
+}
+
+TEST_CASE("render: the supported host-rate limits 8000 and 384000 Hz work") {
+  for (double rate : {8000.0, 384000.0}) {
+    INFO("rate " << rate);
+    auto m = idleMachine();
+    std::vector<float> v(size_t(rate / 10));
+    m->render(v.data(), v.size(), rate);
+    CHECK(m->cycles() >= kSecond / 10);
+    CHECK(m->cycles() < kSecond / 10 + 8);
+    CHECK(std::all_of(v.begin(), v.end(), [](float x) { return std::isfinite(x); }));
+  }
+}
+
+namespace {
+// Unique per run so parallel ctest processes and leftovers never collide.
+std::filesystem::path uniqueTemp(const std::string& stem) {
+  static int n = 0;
+  return std::filesystem::temp_directory_path() /
+         (stem + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+          std::to_string(n++));
+}
+}  // namespace
+
+TEST_CASE("wav: a non-ANSI file name writes, and failing there throws the module's own error") {
+  const std::filesystem::path name(u8"\u041F\u0438\u0430\u043D\u043E\u4E2D.wav");
+  const std::vector<float> one = {0.25f};
+  const auto dir = uniqueTemp("mirage_wav_");
+  std::filesystem::create_directories(dir);
+  CHECK_NOTHROW(writeWav(dir / name, one, 48000));
+  CHECK(std::filesystem::file_size(dir / name) == 46);
+  std::filesystem::remove_all(dir);
+
+  // A directory that does not exist: runtime_error (not std::system_error from
+  // the ANSI conversion), and the message carries the UTF-8 name.
+  bool ok = false;
+  try {
+    writeWav(dir / name, one, 48000);
+  } catch (const std::system_error&) {
+    FAIL("system_error escaped");
+  } catch (const std::runtime_error& e) {
+    ok = std::string(e.what()).find("\xD0\x9F\xD0\xB8\xD0\xB0\xD0\xBD\xD0\xBE\xE4\xB8\xAD.wav") !=
+         std::string::npos;
+  }
+  CHECK(ok);
 }

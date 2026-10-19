@@ -4,6 +4,8 @@
 #include <fstream>
 #include <string>
 
+#include "path_text.h"
+
 namespace mirage {
 
 namespace {
@@ -13,7 +15,7 @@ constexpr int kSmallSector = 512;  // id 5
 constexpr int kSmallSectorOffset = 5 * kBigSector;
 constexpr uint32_t kStateTag = fourcc("DSKI");
 
-std::string pathStr(const std::filesystem::path& p) { return p.string(); }
+std::string pathStr(const std::filesystem::path& p) { return pathText(p); }
 }  // namespace
 
 DiskImage DiskImage::fromBytes(std::span<const uint8_t> bytes) {

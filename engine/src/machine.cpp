@@ -7,6 +7,7 @@
 
 #include "mirage/clocks.h"
 #include "mirage/state_io.h"
+#include "sha1.h"
 
 namespace mirage {
 
@@ -26,7 +27,7 @@ constexpr uint8_t kLineInputIdle = 0x80;
 // Audio DC blocker corner and the bounds on host-side audio state in a save.
 constexpr double kDcBlockHz = 5.0;
 constexpr uint32_t kMaxPendingAudio = 1u << 16;
-constexpr double kMinHostRate = 1.0, kMaxHostRate = 1e7;
+
 }  // namespace
 
 Machine::Machine(std::span<const uint8_t> bootRom)
@@ -34,6 +35,7 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   if (bootRom.size() != kBootRomSize)
     throw std::invalid_argument("boot ROM must be exactly 4096 bytes");
   std::copy(bootRom.begin(), bootRom.end(), rom_.begin());
+  romSha1_ = sha1(bootRom);
 
   // Port A: PA0-2 column/segment, PA3/PA4 digit enables (outputs), PA5-7 key
   // rows (inputs).
@@ -41,8 +43,10 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   via_.portAOut = [this](uint8_t a) { panel_.portAWritten(a, cycles_); };
   // Port B: PB0/PB1 select the sample RAM quarter. PB4 is the drive select/motor
   // line, active low (boot-rom.md 2.1). PB6 reads 1 while a disk is in the drive
-  // (a level, not a change latch); PB5 (DOC sync) reads 0 until the DOC exists.
-  // PB2-3 and PB7 are wired by later tasks.
+  // (a level, not a change latch). PB5 (DOC sync) is not modelled and reads 0
+  // (no evidence any OS uses it). PB2-3 drive the ADC mux (see adcRead below).
+  // PB7 is the VIA T1 output feeding the ACIA clock; it is not emulated as a bit
+  // clock (see clocks-and-midi.md).
   via_.portBPins = [this] { return uint8_t(disk_ ? 0x40 : 0x00); };
   via_.portBOut = [this](uint8_t b) {
     bank_ = uint8_t(b & 3);
@@ -135,7 +139,12 @@ void Machine::pushMix(float mix) {
 }
 
 void Machine::render(float* out, size_t frames, double hostRate) {
-  hostRate = std::clamp(hostRate, kMinHostRate, kMaxHostRate);
+  // A host can report 0 (or garbage) before it has a real rate. Writing silence
+  // and advancing nothing is safe; running 1e9 cycles or a NaN count is not.
+  if (!(hostRate >= kMinHostRate && hostRate <= kMaxHostRate)) {  // also false for NaN
+    std::fill_n(out, frames, 0.0f);
+    return;
+  }
   resampler_.setOutputRate(hostRate);
   renderCycleFrac_ += double(frames) * double(kCpuClockHz) / hostRate;
   const double whole = std::floor(renderCycleFrac_);
@@ -287,6 +296,7 @@ std::vector<uint8_t> Machine::saveState() const {
   StateWriter w;
   w.tag(fourcc("MIRG"));
   w.u32(kSnapshotVersion);
+  w.bytes(romSha1_);
   w.tag(fourcc("MCHN"));
   w.u8(bank_);
   w.u64(cycles_);
@@ -352,6 +362,9 @@ void Machine::loadState(std::span<const uint8_t> data) {
   const uint32_t version = r.u32();
   if (version != kSnapshotVersion)
     throw StateError("machine: unsupported snapshot version " + std::to_string(version));
+  std::array<uint8_t, 20> rom;
+  r.bytes(rom);
+  if (rom != romSha1_) throw StateError("snapshot was taken with a different boot ROM");
   r.tag(fourcc("MCHN"));
   const uint8_t bank = r.u8();
   if (bank > 3) throw StateError("machine: bad sample bank");

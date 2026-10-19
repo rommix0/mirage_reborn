@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -147,4 +148,32 @@ TEST_CASE("factory disk directory byte", "[assets]") {
 TEST_CASE("extensionless image loads", "[assets]") {
   auto p = assetPath("EnsoniqOS/os32"); REQUIRE_ASSET(p);
   REQUIRE_NOTHROW(DiskImage::loadFile(p));
+}
+
+TEST_CASE("disk image: non-ANSI file names load, and errors keep their message") {
+  const std::filesystem::path name(u8"\u041F\u0438\u0430\u043D\u043E\u4E2D.img");
+  const auto dir = std::filesystem::temp_directory_path() /
+                   ("mirage_img_" + std::to_string(std::chrono::steady_clock::now()
+                                                       .time_since_epoch().count()));
+  std::filesystem::create_directories(dir);
+  const auto write = [&](size_t n) {
+    std::ofstream f(dir / name, std::ios::binary | std::ios::trunc);
+    const std::vector<char> z(n, 0);
+    f.write(z.data(), std::streamsize(z.size()));
+  };
+  write(1000);
+  try {
+    DiskImage::loadFile(dir / name);
+    FAIL("expected DiskImageError");
+  } catch (const DiskImageError& e) {
+    const std::string w = e.what();
+    CHECK(w.find("450,560") != std::string::npos);
+    CHECK(w.find("\xD0\x9F\xD0\xB8\xD0\xB0\xD0\xBD\xD0\xBE\xE4\xB8\xAD.img") != std::string::npos);
+  } catch (const std::exception& e) {
+    FAIL("wrong exception type: " << e.what());
+  }
+  write(DiskImage::kImageBytes);
+  CHECK_NOTHROW(DiskImage::loadFile(dir / name));
+  std::filesystem::remove_all(dir);
+  CHECK_THROWS_AS(DiskImage::loadFile(dir / name), DiskImageError);  // missing: its own error too
 }

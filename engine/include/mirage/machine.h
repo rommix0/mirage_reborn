@@ -99,14 +99,19 @@ class Machine : private Bus {
   // The resampler's group delay (32 DOC scans, about 1 ms) means the first
   // samples after power-on are silence. Mix samples made by runCycles() outside
   // render() are not part of the audio stream. hostRate may differ between
-  // calls (it is clamped to 1 Hz-10 MHz).
+  // calls. hostRate must be finite and within kMinHostRate..kMaxHostRate
+  // (8 kHz-384 kHz); otherwise (NaN, infinity, 0, negative, out of range, as a
+  // host may report before prepareToPlay) render() writes `frames` zeros,
+  // advances nothing and returns.
   void render(float* out, size_t frames, double hostRate);
   // Output scale of render(): headroom for two coincident full-volume
   // oscillators before the stream passes +-1.0.
   static constexpr float kOutputGain = 0.5f;
+  static constexpr double kMinHostRate = 8000.0, kMaxHostRate = 384000.0;
 
   // Whole-machine snapshot, for restoring a session exactly (a DAW project).
-  // Layout: fourcc("MIRG"), u32 kSnapshotVersion, then one tagged section per
+  // Layout: fourcc("MIRG"), u32 kSnapshotVersion, the 20-byte SHA-1 of the boot
+  // ROM (romSha1()), then one tagged section per
   // part: the machine core (bank, cycle count and credit, main/expansion/sample
   // RAM), CPU (registers, wait state, interrupt lines), VIA, DOC (oscillators,
   // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
@@ -120,10 +125,13 @@ class Machine : private Bus {
   // (fixed by the constructor), the host callbacks onMidiOut, onMix and the
   // trace (and the Machine's own chip wiring), and rendering_, which is only
   // true inside render().
-  // A snapshot of a different version, a wrong magic, a truncated or corrupt
+  // A snapshot of a different version, one taken with a different boot ROM
+  // (StateError "snapshot was taken with a different boot ROM"), a wrong magic, a truncated or corrupt
   // blob or trailing bytes throw StateError and leave the machine untouched.
   std::vector<uint8_t> saveState() const;
   void loadState(std::span<const uint8_t> data);
+  // SHA-1 of the boot ROM, computed once by the constructor.
+  std::array<uint8_t, 20> romSha1() const { return romSha1_; }
 
  private:
   uint8_t read(uint16_t addr) override;
@@ -144,6 +152,7 @@ class Machine : private Bus {
   void loadAudio(StateReader&);  // commits only on success
 
   std::array<uint8_t, kBootRomSize> rom_{};
+  std::array<uint8_t, 20> romSha1_{};
   std::array<uint8_t, 0x4000> ram_{};   // $8000-$BFFF
   std::array<uint8_t, 0x2000> exp_{};   // $C000-$DFFF
   std::array<uint8_t, kSampleRamSize> sample_{};

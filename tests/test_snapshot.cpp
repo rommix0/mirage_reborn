@@ -78,6 +78,38 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 1") {
   CHECK(Machine::kSnapshotVersion == 1);
 }
 
+TEST_CASE("snapshot: the ROM's SHA-1 follows the version, and a different ROM is rejected") {
+  Machine src(idleRom());
+  src.powerOn();
+  src.runCycles(1234);
+  const auto snap = src.saveState();
+  REQUIRE(snap.size() > 28);
+  const auto id = src.romSha1();
+  CHECK(std::equal(id.begin(), id.end(), snap.begin() + 8));
+  CHECK(getU32(snap, 28) == fourcc("MCHN"));  // the first section follows the hash
+
+  auto other = idleRom();
+  other[0x800] = 0x55;  // a different ROM, same size
+  Machine m(other);
+  CHECK(m.romSha1() != src.romSha1());
+  m.powerOn();
+  m.runCycles(77);
+  const auto before = m.saveState();
+  try {
+    m.loadState(snap);
+    FAIL("expected StateError");
+  } catch (const StateError& e) {
+    CHECK(std::string(e.what()) == "snapshot was taken with a different boot ROM");
+  }
+  CHECK(m.saveState() == before);
+  m.runCycles(10);
+
+  // A single flipped hash byte is enough.
+  auto bad = snap;
+  bad[8 + 19] ^= 1;
+  CHECK_THROWS_AS(src.loadState(bad), StateError);
+}
+
 TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes are rejected") {
   Machine src(idleRom());
   src.powerOn();
