@@ -535,6 +535,9 @@ the real ROM and `tests/test_boot.cpp`. Reproduce with
 `mirage_cli run --disk <img> --seconds S [--trace t.txt --trace-from T]`.
 Times are emulated seconds from power-on.
 
+Note: the timings in 13.1-13.3 were measured before the Task-1 sector layout
+(the cumulative FDC layout); the current figures are in 13.6.
+
 ### 13.1 SND-A01: where the OS boot stops
 
 | Time | What happens | Evidence |
@@ -682,7 +685,7 @@ seconds because the controller no longer misses every second window. Measured wi
 The lower sound's 133 sectors take 7.4 s (18 sectors/s overall, including track steps and the
 OS's own work), against 28 s before. The 200-cycle INTRQ-to-next-command latency of the
 back-to-back test is far inside gap 3. The settle time is still dominated by the ROM's own load
-(4 s, mostly seeks between the one-sector-per-track reads of tracks 2-10) and the fixed 3 s the
-`bootedSnapshot` rule adds, not by the FDC layout. Tests: `boot: SND-A01 settles with its lower
+(4 s, mostly seeks between the one-sector-per-track reads of tracks 2-10) and the fixed 2 s the
+`bootedSnapshot` rule adds (its 1 s lit window overlaps the 2 s quiet window), not by the FDC layout. Tests: `boot: SND-A01 settles with its lower
 sound loaded in under 15 s`, `wd1772 reads sectors 0-5 of a track in under two revolutions back to
 back`.

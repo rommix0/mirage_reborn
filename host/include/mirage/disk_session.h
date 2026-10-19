@@ -51,9 +51,13 @@ class DiskSession {
   // checks needsSaveBeforeReplacing() first.
   std::string open(const std::filesystem::path& file);
   void eject();
+  // Why saving to `file` (current path when empty) is refused regardless of
+  // timing, as a message for the user; empty when allowed. Today: .edm targets
+  // (any case), whose format is unconfirmed, so Save and Save As both refuse.
+  std::string saveRefusal(const std::filesystem::path& file = {}) const;
   // Starts a save to `file` (current path when empty). Completes in poll().
-  // False (nothing started) when no target is known, a save is already in
-  // flight, or the host's queue is full.
+  // False (nothing started) when no target is known, saveRefusal() is
+  // non-empty, a save is already in flight, or the host's queue is full.
   bool startSave(const std::filesystem::path& file = {});
   // Call on the UI thread at >= 10 Hz: frees returned disks, finishes saves.
   // Returns a finished save's outcome once (empty optional while none).

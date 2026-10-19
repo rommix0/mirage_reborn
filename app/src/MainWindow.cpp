@@ -38,8 +38,8 @@ MirageContent::MirageContent(mirage::RealtimeHost& host, AudioEngine& engine)
   startTimerHz(10);
 }
 
-void MirageContent::setDiskName(const juce::String& name) {
-  diskName_ = name;
+void MirageContent::setDiskName(const juce::String& name, const juce::String& title) {
+  diskTitle_ = title;
   panel_->setDiskName(name);
 }
 
@@ -73,10 +73,7 @@ MirageContent::StripText MirageContent::buildText() const {
   t.left = "No disk";
   t.middle = "No audio device";
   const auto s = host_.status();
-  if (s.diskPresent) {
-    t.left = diskName_.isNotEmpty() ? diskName_ : juce::String("Disk");
-    if (s.diskDirty) t.left << " (modified)";
-  }
+  if (diskTitle_.isNotEmpty()) t.left = diskTitle_;  // the window title's view (DiskSession)
   juce::StringArray problems;
   if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
   if (s.midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
@@ -393,6 +390,10 @@ void MainWindow::saveDiskAs(std::function<void()> then) {
 
 void MainWindow::startSave(const juce::File& file, std::function<void()> then) {
   const auto target = file == juce::File() ? std::filesystem::path() : toPath(file);
+  if (const auto refusal = session_.saveRefusal(target); !refusal.empty()) {
+    showError("Cannot save disk image", fromUtf8(refusal));
+    return;
+  }
   if (!session_.startSave(target)) {
     showError("Cannot save disk image", "The disk could not be saved right now. Try again.");
     return;
@@ -450,7 +451,7 @@ void MainWindow::refreshDiskState() {
                      fromUtf8(session_.title());
   if (getName() != title) setName(title);
   const auto name = fileName(session_.path());  // empty without a disk
-  content_->setDiskName(name);
+  content_->setDiskName(name, fromUtf8(session_.title()));  // so the strip matches the window title
   const bool hasDisk = !session_.path().empty(), saving = session_.saving();
   if (hasDisk != menusHaveDisk_ || saving != menusSaving_) {
     menusHaveDisk_ = hasDisk;

@@ -81,6 +81,7 @@ class Machine : private Bus {
   void queueMidi(std::span<const uint8_t> bytes);
   size_t midiQueueDepth() const { return midiCount_; }
   uint64_t midiOverflows() const { return midiOverflows_; }
+  uint64_t illegalOps() const { return cpu_.illegalCount(); }  // undefined opcodes executed (host diagnostics)
   void flushMidi();
   std::function<void(uint8_t byte, uint64_t cycle)> onMidiOut;
 
@@ -141,10 +142,11 @@ class Machine : private Bus {
   // advances nothing and returns.
   // Real time: after prepare(maxFrames, hostRate), render() with
   // frames <= maxFrames never allocates, frees or locks (a larger request still
-  // works but may allocate). prepare() itself allocates, so call it off the
-  // audio thread; it only reserves capacity (and sets the output rate), so it
-  // is safe at any time and changes no emulated state. powerOn() and
-  // loadState() keep the reserved capacity.
+  // works but may allocate). prepare() itself allocates, so it must never run
+  // concurrently with render() (call it before the first block, as a host does
+  // when a device starts); it only reserves capacity (and sets the output
+  // rate) and changes no emulated state. powerOn() and loadState() keep the
+  // reserved capacity.
   void prepare(size_t maxFrames, double hostRate);
   void render(float* out, size_t frames, double hostRate);
   // Output scale of render(), before the soft clip.

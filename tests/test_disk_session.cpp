@@ -349,3 +349,44 @@ TEST_CASE("session frees ejected disks") {
   CHECK_FALSE(rig.host.takeReturnedDisk().has_value());  // poll() took and freed them all
   CHECK_FALSE(rig.host.status().diskPresent);
 }
+
+TEST_CASE("session refuses to save to a .edm file, plain or as, in any case") {
+  TempDir tmp("mirage_session_edm");
+  const auto edm = makeImage(tmp, "disk.edm", 0x55);  // opening it is allowed
+  Rig rig;
+  REQUIRE(rig.session.open(edm).empty());
+  rig.pump();
+  rig.osWrite(0xA5);
+  rig.pump();
+  const std::string message =
+      "Saving .edm files comes in a later version; use Save As to save a .img copy.";
+  CHECK(rig.session.saveRefusal() == message);
+  CHECK(rig.session.saveRefusal(tmp / "other.EdM") == message);
+  CHECK(rig.session.saveRefusal(tmp / "copy.img").empty());
+  CHECK_FALSE(rig.session.startSave());                 // plain Save
+  CHECK_FALSE(rig.session.startSave(tmp / "x.EDM"));    // Save As to .edm
+  CHECK_FALSE(rig.session.saving());
+  rig.pump();
+  CHECK_FALSE(rig.session.poll().has_value());          // no copy was ever requested
+  CHECK(readBytes(edm) == std::vector<uint8_t>(DiskImage::kImageBytes, 0x55));
+  CHECK_FALSE(fs::exists(tmp / "x.EDM"));
+  // Save As to a .img still works, and the session then follows the new file.
+  REQUIRE(rig.session.startSave(tmp / "copy.img"));
+  CHECK(rig.finishSave().ok);
+  CHECK(rig.session.saveRefusal().empty());
+}
+
+TEST_CASE("session save during the insert gap says the disk is still going in") {
+  TempDir tmp("mirage_session_gap_save");
+  const auto a = makeImage(tmp, "a.img", 1), b = makeImage(tmp, "b.img", 2);
+  Rig rig;
+  REQUIRE(rig.session.open(a).empty());
+  rig.pump();
+  REQUIRE(rig.session.open(b).empty());  // swap: b waits out the 0.5 s gap
+  REQUIRE(rig.session.startSave());
+  const SaveOutcome outcome = rig.finishSave();
+  CHECK_FALSE(outcome.ok);
+  CHECK(outcome.message == "The disk is still going into the drive; try again in a moment.");
+  CHECK(rig.session.path() == b);
+  CHECK(readBytes(b)[0] == 2);  // untouched
+}

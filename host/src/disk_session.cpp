@@ -53,9 +53,20 @@ void DiskSession::eject() {
   }
 }
 
+std::string DiskSession::saveRefusal(const std::filesystem::path& file) const {
+  const auto& target = file.empty() ? path_ : file;
+  auto ext = utf8(target.extension());
+  for (auto& c : ext) c = char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+  // The .edm layout is unconfirmed (spec 6.6): never write it, or a mistake
+  // would damage the user's file.
+  if (ext == ".edm")
+    return "Saving .edm files comes in a later version; use Save As to save a .img copy.";
+  return {};
+}
+
 bool DiskSession::startSave(const std::filesystem::path& file) {
   const auto& target = file.empty() ? path_ : file;
-  if (saving_ || target.empty()) return false;
+  if (saving_ || target.empty() || !saveRefusal(file).empty()) return false;
   if (!host_.postCopyDisk(std::make_unique<DiskImage>(DiskImage::blank()))) return false;
   ++copiesOut_;
   saveTarget_ = target;
@@ -74,7 +85,12 @@ std::optional<SaveOutcome> DiskSession::poll() {
     if (!saving_ || copiesOut_ != 0) continue;  // a timed-out save's copy
     saving_ = false;
     if (r->why == DiskReturn::NoDiskToCopy) {
-      outcome = SaveOutcome{false, "There is no disk in the drive.", saveTarget_};
+      // With a path the disk is still in its swap gap (inserting takes about
+      // 0.5 s), not missing.
+      outcome = SaveOutcome{false,
+                            path_.empty() ? "There is no disk in the drive."
+                                          : "The disk is still going into the drive; try again in a moment.",
+                            saveTarget_};
       continue;
     }
     try {

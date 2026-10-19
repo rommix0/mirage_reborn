@@ -21,7 +21,9 @@ class MirageContent : public juce::Component, private juce::Timer {
   MirageContent(mirage::RealtimeHost& host, AudioEngine& engine);
   ~MirageContent() override = default;
 
-  void setDiskName(const juce::String& name);  // file name; empty = unnamed
+  // File name (empty = unnamed) for the panel; title ("name (modified)" or
+  // "No disk") for the status strip.
+  void setDiskName(const juce::String& name, const juce::String& title);
   PanelComponent& panel() { return *panel_; }
   void paint(juce::Graphics&) override;
   void resized() override;
@@ -37,7 +39,7 @@ class MirageContent : public juce::Component, private juce::Timer {
 
   mirage::RealtimeHost& host_;
   AudioEngine& engine_;
-  juce::String diskName_;
+  juce::String diskTitle_;  // empty: show "No disk"
   std::unique_ptr<PanelComponent> panel_;
   StripText text_;
 };

@@ -171,7 +171,7 @@ Queues (all lock-free single-producer, single-consumer):
 | Decision | Choice | Why / cost if wrong |
 |---|---|---|
 | Output headroom | Keep `kOutputGain` 0.5 and add a soft clip in `render()`: linear up to ±0.75, then `0.75 + 0.25·tanh((|x|−0.75)/0.25)`, never past ±1.0 | One voice peaks at about 0.26, so normal play is untouched. Chords can't hard-clip the device. CLI WAVs match the app. Easy to retune by ear (`machine.h` comment). |
-| Boot calibration tones (filter self-oscillation, about 1.3 s after the OS loads) | **Not muted** | This is what the emulated hardware emits. Muting would need a boot-phase detector, which is an OS-specific heuristic. Flag it at the acceptance listen. |
+| Boot calibration tones (filter self-oscillation, about 1 s, right after the ROM hands off to the OS, about 4-5 s after inserting the disk) | **Not muted** | This is what the emulated hardware emits. Muting would need a boot-phase detector, which is an OS-specific heuristic. Flag it at the acceptance listen. |
 | MIDI input timing | Events placed in the block by timestamp, MidiMessageCollector-style, clamped and non-decreasing | Adds up to one block of latency but no jitter. |
 | Minimum key hold | A panel key stays down at least 100 ms of emulated time | A fast mouse click could fall between the OS's keypad scans. |
 | Disk swap | Eject now; insert 0.5 s of emulated time later | The OS sees PB6 drop. |
@@ -192,8 +192,9 @@ lower sound finishes loading at about 12.6 s and the display settles by about
    0.5 s (no disk).
 2. *MIDI → input:* your keyboard. *Audio → Audio Settings:* your output.
 3. *File → Open* `Factory Library/IMG/SND-A01.img`. The drive LED lights and
-   the display shows the boot. You hear the calibration tones briefly (expected
-   and not muted; they come about 1.3 s after the OS loads).
+   the display shows the boot. You hear the calibration tones for about 1 s
+   (expected and not muted), starting about 4-5 s after you insert the disk,
+   right after the ROM hands off to the OS.
 4. Wait for the display to settle on "2." "1" (about 15 s). The OS has
    auto-loaded the lower sound.
 5. Play. Then load another sound from the panel (*Load Upper/Lower*, a digit,
@@ -210,6 +211,11 @@ Judging the sound is yours: nothing here can listen to it.
   the MIDI parser, `DiskSession`, the panel layout and the soft clip are).
 - The boot calibration tones are deliberately not muted (see the decisions).
 - The status strip's "(modified)" can lag by a block or two.
+- A SysEx message longer than about 4 KB (for example a wavesample dump from a
+  librarian) is truncated: the emulated MIDI input ring holds 4096 bytes and
+  JUCE delivers a whole SysEx message at once. `RealtimeHost::postMidi` also
+  rejects any single message over 12 KB (1024 queue commands of 12 bytes).
+  Plan 3 adds a paced feeder.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*`.
 - No audio input and no WAV import yet (Plan 3).

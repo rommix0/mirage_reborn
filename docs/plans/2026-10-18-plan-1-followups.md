@@ -56,7 +56,8 @@ Plan 1, the engine core.
 **Threading model (final reviewer's recommendation)** (done, 0b50281/991d98d/7fc2730; ejected disks return to the UI)
 - The audio thread owns `Machine`.
 - UI and MIDI threads post through a lock-free single-producer/single-consumer
-  queue: MIDI with sample offsets, keys, insert/eject/reset, snapshot requests.
+  queue: MIDI with sample offsets, keys, insert/eject/reset, snapshot requests
+  (snapshot requests: not needed in Plan 2; the UI requests disk copies only).
 - The audio thread publishes the display, drive LED and illegal-opcode count
   through atomics.
 - Ejected disks return to the UI thread for freeing.

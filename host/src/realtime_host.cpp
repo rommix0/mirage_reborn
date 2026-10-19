@@ -225,9 +225,13 @@ void RealtimeHost::publishStatus() {
   driveActive_.store(machine_->driveActive(), kRelaxed);
   const DiskImage* disk = machine_->disk();
   diskPresent_.store(disk != nullptr, kRelaxed);
-  diskDirty_.store(disk && disk->dirty(), kRelaxed);
+  // diskWrites before diskDirty, the latter with release; status() loads them
+  // in the opposite order with acquire. A reader that sees a block's diskDirty
+  // therefore sees that block's diskWrites or a later one, never an older count
+  // (which DiskSession::modified would compare against a saved copy's).
   diskWrites_.store(disk ? disk->writeCount() : 0, kRelaxed);
-  illegalOps_.store(machine_->cpu().illegalCount(), kRelaxed);
+  diskDirty_.store(disk && disk->dirty(), std::memory_order_release);
+  illegalOps_.store(machine_->illegalOps(), kRelaxed);
   cycles_.store(machine_->cycles(), kRelaxed);
 }
 
@@ -319,7 +323,7 @@ HostStatus RealtimeHost::status() const {
   s.display.right = uint8_t(d >> 8);
   s.driveActive = driveActive_.load(kRelaxed);
   s.diskPresent = diskPresent_.load(kRelaxed);
-  s.diskDirty = diskDirty_.load(kRelaxed);
+  s.diskDirty = diskDirty_.load(std::memory_order_acquire);  // before diskWrites: see publishStatus
   s.diskWrites = diskWrites_.load(kRelaxed);
   s.illegalOps = illegalOps_.load(kRelaxed);
   s.midiDropped = midiDropped_.load(kRelaxed);

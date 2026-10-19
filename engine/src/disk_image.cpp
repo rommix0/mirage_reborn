@@ -79,12 +79,15 @@ void DiskImage::saveFile(const std::filesystem::path& path) const {
     opened = bool(out);
     if (opened) {
       out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
-      out.flush();
-      written = out.good();
+      out.close();  // a failed final flush shows up here, not in write()
+      written = !out.fail();
     }
   }  // Closed here, before any remove or rename: on Windows an open file cannot be deleted.
   if (!opened) fail("Cannot open temporary file for writing disk image");
   if (!written) fail("Failed writing disk image");
+  // Never replace the user's file with a short write.
+  const auto onDisk = std::filesystem::file_size(tmp, ec);
+  if (ec || onDisk != uintmax_t(kImageBytes)) fail("Disk image was not written completely to");
   std::filesystem::rename(tmp, path, ec);  // replaces an existing file
   if (ec) fail("Cannot replace disk image (" + ec.message() + ")");
 }

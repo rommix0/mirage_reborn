@@ -17,7 +17,8 @@ namespace mirage {
 // A snapshot of the machine for display, published by the audio thread at the
 // end of every process() call. Each field is read from its own atomic, so a
 // status() taken while a block finishes may mix fields from two consecutive
-// blocks; every field on its own is whole. midiDropped counts every MIDI byte
+// blocks; every field on its own is whole. The one pairing that is kept:
+// diskWrites is never older than the block whose diskDirty was read. midiDropped counts every MIDI byte
 // lost on the way: rejected by postMidi, overflowing the Machine's input ring,
 // or overflowing the MIDI-out queue (it survives a reset).
 struct HostStatus {
@@ -87,8 +88,10 @@ class RealtimeHost {
 
   std::array<uint8_t, 20> romSha1() const { return romSha1_; }  // any thread
 
-  // Audio thread only. prepare() allocates (Machine::prepare); call it before
-  // the first block and whenever the device's block size or rate changes.
+  // prepare() allocates (Machine::prepare), so it must never run concurrently
+  // with process() or render(): call it before the first block and whenever
+  // the device's block size or rate changes (JUCE calls audioDeviceAboutToStart
+  // before the callbacks start, and again after stopping them).
   void prepare(size_t maxFrames, double hostRate);
   // Renders `frames` mono samples at hostRate:
   //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved);
@@ -109,7 +112,8 @@ class RealtimeHost {
 
   // MIDI-input thread only (the single producer of the MIDI queue). Messages
   // longer than kMidiCommandBytes (SysEx) travel as consecutive commands with
-  // the same timestamp. All or nothing: if the queue lacks room for the whole
+  // the same timestamp. A message over 12 KB (kMidiQueueCommands x
+  // kMidiCommandBytes) can never fit and is always rejected. All or nothing: if the queue lacks room for the whole
   // message, nothing is queued, the bytes are added to midiDropped and it
   // returns false. An empty message is accepted and does nothing.
   bool postMidi(std::span<const uint8_t> bytes, double timeSeconds);
