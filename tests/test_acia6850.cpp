@@ -8,8 +8,10 @@
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 #include "mirage/state_io.h"
+#include "test_roms.h"
 
 using namespace mirage;
+using mirage_test::kAciaReceiver;
 
 namespace {
 
@@ -36,23 +38,6 @@ std::vector<uint8_t> rom(const std::vector<uint8_t>& code, uint16_t firq = 0xF10
   r[0xFF7] = uint8_t(firq);
   return r;
 }
-
-// Polls the ACIA status; records any OVRN sighting at $9001 and stores each
-// received byte at $8000,X+. ROM-style setup first ($03 reset, $95).
-const std::vector<uint8_t> kReceiver = {
-    0x86, 0x03, 0xB7, 0xE1, 0x00,  // LDA #$03; STA $E100
-    0x86, 0x95, 0xB7, 0xE1, 0x00,  // LDA #$95; STA $E100
-    0x8E, 0x80, 0x00,              // LDX #$8000
-    0xB6, 0xE1, 0x00,              // loop: LDA $E100
-    0x85, 0x20,                    // BITA #$20
-    0x27, 0x03,                    // BEQ noov
-    0xB7, 0x90, 0x01,              // STA $9001
-    0x85, 0x01,                    // noov: BITA #$01
-    0x27, 0xF2,                    // BEQ loop
-    0xB6, 0xE1, 0x01,              // LDA $E101
-    0xA7, 0x80,                    // STA ,X+
-    0x20, 0xEB,                    // BRA loop
-};
 
 }  // namespace
 
@@ -217,7 +202,7 @@ TEST_CASE("acia state round-trips and rejects bad state") {
 }
 
 TEST_CASE("machine paces 1000 MIDI bytes at one per 320 us with no loss") {
-  Machine m(rom(kReceiver));
+  Machine m(rom(kAciaReceiver));
   m.powerOn();
   std::vector<uint8_t> in(1000);
   for (size_t i = 0; i < in.size(); ++i) in[i] = uint8_t(i * 7 + 3);
@@ -246,7 +231,7 @@ TEST_CASE("machine MIDI input is deterministic across save and load") {
   std::vector<uint8_t> in(40);
   for (size_t i = 0; i < in.size(); ++i) in[i] = uint8_t(0x80 + i);
   in[39] = 0xFE;
-  Machine a(rom(kReceiver)), b(rom(kReceiver));
+  Machine a(rom(kAciaReceiver)), b(rom(kAciaReceiver));
   a.powerOn();
   a.queueMidi(in);
   a.runCycles(10'000);  // part-way: some bytes delivered, the rest queued
@@ -315,7 +300,7 @@ TEST_CASE("machine MIDI output: two unpolled writes both go out, 640 cycles apar
 }
 
 TEST_CASE("machine rejects a version 1 snapshot") {
-  Machine m(rom(kReceiver));
+  Machine m(rom(kAciaReceiver));
   m.powerOn();
   m.runCycles(100);
   auto snap = m.saveState();
@@ -353,14 +338,14 @@ TEST_CASE("machine ACIA interrupt drives FIRQ, not IRQ") {
 }
 
 TEST_CASE("machine loadState rejects a corrupt ACIA or MIDI section and stays unchanged") {
-  Machine src(rom(kReceiver));
+  Machine src(rom(kAciaReceiver));
   src.powerOn();
   const std::vector<uint8_t> two = {1, 2};
   src.queueMidi(two);
   src.runCycles(100);
   const auto snap = src.saveState();
 
-  Machine m(rom(kReceiver));
+  Machine m(rom(kAciaReceiver));
   m.powerOn();
   const auto before = m.saveState();
 

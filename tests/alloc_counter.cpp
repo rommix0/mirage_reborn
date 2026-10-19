@@ -9,6 +9,7 @@ namespace {
 // Constant-initialised, so touching them never allocates.
 thread_local bool g_counting = false;
 thread_local size_t g_allocations = 0;
+thread_local size_t g_frees = 0;  // non-null pointers released
 
 void* allocate(std::size_t size) noexcept {
   if (g_counting) ++g_allocations;
@@ -27,9 +28,13 @@ void* allocateAligned(std::size_t size, std::align_val_t align) noexcept {
 #endif
 }
 
-void release(void* p) noexcept { std::free(p); }
+void release(void* p) noexcept {
+  if (g_counting && p) ++g_frees;
+  std::free(p);
+}
 
 void releaseAligned(void* p) noexcept {
+  if (g_counting && p) ++g_frees;
 #ifdef _MSC_VER
   _aligned_free(p);
 #else
@@ -41,11 +46,13 @@ void releaseAligned(void* p) noexcept {
 
 namespace mirage_test {
 
-AllocationScope::AllocationScope() : start_(g_allocations), wasActive_(g_counting) {
+AllocationScope::AllocationScope()
+    : start_(g_allocations), freesStart_(g_frees), wasActive_(g_counting) {
   g_counting = true;
 }
 AllocationScope::~AllocationScope() { g_counting = wasActive_; }
 size_t AllocationScope::count() const { return g_allocations - start_; }
+size_t AllocationScope::frees() const { return g_frees - freesStart_; }
 
 }  // namespace mirage_test
 

@@ -58,7 +58,7 @@ TEST_CASE("render after prepare allocates nothing", "[assets]") {
   std::vector<float> buf(512);
   const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
   float peak = 0.0f;
-  size_t allocations;
+  size_t allocations, frees;
   {
     AllocationScope scope;
     for (int i = 0; i < 200; ++i) {
@@ -69,8 +69,10 @@ TEST_CASE("render after prepare allocates nothing", "[assets]") {
     }
     m->flushMidi();
     allocations = scope.count();
+    frees = scope.frees();
   }
   CHECK(allocations == 0);
+  CHECK(frees == 0);
   CHECK(peak > 0.01f);  // the note really played through the audited path
 }
 
@@ -87,14 +89,24 @@ TEST_CASE("render allocates nothing after loadState either", "[assets]") {
   AllocationScope scope;
   for (int i = 0; i < 100; ++i) m->render(buf.data(), 256, 44100);
   CHECK(scope.count() == 0);
+  CHECK(scope.frees() == 0);
 }
 
-TEST_CASE("AllocationScope counts allocations on its own thread") {
+TEST_CASE("AllocationScope counts allocations and frees on its own thread") {
+  auto* outside = new int(1);  // allocated before the scope, freed inside it
   AllocationScope scope;
   CHECK(scope.count() == 0);
+  CHECK(scope.frees() == 0);
   auto* v = new int(7);
   CHECK(scope.count() == 1);
+  CHECK(scope.frees() == 0);
   delete v;
+  CHECK(scope.frees() == 1);
+  delete outside;
+  CHECK(scope.frees() == 2);
+  int* none = nullptr;
+  delete none;  // a null delete frees nothing
+  CHECK(scope.frees() == 2);
   std::vector<int> vec(100);
   CHECK(scope.count() > 1);  // the debug runtime may add container-proxy allocations
 }

@@ -11,35 +11,17 @@
 #include "asset_paths.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
+#include "test_roms.h"
 
 using namespace mirage;
+using mirage_test::romFrom;
+using mirage_test::romWith;
 
 namespace {
-
-// 4 KB ROM with `code` at $F000 and the reset vector pointing at it.
-std::vector<uint8_t> romWith(std::initializer_list<uint8_t> code) {
-  std::vector<uint8_t> rom(4096, 0x12);  // NOP fill
-  size_t i = 0;
-  for (uint8_t b : code) rom[i++] = b;
-  rom[0xFFE] = 0xF0;
-  rom[0xFFF] = 0x00;
-  return rom;
-}
 
 // LDA #v; STA addr  (7 E-cycles)
 std::vector<uint8_t> ldaSta(uint8_t v, uint16_t addr) {
   return {0x86, v, 0xB7, uint8_t(addr >> 8), uint8_t(addr & 0xFF)};
-}
-
-// ROM image: `parts` concatenated at $F000, reset vector at $F000.
-std::vector<uint8_t> romFrom(std::initializer_list<std::vector<uint8_t>> parts) {
-  std::vector<uint8_t> rom(4096, 0x12);
-  size_t i = 0;
-  for (const auto& p : parts)
-    for (uint8_t b : p) rom[i++] = b;
-  rom[0xFFE] = 0xF0;
-  rom[0xFFF] = 0x00;
-  return rom;
 }
 
 // VIA port B: DDRB = $1F (the boot ROM's value), ORB = quarter. 14 E-cycles.
