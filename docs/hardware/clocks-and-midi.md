@@ -51,9 +51,16 @@ per-byte cycle count from `kMidiByteSeconds * kCpuClockHz`.
 - The MIDI interface ties CTS and DCD active, so status bits 2 (DCD) and 3
   (CTS) read 0. After `$03` then `$95` the status register reads `$02` (TDRE).
 - The ACIA IRQ output is wired to the CPU **FIRQ** line.
-- Transmit is instantaneous: a write to `$E101` calls `Machine::onMidiOut`
-  immediately and TDRE stays set. Real hardware would take one byte time per
-  transmitted byte; this is a known simplification.
+- Transmit is double-buffered and paced, as on a 6850. A write to `$E101` goes
+  to the holding register (TDRE=0). When the shift register is idle the byte
+  moves to it at once (TDRE=1 again) and `Machine::onMidiOut(byte, cycle)`
+  fires; `cycle` is `Machine::cycles()` when the byte starts on the wire. The
+  shift register stays busy for one byte time (640 E cycles), then the held
+  byte, if any, follows. A write while TDRE=0 replaces the held byte, which is
+  lost. The TX interrupt (CR6:5 = 01) follows TDRE, which matters to the OS: it
+  writes `$B5` (TX IRQ on) when it queues bytes and `$95` when its queue is
+  empty. Master reset empties both registers. The holding byte, its full flag and
+  the shifter's cycles left are part of the snapshot (version 2).
 - The test `machine paces 1000 MIDI bytes ...` runs a ROM program that sets up
   the ACIA with `$95`, polls RDRF and stores each byte. All 1,000 bytes (including
   `F8` and `FE`) arrive in order with no OVRN, in 1000 x 640 cycles +/- one byte.

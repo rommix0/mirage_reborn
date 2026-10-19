@@ -67,7 +67,7 @@ std::string imagePath() { return std::string("Factory Library/IMG/") + kImage; }
 
 }  // namespace
 
-TEST_CASE("snapshot: header is the MIRG magic, then version 1") {
+TEST_CASE("snapshot: header is the MIRG magic, then version 2") {
   Machine m(idleRom());
   m.powerOn();
   m.runCycles(1000);
@@ -75,7 +75,7 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 1") {
   REQUIRE(snap.size() > 8);
   CHECK(getU32(snap, 0) == fourcc("MIRG"));
   CHECK(getU32(snap, 4) == Machine::kSnapshotVersion);
-  CHECK(Machine::kSnapshotVersion == 1);
+  CHECK(Machine::kSnapshotVersion == 2);
 }
 
 TEST_CASE("snapshot: the ROM's SHA-1 follows the version, and a different ROM is rejected") {
@@ -128,7 +128,7 @@ TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes
     CHECK(m.saveState() == before);
     CHECK(m.cycles() == cycles);
   };
-  for (uint32_t version : {0u, 2u, 99u, 0xFFFFFFFFu}) {
+  for (uint32_t version : {0u, 1u, 3u, 99u, 0xFFFFFFFFu}) {
     INFO("version " << version);
     auto bad = snap;
     setU32(bad, 4, version);

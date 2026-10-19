@@ -50,8 +50,8 @@ Machine::Machine(std::span<const uint8_t> bootRom)
     bank_ = uint8_t(b & 3);
     wd_.setMotor((b & 0x10) == 0);
   };
-  acia_.onTransmit = [this](uint8_t b) {
-    if (onMidiOut) onMidiOut(b);
+  acia_.onTransmit = [this](uint8_t b, uint64_t cycle) {
+    if (onMidiOut) onMidiOut(b, cycle);
   };
   // Each DOC scan runs the voice filters in emulated time, so an A/D
   // conversion sees the analog mix of that instant (filters.md 1).
@@ -252,6 +252,7 @@ void Machine::ioWrite(uint16_t addr, uint8_t value) {
 void Machine::tickDevices(uint32_t cycles) {
   via_.tick(cycles);  // Phi2 = the CPU E clock
   wd_.tick(cycles);
+  acia_.tick(cycles, cycles_);  // cycles_ already includes this step
   // The DOC runs on the master clock: E cycles x kMasterClockHz / kCpuClockHz,
   // remainder carried.
   const uint64_t master = masterRem_ + uint64_t(cycles) * kMasterClockHz;
@@ -259,15 +260,15 @@ void Machine::tickDevices(uint32_t cycles) {
   masterRem_ = uint32_t(master % kCpuClockHz);
   updateIrq();
   updateNmi();
-  // cycles_ already includes this step. One tick is a single instruction, far
-  // shorter than a MIDI byte, so at most one byte falls due.
+  // One tick is a single instruction, far shorter than a MIDI byte, so at most
+  // one byte falls due.
   if (midiCount_ != 0 && cycles_ >= nextMidiCycle_) {
     acia_.receiveByte(midiRing_[midiHead_]);
     midiHead_ = (midiHead_ + 1) % kMidiQueueCapacity;
     --midiCount_;
     nextMidiCycle_ += kMidiByteCycles;
-    updateFirq();
   }
+  updateFirq();  // the transmit side moves TDRE as well as the receive side
 }
 
 std::unique_ptr<DiskImage> Machine::insertDisk(std::unique_ptr<DiskImage> disk) {
@@ -448,6 +449,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   }
   bank_ = bank;
   cycles_ = cycles;
+  acia_.tick(0, cycles_);  // the ACIA stamps writes with the last tick's cycle
   credit_ = credit;
   ram_ = ram;
   exp_ = exp;

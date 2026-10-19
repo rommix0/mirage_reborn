@@ -34,7 +34,7 @@ class Machine : private Bus {
   static constexpr uint32_t kSampleRamSize = 0x20000;
   // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
   // the layout changes; loadState() rejects any other value.
-  static constexpr uint32_t kSnapshotVersion = 1;
+  static constexpr uint32_t kSnapshotVersion = 2;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);
@@ -72,13 +72,17 @@ class Machine : private Bus {
   // delivered to the ACIA. flushMidi() discards them (a byte already in the
   // ACIA stays). powerOn() discards queued bytes and zeroes midiOverflows(),
   // which is host diagnostics and not saved; loadState() leaves it alone.
-  // Bytes the OS transmits are passed to onMidiOut.
+  // Bytes the OS transmits are passed to onMidiOut, paced as on the wire: one
+  // byte per 640 E cycles (Acia6850::kByteCycles). `cycle` is cycles() at the
+  // moment the byte starts on the wire (for a byte that waited in the ACIA's
+  // holding register, when the previous byte finished), so a host can place
+  // the output in time. It runs on the thread that runs the machine.
   static constexpr size_t kMidiQueueCapacity = 4096;
   void queueMidi(std::span<const uint8_t> bytes);
   size_t midiQueueDepth() const { return midiCount_; }
   uint64_t midiOverflows() const { return midiOverflows_; }
   void flushMidi();
-  std::function<void(uint8_t)> onMidiOut;
+  std::function<void(uint8_t byte, uint64_t cycle)> onMidiOut;
 
   // Floppy drive. insertDisk replaces any disk already in the drive (aborting a
   // command in flight, as an eject does) and returns the disk it replaced, or
@@ -148,7 +152,7 @@ class Machine : private Bus {
   // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
   // DC blocker, fractional cycles, pending samples), WD1772 (registers and any
   // command in flight), the inserted disk with its dirty flag (or "no disk"),
-  // ACIA, the MIDI input queue with its next-delivery cycle, and the panel
+  // ACIA (with the transmit holding register and shifter), the MIDI input queue with its next-delivery cycle, and the panel
   // (held keys and display history). Restoring a snapshot into any Machine built
   // with the same boot ROM, then running the same inputs, gives bit-identical
   // state and audio.

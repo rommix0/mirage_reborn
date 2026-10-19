@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <utility>
 #include <vector>
 
 #include "mirage/acia6850.h"
@@ -94,15 +95,73 @@ TEST_CASE("acia overrun keeps the first byte and flags OVRN") {
   CHECK_FALSE(a.irq());
 }
 
-TEST_CASE("acia transmit calls onTransmit and TDRE stays set") {
+TEST_CASE("acia transmit into an idle shifter goes out at once and TDRE stays set") {
   Acia6850 a;
   romSetup(a);
-  std::vector<uint8_t> sent;
-  a.onTransmit = [&](uint8_t b) { sent.push_back(b); };
+  std::vector<std::pair<uint8_t, uint64_t>> sent;
+  a.onTransmit = [&](uint8_t b, uint64_t cycle) { sent.emplace_back(b, cycle); };
+  a.tick(100, 100);
   a.write(1, 0x90);
-  a.write(1, 0x40);
-  CHECK(sent == std::vector<uint8_t>{0x90, 0x40});
+  REQUIRE(sent.size() == 1);
+  CHECK(sent[0] == std::make_pair(uint8_t(0x90), uint64_t(100)));
   CHECK((a.read(0) & kTdre) == kTdre);
+}
+
+TEST_CASE("ACIA TDRE reads 0 while the holding register is full") {
+  Acia6850 a;
+  a.write(0, 0x03);
+  a.write(0, 0x35);  // CR6:5 = 01 (TX IRQ on), RX IRQ off
+  std::vector<std::pair<uint8_t, uint64_t>> sent;
+  a.onTransmit = [&](uint8_t b, uint64_t cycle) { sent.emplace_back(b, cycle); };
+  a.tick(10, 10);
+  a.write(1, 0x11);  // to the shifter at once
+  CHECK(a.irq());    // TDRE is still 1
+  a.write(1, 0x22);  // the shifter is busy: held
+  CHECK(a.read(0) == 0);  // TDRE=0, and with it the TX interrupt
+  CHECK_FALSE(a.irq());
+  a.write(1, 0x33);  // replaces 0x22, which is lost
+  a.tick(Acia6850::kByteCycles - 1, 10 + Acia6850::kByteCycles - 1);
+  CHECK(a.read(0) == 0);  // one cycle short of the byte time
+  a.tick(1, 10 + Acia6850::kByteCycles);
+  CHECK(a.read(0) == (kTdre | kIrq));
+  REQUIRE(sent.size() == 2);
+  CHECK(sent[0] == std::make_pair(uint8_t(0x11), uint64_t(10)));
+  CHECK(sent[1] == std::make_pair(uint8_t(0x33), uint64_t(10 + Acia6850::kByteCycles)));
+  // A held byte that goes out mid-tick is stamped when the shifter freed, not
+  // at the end of the tick.
+  a.write(1, 0x55);  // 0x33 is on the wire now, so this is held
+  a.tick(3 * Acia6850::kByteCycles, 10 + 4 * Acia6850::kByteCycles);
+  REQUIRE(sent.size() == 3);
+  CHECK(sent[2].first == 0x55);
+  CHECK(sent[2].second == 10 + 2 * Acia6850::kByteCycles);
+}
+
+TEST_CASE("ACIA save/load round-trips a byte in flight") {
+  Acia6850 a;
+  romSetup(a);
+  std::vector<std::pair<uint8_t, uint64_t>> sentA, sentB;
+  a.onTransmit = [&](uint8_t b, uint64_t cycle) { sentA.emplace_back(b, cycle); };
+  a.write(1, 0xA1);
+  a.write(1, 0xA2);
+  a.tick(100, 100);
+  StateWriter w;
+  a.save(w);
+  const auto blob = w.take();
+
+  Acia6850 b;
+  b.onTransmit = [&](uint8_t v, uint64_t cycle) { sentB.emplace_back(v, cycle); };
+  StateReader r(blob);
+  b.load(r);
+  CHECK(r.atEnd());
+  CHECK(b.read(0) == a.read(0));
+  CHECK((b.read(0) & kTdre) == 0);  // the held byte is still waiting
+  a.tick(Acia6850::kByteCycles, 100 + Acia6850::kByteCycles);
+  b.tick(Acia6850::kByteCycles, 100 + Acia6850::kByteCycles);
+  REQUIRE(sentA.size() == 2);
+  REQUIRE(sentB.size() == 1);  // only the held byte; 0xA1 left before the save
+  CHECK(sentB[0] == sentA[1]);
+  CHECK(sentA[1] == std::make_pair(uint8_t(0xA2), uint64_t(Acia6850::kByteCycles)));
+  CHECK((b.read(0) & kTdre) == kTdre);
 }
 
 TEST_CASE("acia TX interrupt asserts while TDRE and CR6:5 = 01") {
@@ -115,13 +174,21 @@ TEST_CASE("acia TX interrupt asserts while TDRE and CR6:5 = 01") {
   CHECK_FALSE(a.irq());
 }
 
-TEST_CASE("acia master reset clears receive state") {
+TEST_CASE("acia master reset clears receive state and both transmit registers") {
   Acia6850 a;
   romSetup(a);
+  std::vector<uint8_t> sent;
+  a.onTransmit = [&](uint8_t b, uint64_t) { sent.push_back(b); };
+  a.write(1, 0x01);
+  a.write(1, 0x02);  // held
   a.receiveByte(1);
   a.receiveByte(2);
   a.write(0, 0x03);
   CHECK(a.read(0) == kTdre);
+  a.tick(2 * Acia6850::kByteCycles, 2 * Acia6850::kByteCycles);
+  CHECK(sent == std::vector<uint8_t>{0x01});  // the held byte was discarded
+  a.write(1, 0x03);  // the shifter is idle again
+  CHECK(sent == std::vector<uint8_t>{0x01, 0x03});
   a.write(0, kRomControl);
   CHECK_FALSE(a.irq());
 }
@@ -143,7 +210,7 @@ TEST_CASE("acia state round-trips and rejects bad state") {
   CHECK(b.read(1) == 0x5A);
 
   auto bad = blob;
-  bad[bad.size() - 1] = 7;  // flag byte out of range
+  bad[bad.size() - 1] = 0x7F;  // shifter cycles left (high byte): past one byte time
   Acia6850 c;
   StateReader rb(bad);
   CHECK_THROWS_AS(c.load(rb), StateError);
@@ -193,15 +260,71 @@ TEST_CASE("machine MIDI input is deterministic across save and load") {
   CHECK(a.saveState() == b.saveState());
 }
 
-TEST_CASE("machine MIDI output reaches onMidiOut immediately") {
+TEST_CASE("machine MIDI output is paced at one byte per 640 cycles") {
+  // reset the ACIA, then three times: poll TDRE, LDA #byte, STA $E101
+  std::vector<uint8_t> code = {0x86, 0x03, 0xB7, 0xE1, 0x00};
+  for (uint8_t b : std::vector<uint8_t>{0x90, 0x40, 0x7F}) {
+    const std::vector<uint8_t> one = {
+        0xB6, 0xE1, 0x00,  // poll: LDA $E100
+        0x85, 0x02,        // BITA #$02
+        0x27, 0xF9,        // BEQ poll
+        0x86, b,           // LDA #byte
+        0xB7, 0xE1, 0x01,  // STA $E101
+    };
+    code.insert(code.end(), one.begin(), one.end());
+  }
+  code.insert(code.end(), {0x20, 0xFE});  // spin
+  Machine m(rom(code));
+  std::vector<std::pair<uint8_t, uint64_t>> out;
+  m.onMidiOut = [&](uint8_t b, uint64_t cycle) { out.emplace_back(b, cycle); };
+  m.powerOn();
+  m.runCycles(4000);
+  REQUIRE(out.size() == 3);
+  CHECK(out[0].first == 0x90);
+  CHECK(out[1].first == 0x40);
+  CHECK(out[2].first == 0x7F);
+  const uint64_t span = Acia6850::kByteCycles;
+  CHECK(out[0].second < 40);  // the first write, a few instructions in
+  CHECK(out[1].second >= out[0].second + span - 8);
+  CHECK(out[1].second <= out[0].second + span + 8);
+  CHECK(out[2].second >= out[1].second + span - 8);
+  CHECK(out[2].second <= out[1].second + span + 8);
+}
+
+TEST_CASE("machine MIDI output: two unpolled writes both go out, 640 cycles apart") {
   // reset ACIA, then LDA #$90; STA $E101; LDA #$40; STA $E101
   Machine m(rom({0x86, 0x03, 0xB7, 0xE1, 0x00, 0x86, 0x90, 0xB7, 0xE1, 0x01,
                  0x86, 0x40, 0xB7, 0xE1, 0x01}));
-  std::vector<uint8_t> out;
-  m.onMidiOut = [&](uint8_t b) { out.push_back(b); };
+  std::vector<std::pair<uint8_t, uint64_t>> out;
+  std::vector<uint64_t> seenAt;  // cycles() when each callback ran
+  m.onMidiOut = [&](uint8_t b, uint64_t cycle) {
+    out.emplace_back(b, cycle);
+    seenAt.push_back(m.cycles());
+  };
   m.powerOn();
   m.runCycles(40);
-  CHECK(out == std::vector<uint8_t>{0x90, 0x40});
+  REQUIRE(out.size() == 1);  // the second byte waits in the holding register
+  CHECK(out[0].first == 0x90);
+  CHECK(out[0].second == seenAt[0]);  // stamped at the write itself
+  m.runCycles(2000);
+  REQUIRE(out.size() == 2);
+  CHECK(out[1].first == 0x40);
+  CHECK(out[1].second == out[0].second + Acia6850::kByteCycles);
+  CHECK(seenAt[1] >= out[1].second);
+  CHECK(seenAt[1] < out[1].second + 8);
+}
+
+TEST_CASE("machine rejects a version 1 snapshot") {
+  Machine m(rom(kReceiver));
+  m.powerOn();
+  m.runCycles(100);
+  auto snap = m.saveState();
+  REQUIRE(Machine::kSnapshotVersion == 2);
+  const auto before = snap;
+  snap[4] = 1;  // the version u32, little endian, follows the 4-byte magic
+  REQUIRE(snap[5] == 0);
+  CHECK_THROWS_AS(m.loadState(snap), StateError);
+  CHECK(m.saveState() == before);
 }
 
 TEST_CASE("machine ACIA interrupt drives FIRQ, not IRQ") {
@@ -241,12 +364,12 @@ TEST_CASE("machine loadState rejects a corrupt ACIA or MIDI section and stays un
   m.powerOn();
   const auto before = m.saveState();
 
-  // Stream tail: ACIA (tag + 4), next-delivery u64, count u32, 2 queued bytes,
-  // then the 84-byte panel section.
+  // Stream tail: ACIA (tag + 4 + held byte, held flag, shifter u32), next-delivery
+  // u64, count u32, 2 queued bytes, then the 84-byte panel section.
   constexpr size_t kPanelBytes = 4 + 4 + 2 + 2 * 8 * 8;
   const size_t queueEnd = snap.size() - kPanelBytes;
   auto badAcia = snap;
-  badAcia[queueEnd - 2 - 4 - 8 - 1] = 7;  // OVRN flag
+  badAcia[queueEnd - 2 - 4 - 8 - 6 - 1] = 7;  // OVRN flag
   CHECK_THROWS_AS(m.loadState(badAcia), StateError);
   CHECK(m.saveState() == before);
 
