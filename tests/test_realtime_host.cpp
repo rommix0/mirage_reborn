@@ -413,6 +413,27 @@ TEST_CASE("host invalid rate writes silence but still applies an eject") {
   CHECK(host.machineForTest().cycles() == cycles);
 }
 
+TEST_CASE("host invalid rate discards waiting MIDI instead of replaying it later") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  block(host, 64);
+  const uint8_t on[] = {0x90, 60, 100};
+  std::vector<uint8_t> sysex(30, 0x01);
+  sysex.front() = 0xF0;
+  sysex.back() = 0xF7;
+  REQUIRE(host.postMidi(on, 0.0));
+  REQUIRE(host.postMidi(sysex, 0.0));
+  std::vector<float> buf(64);
+  host.process(buf.data(), 64, 0.0, 0.0);  // the device has stopped
+  CHECK(host.status().midiDropped == 33);
+  block(host, 64, 0.0);  // the rate recovers: nothing stale arrives
+  CHECK(host.machineForTest().midiQueueDepth() == 0);
+  CHECK(host.status().midiDropped == 33);
+  REQUIRE(host.postMidi(on, 0.0));  // new input still flows
+  block(host, 64, 0.0);
+  CHECK(host.machineForTest().midiQueueDepth() == 3);
+}
+
 TEST_CASE("host MIDI queue full drops and counts") {
   RealtimeHost host(kIdleRom);
   host.prepare(64, 48000);
@@ -462,13 +483,17 @@ TEST_CASE("host panic flushes and sends CC123 on 16 channels") {
   RealtimeHost host(romFrom({kAciaReceiver}));
   host.prepare(64, 48000);
   block(host, 64);  // the receiver sets up the ACIA
+  // Stale input in both places: 100 bytes waiting in the host's MIDI queue
+  // (9 commands) and 20 already in the Machine's input queue.
   const std::vector<uint8_t> stale(100, 0xF8);
-  host.machineForTest().queueMidi(stale);
+  REQUIRE(host.postMidi(stale, 0.0));
+  host.machineForTest().queueMidi(std::span<const uint8_t>(stale).first(20));
   REQUIRE(host.postPanic());
-  block(host, 16);
+  block(host, 16, 0.0);
   const size_t depth = host.machineForTest().midiQueueDepth();
   CHECK(depth <= 48);
   CHECK(depth >= 47);  // 16 frames = 667 cycles: at most one byte delivered
+  CHECK(host.status().midiDropped == 0);  // a flush, not a loss
   for (int i = 0; i < 400; ++i) block(host, 64);
   for (int ch = 0; ch < 16; ++ch) {
     CHECK(host.machineForTest().peek(uint16_t(0x8000 + 3 * ch)) == 0xB0 + ch);

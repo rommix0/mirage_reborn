@@ -70,6 +70,7 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
   applyUi();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
+    midiDropped_.fetch_add(discardMidiInput(), kRelaxed);  // stale by the time audio resumes
     publishStatus();
     return;
   }
@@ -155,6 +156,7 @@ void RealtimeHost::applyUi() {
         ejectCycle_ = 0;
         break;
       case Type::Panic:
+        discardMidiInput();  // or it would follow the All Notes Off in this block
         machine_->flushMidi();
         machine_->queueMidi(kPanicBytes);
         break;
@@ -205,6 +207,15 @@ void RealtimeHost::countRingOverflows() {
   const uint64_t overflows = machine_->midiOverflows();
   if (overflows > ringOverflowsSeen_) midiDropped_.fetch_add(overflows - ringOverflowsSeen_, kRelaxed);
   ringOverflowsSeen_ = overflows;
+}
+
+size_t RealtimeHost::discardMidiInput() {
+  // We are the consumer, so popping is safe. At most one queue's worth: the
+  // producer may keep posting while we drain.
+  size_t bytes = 0;
+  for (size_t i = 0; i < kMidiQueueCommands && q_->midi.pop(q_->events[0]); ++i)
+    bytes += q_->events[0].size;
+  return bytes;
 }
 
 void RealtimeHost::publishStatus() {

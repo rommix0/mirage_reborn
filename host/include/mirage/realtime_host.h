@@ -100,8 +100,10 @@ class RealtimeHost {
   //     passed and makes any swap insert that is due;
   //  5. publishes status().
   // An invalid hostRate (0, NaN, out of Machine's range) still applies the UI
-  // queue and publishes status, but writes silence, advances nothing and leaves
-  // MIDI commands queued.
+  // queue and publishes status, but writes silence and advances nothing. MIDI
+  // commands waiting meanwhile are discarded and counted in midiDropped (stale
+  // input, as MidiMessageCollector drops it), so old notes do not replay when
+  // the rate recovers.
   void process(float* out, size_t frames, double hostRate, double nowSeconds);
 
   // MIDI-input thread only (the single producer of the MIDI queue). Messages
@@ -124,8 +126,10 @@ class RealtimeHost {
   // pending insert (returned Unused).
   bool postEject();
   bool postReset();  // Machine::powerOn(); the disk stays in, held keys stay held
-  // Flushes the Machine's MIDI input queue, then queues All Notes Off (CC 123)
-  // on all 16 channels: B0+ch 7B 00, 48 bytes, at the start of the block.
+  // Discards all MIDI input not yet played: the commands waiting in the host's
+  // MIDI queue (not counted in midiDropped: a deliberate flush) and the
+  // Machine's input queue. Then queues All Notes Off (CC 123) on all 16
+  // channels: B0+ch 7B 00, 48 bytes, at the start of the block.
   bool postPanic();
   // `dest` must be a writable image buffer (DiskImage::blank()), not a
   // moved-from DiskImage, so the copy needs no allocation. It comes back as
@@ -159,9 +163,12 @@ class RealtimeHost {
   void returnDisk(std::unique_ptr<DiskImage> disk, DiskReturn why, uint64_t writeCount = 0);
   void flushStalled();
   void countRingOverflows();  // adds new Machine::midiOverflows() to midiDropped
+  size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
   void publishStatus();
 
   std::array<uint8_t, 20> romSha1_{};
+  // q_ is declared before machine_ so machine_ is destroyed first: the
+  // Machine's onMidiOut callback dereferences q_.
   std::unique_ptr<Queues> q_;
   std::unique_ptr<Machine> machine_;  // about 200 KB; touched by the audio thread only
 
