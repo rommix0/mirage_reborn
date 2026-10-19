@@ -66,7 +66,7 @@ constexpr PanelGeometry kGeometry = {
     /*volume*/ {kColSlider - 16, 40, 32, 156},  // ticks at its left, the fader slot down its centre
     /*driveSlot*/ {140, 250, 280, 20},
     /*driveLed*/ {436, 256, 8, 8},  // centred on (440, 260)
-    /*ensoniqBadge*/ {20, 148, 96, 26},  // centred on the pinstripe
+    /*ensoniqBadge*/ {14, 151, 108, 20},  // centred on the pinstripe; the logo's 5.4:1 aspect
     /*mirageLogo*/ {680, 50, 280, 80},
     /*mirageSubtitle*/ {680, 136, 280, 12},
     /*rowRuleY*/ {(kRow1 + kRow2) / 2 - 6, (kRow2 + kRow3) / 2 - 6},  // above the next row's labels

@@ -1,5 +1,9 @@
 #include "PanelComponent.h"
 
+#if MIRAGE_HAS_ENSONIQ_LOGO
+#include <BinaryData.h>
+#endif
+
 namespace {
 
 using juce::Colour;
@@ -48,6 +52,22 @@ juce::Path textPath(const juce::String& text, const juce::Font& font, Rectangle<
   glyphs.createPath(p);
   p.applyTransform(p.getTransformToScaleToFit(area, true, juce::Justification::centred));
   return p;
+}
+
+// The ensoniq badge (box and logotype) from the embedded ensoniq_logo.svg, inked
+// in the panel's branding grey; null when the build had no logo file.
+std::unique_ptr<juce::Drawable> makeEnsoniqLogo() {
+#if MIRAGE_HAS_ENSONIQ_LOGO
+  auto logo = juce::Drawable::createFromImageData(MirageBranding::ensoniq_logo_svg,
+                                                  size_t(MirageBranding::ensoniq_logo_svgSize));
+  if (logo) {
+    logo->replaceColour(juce::Colours::black, kBranding);   // paths with no fill
+    logo->replaceColour(Colour(0xff231f20), kBranding);     // the "e" (class cls-1)
+  }
+  return logo;
+#else
+  return nullptr;
+#endif
 }
 
 // The drive's faceplate on the lip: the slot and its activity LED.
@@ -204,7 +224,10 @@ class PanelComponent::SliderLook : public juce::LookAndFeel_V4 {
 // ---- PanelComponent --------------------------------------------------------
 
 PanelComponent::PanelComponent(mirage::RealtimeHost* host, const mirage::HostStatus& status)
-    : host_(host), status_(status), sliderLook_(std::make_unique<SliderLook>()) {
+    : host_(host),
+      status_(status),
+      ensoniqLogo_(makeEnsoniqLogo()),
+      sliderLook_(std::make_unique<SliderLook>()) {
   setOpaque(true);
   for (const mirage::PanelButton& b : mirage::panelButtons()) {
     buttons_.push_back(std::make_unique<Button>(*this, b));
@@ -356,12 +379,17 @@ void PanelComponent::paintLegends(juce::Graphics& g) const {
 
 void PanelComponent::paintBranding(juce::Graphics& g) const {
   const auto& geo = mirage::panelGeometry();
-  // ensoniq: an outlined logotype in an outlined box.
+  // ensoniq: the logotype in its box, from the artwork when the build has it,
+  // else an outlined text stand-in.
   const auto badge = toRect(geo.ensoniqBadge);
   g.setColour(kBranding);
-  g.drawRoundedRectangle(badge, 4.0f, 1.2f);
-  g.strokePath(textPath("ensoniq", panelFont(40.0f, true), badge.reduced(10.0f, 5.0f)),
-               juce::PathStrokeType(0.8f));
+  if (ensoniqLogo_) {
+    ensoniqLogo_->drawWithin(g, badge, juce::RectanglePlacement::centred, 1.0f);
+  } else {
+    g.drawRoundedRectangle(badge, 4.0f, 1.2f);
+    g.strokePath(textPath("ensoniq", panelFont(40.0f, true), badge.reduced(10.0f, 4.0f)),
+                 juce::PathStrokeType(0.8f));
+  }
   // Mirage in solid yellow, its subtitle in small widely spaced caps.
   g.setColour(kMirageYellow);
   g.fillPath(textPath("Mirage",
