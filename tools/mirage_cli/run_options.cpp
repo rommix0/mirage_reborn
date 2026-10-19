@@ -106,7 +106,6 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   double seconds = 10, traceFrom = 0;
   std::map<PanelKey, std::vector<Hold>> holds;
   std::vector<RunEvent> midi;
-  std::string unavailable;
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view opt = args[i];
@@ -163,13 +162,19 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
       const auto r = parseUint(v, 768000, 10);
       if (!r || *r < 1000) return bad(opt, v);
       o.rate = int(*r);
-    } else if (opt == "--snapshot-out" || opt == "--snapshot-in") {
-      unavailable += std::string(opt) + ": not available yet (Task 13)\n";
+    } else if (opt == "--snapshot-out") {
+      if (v.empty()) return bad(opt, v);
+      o.snapshotOut = v;
+    } else if (opt == "--snapshot-in") {
+      if (v.empty()) return bad(opt, v);
+      o.snapshotIn = v;
     } else {
       return RunArgsError{2, ""};
     }
   }
-  if (!unavailable.empty()) return RunArgsError{1, unavailable};
+  if (!o.snapshotIn.empty() && !o.disk.empty())
+    return RunArgsError{
+        2, "--disk cannot be combined with --snapshot-in: the snapshot holds its own disk"};
 
   o.endCycle = toCycles(seconds);
   if (!o.trace.empty()) o.events.push_back({toCycles(traceFrom), RunEvent::Kind::TraceOn, {}, {}});

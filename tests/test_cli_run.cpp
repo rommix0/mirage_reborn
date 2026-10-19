@@ -135,7 +135,7 @@ TEST_CASE("cli run rejects bad values with exit code 2") {
   }
 }
 
-TEST_CASE("cli run usage errors and unavailable options") {
+TEST_CASE("cli run usage errors") {
   SECTION("unknown option") {
     const auto e = parseFails({"--bogus", "1"});
     CHECK(e.exitCode == 2);
@@ -146,12 +146,37 @@ TEST_CASE("cli run usage errors and unavailable options") {
     CHECK(e.exitCode == 2);
     CHECK(e.message.empty());
   }
-  SECTION("--snapshot-* is not available yet") {
-    const auto e = parseFails({"--snapshot-out", "s", "--snapshot-in", "t"});
-    CHECK(e.exitCode == 1);
+}
+
+TEST_CASE("cli run --snapshot-in and --snapshot-out") {
+  SECTION("defaults: neither") {
+    const auto o = parseOk({});
+    CHECK(o.snapshotIn.empty());
+    CHECK(o.snapshotOut.empty());
+  }
+  SECTION("both given, with events relative to the loaded state") {
+    const auto o = parseOk({"--snapshot-in", "a.snap", "--snapshot-out", "b.snap", "--seconds",
+                            "2", "--note", "60:100@0.5:1"});
+    CHECK(o.snapshotIn == "a.snap");
+    CHECK(o.snapshotOut == "b.snap");
+    REQUIRE(o.events.size() == 2);
+    CHECK(o.events[0].cycle == kSecond / 2);
+    CHECK(o.endCycle == 2 * kSecond);
+  }
+  SECTION("empty file names are usage errors") {
+    for (const char* opt : {"--snapshot-in", "--snapshot-out"}) {
+      const auto e = parseFails({opt, ""});
+      CHECK(e.exitCode == 2);
+      CHECK(e.message == std::string("bad value for ") + opt + ": ");
+    }
+  }
+  SECTION("--disk cannot be combined with --snapshot-in, but can with --snapshot-out") {
+    const auto e = parseFails({"--disk", "d.img", "--snapshot-in", "a.snap"});
+    CHECK(e.exitCode == 2);
     CHECK(e.message ==
-          "--snapshot-out: not available yet (Task 13)\n"
-          "--snapshot-in: not available yet (Task 13)\n");
+          "--disk cannot be combined with --snapshot-in: the snapshot holds its own disk");
+    const auto o = parseOk({"--disk", "d.img", "--snapshot-out", "b.snap"});
+    CHECK(o.disk == "d.img");
   }
 }
 

@@ -53,8 +53,8 @@ mirage_cli_test(cli_run_note_without_duration 2 "run|--note|60:100@1"
 mirage_cli_test(cli_run_bad_midi_hex 2 "run|--midi-hex|ZZ@1"
                 "-DERR=^bad value for --midi-hex: ZZ@1/$")
 mirage_cli_test(cli_run_bad_rate 2 "run|--rate|100" "-DERR=^bad value for --rate: 100/$")
-mirage_cli_test(cli_run_snapshot_not_available_yet 1 "run|--snapshot-in|x.snap"
-                "-DERR=^--snapshot-in: not available yet .Task 13./$")
+mirage_cli_test(cli_run_snapshot_in_with_disk 2 "run|--disk|d.img|--snapshot-in|x.snap"
+                "-DERR=^--disk cannot be combined with --snapshot-in: the snapshot holds its own disk/$")
 mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
                 "-DERR=^no-such-rom.bin: cannot read a 4096-byte boot ROM/$")
 # Real runs (skipped without the user's ROM / disk).
@@ -74,3 +74,20 @@ mirage_cli_test(cli_run_wav_snd_a01 0
                 "run|--disk|${MIRAGE_TEST_SND_A01}|--seconds|10|--rate|22050|--note|60:100@9:0.5|--wav|${CMAKE_CURRENT_BINARY_DIR}/cli_test.wav"
                 "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
                 "-DOUT=^wav: .*cli_test.wav 220500 samples at 22050 Hz, peak [0-9.]+, rms [0-9.]+/display: [0-9A-F][0-9A-F] [0-9A-F][0-9A-F]/illegal: 0/sectors: [2-9][0-9]+/cycles: 200000[0-3][0-9]/$")
+# Snapshots: a missing or unusable --snapshot-in file exits 1 (the ROM file is not a snapshot);
+# a 40 s run written with --snapshot-out restores with --snapshot-in into a note that renders
+# the same WAV every time (tests/cli_snapshot_roundtrip.cmake).
+mirage_cli_test(cli_run_snapshot_in_missing 1 "run|--snapshot-in|no-such-file.snap|--seconds|1"
+                "-DNEEDS=${MIRAGE_TEST_ROM}" "-DERR=^no-such-file.snap: cannot read the snapshot/$")
+mirage_cli_test(cli_run_snapshot_in_garbage 1 "run|--snapshot-in|${MIRAGE_TEST_ROM}|--seconds|1"
+                "-DNEEDS=${MIRAGE_TEST_ROM}" "-DERR=mirage.bin: not a usable snapshot ")
+mirage_cli_test(cli_run_snapshot_out_unwritable 1
+                "run|--seconds|0.1|--snapshot-out|${CMAKE_CURRENT_BINARY_DIR}/no_such_dir/x.snap"
+                "-DNEEDS=${MIRAGE_TEST_ROM}" "-DERR=^cannot write .*x.snap/$")
+add_test(NAME cli_run_snapshot_round_trip
+         COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:mirage_cli> -DDISK=${MIRAGE_TEST_SND_A01}
+                 -DDIR=${CMAKE_CURRENT_BINARY_DIR}/snapshot_e2e
+                 "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_snapshot_roundtrip.cmake)
+set_tests_properties(cli_run_snapshot_round_trip PROPERTIES
+                     SKIP_REGULAR_EXPRESSION "SKIP: missing asset")

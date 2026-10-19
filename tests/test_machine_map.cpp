@@ -238,7 +238,11 @@ TEST_CASE("machine loadState leaves the machine unchanged on error") {
   CHECK(m.saveState() == before);
 
   auto badBank = snap;
-  badBank[4] = 9;
+  const std::array<uint8_t, 4> mchnTag = {'N', 'H', 'C', 'M'};  // fourcc("MCHN") as a LE u32
+  const auto mchnAt =
+      size_t(std::search(snap.begin(), snap.end(), mchnTag.begin(), mchnTag.end()) - snap.begin());
+  REQUIRE(mchnAt < snap.size());
+  badBank[mchnAt + 4] = 9;  // the bank byte follows the tag
   CHECK_THROWS_AS(m.loadState(badBank), StateError);
   CHECK(m.saveState() == before);
 

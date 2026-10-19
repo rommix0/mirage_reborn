@@ -15,6 +15,7 @@ add_executable(mirage_tests
   test_disasm6809.cpp
   test_boot.cpp
   test_audio.cpp
+  test_snapshot.cpp
   test_cli_run.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_cli_core Catch2::Catch2WithMain)

@@ -54,8 +54,11 @@ int usage() {
       "      note-off at T+DUR. --trace writes one line per instruction from\n"
       "      --trace-from (default 0). At the end prints the display segments,\n"
       "      the illegal-opcode count, the FDC sectors read and the E cycles.\n"
-      "      --wav/--rate (Task 12) and --snapshot-* (Task 13) are not available\n"
-      "      yet and fail.\n",
+      "      --wav writes the audio as a 16-bit mono WAV at --rate (default 48000).\n"
+      "      --snapshot-out writes the whole machine state (Machine::saveState) at\n"
+      "      the end of the run. --snapshot-in loads one after power-on instead of\n"
+      "      booting: --seconds and the event times are then relative to the loaded\n"
+      "      state, and the snapshot carries its own disk (so no --disk).\n",
       stderr);
   return 2;
 }
@@ -183,6 +186,19 @@ int run(int argc, char** argv) {
     }
   }
   m->powerOn();
+  if (!o.snapshotIn.empty()) {
+    const std::vector<uint8_t> snap = readAll(o.snapshotIn);
+    if (snap.empty()) {
+      std::fprintf(stderr, "%s: cannot read the snapshot\n", o.snapshotIn.c_str());
+      return 1;
+    }
+    try {
+      m->loadState(snap);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "%s: not a usable snapshot (%s)\n", o.snapshotIn.c_str(), e.what());
+      return 1;
+    }
+  }
 
   std::ofstream trace;
   if (!o.trace.empty()) {
@@ -212,6 +228,18 @@ int run(int argc, char** argv) {
     const double rms = audio.empty() ? 0.0 : std::sqrt(sumSq / double(audio.size()));
     std::printf("wav: %s %zu samples at %d Hz, peak %.4f, rms %.4f\n", o.wav.c_str(),
                 audio.size(), o.rate, peak, rms);
+  }
+
+  if (!o.snapshotOut.empty()) {
+    const std::vector<uint8_t> snap = m->saveState();
+    std::ofstream f(o.snapshotOut, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(snap.data()), std::streamsize(snap.size()));
+    f.close();
+    if (!f) {
+      std::fprintf(stderr, "cannot write %s\n", o.snapshotOut.c_str());
+      return 1;
+    }
+    std::printf("snapshot: %s %zu bytes\n", o.snapshotOut.c_str(), snap.size());
   }
 
   const DisplayState d = m->display();

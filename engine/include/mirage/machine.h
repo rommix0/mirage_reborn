@@ -32,6 +32,9 @@ class Machine : private Bus {
  public:
   static constexpr uint32_t kBootRomSize = 0x1000;
   static constexpr uint32_t kSampleRamSize = 0x20000;
+  // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
+  // the layout changes; loadState() rejects any other value.
+  static constexpr uint32_t kSnapshotVersion = 1;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);
@@ -102,10 +105,25 @@ class Machine : private Bus {
   // oscillators before the stream passes +-1.0.
   static constexpr float kOutputGain = 0.5f;
 
-  // The saved state includes the FDC, the DOC (with its A/D conversion), the
-  // filter bank and the inserted disk (or "no disk").
+  // Whole-machine snapshot, for restoring a session exactly (a DAW project).
+  // Layout: fourcc("MIRG"), u32 kSnapshotVersion, then one tagged section per
+  // part: the machine core (bank, cycle count and credit, main/expansion/sample
+  // RAM), CPU (registers, wait state, interrupt lines), VIA, DOC (oscillators,
+  // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
+  // DC blocker, fractional cycles, pending samples), WD1772 (registers and any
+  // command in flight), the inserted disk with its dirty flag (or "no disk"),
+  // ACIA, the MIDI input queue with its next-delivery cycle, and the panel
+  // (held keys and display history). Restoring a snapshot into any Machine built
+  // with the same boot ROM, then running the same inputs, gives bit-identical
+  // state and audio.
+  // Deliberately not saved, because it is not emulated state: the boot ROM
+  // (fixed by the constructor), the host callbacks onMidiOut, onMix and the
+  // trace (and the Machine's own chip wiring), and rendering_, which is only
+  // true inside render().
+  // A snapshot of a different version, a wrong magic, a truncated or corrupt
+  // blob or trailing bytes throw StateError and leave the machine untouched.
   std::vector<uint8_t> saveState() const;
-  void loadState(std::span<const uint8_t> data);  // throws StateError; unchanged on failure
+  void loadState(std::span<const uint8_t> data);
 
  private:
   uint8_t read(uint16_t addr) override;

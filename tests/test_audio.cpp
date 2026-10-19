@@ -17,12 +17,15 @@
 #include <vector>
 
 #include "asset_paths.h"
+#include "booted_machine.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 #include "mirage/stream_resampler.h"
 #include "mirage/wav_writer.h"
 
 using namespace mirage;
+using mirage_test::bootedMachine;
+using mirage_test::bootedSnapshot;
 
 namespace {
 
@@ -202,8 +205,6 @@ namespace {
 constexpr uint64_t kSecond = kCpuClockHz;
 constexpr double kHost = 48000;
 
-std::vector<uint8_t> loadBytes(const std::filesystem::path& p) { return readFile(p); }
-
 // A ROM that loops on BRA *: nothing but the DOC (reset state) runs.
 std::unique_ptr<Machine> idleMachine() {
   std::vector<uint8_t> rom(4096, 0x12);
@@ -213,43 +214,6 @@ std::unique_ptr<Machine> idleMachine() {
   rom[0xFFF] = 0x00;
   auto m = std::make_unique<Machine>(rom);
   m->powerOn();
-  return m;
-}
-
-// Boots a factory disk image (the OS auto-loads the lower sound) until it has
-// settled, and returns the machine state at that point; computed once per image
-// per test run. Settled = the drive motor is off, the display has been lit for
-// a second and no sector has been read for two (docs/hardware/boot-rom.md
-// 13.5). Capped at 90 s of emulated time.
-struct Booted {
-  std::vector<uint8_t> state;
-  double seconds = 0;
-};
-
-const Booted& bootedSnapshot(const std::string& image) {
-  static std::map<std::string, Booted> cache;
-  auto it = cache.find(image);
-  if (it != cache.end()) return it->second;
-  const auto rom = loadBytes(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
-  Machine m(rom);
-  m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/" + image)));
-  m.powerOn();
-  uint64_t lastSectors = 0, quiet = 0, lit = 0;
-  for (uint64_t t = 0; t < 9000; ++t) {
-    m.runCycles(kSecond / 100);
-    const DisplayState d = m.display();
-    lit = (d.left || d.right) ? lit + 1 : 0;
-    quiet = m.fdc().sectorsRead() == lastSectors ? quiet + 1 : 0;
-    lastSectors = m.fdc().sectorsRead();
-    if (lit >= 100 && quiet >= 200 && !m.driveActive()) break;
-  }
-  return cache[image] = {m.saveState(), double(m.cycles()) / kSecond};
-}
-
-std::unique_ptr<Machine> bootedMachine(const std::string& image) {
-  const auto rom = loadBytes(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
-  auto m = std::make_unique<Machine>(rom);
-  m->loadState(bootedSnapshot(image).state);
   return m;
 }
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 #include "mirage/clocks.h"
 #include "mirage/state_io.h"
@@ -284,6 +285,8 @@ void Machine::updateFirq() { cpu_.setFirq(acia_.irq()); }
 
 std::vector<uint8_t> Machine::saveState() const {
   StateWriter w;
+  w.tag(fourcc("MIRG"));
+  w.u32(kSnapshotVersion);
   w.tag(fourcc("MCHN"));
   w.u8(bank_);
   w.u64(cycles_);
@@ -345,6 +348,10 @@ void Machine::loadAudio(StateReader& r) {
 
 void Machine::loadState(std::span<const uint8_t> data) {
   StateReader r(data);
+  r.tag(fourcc("MIRG"));
+  const uint32_t version = r.u32();
+  if (version != kSnapshotVersion)
+    throw StateError("machine: unsupported snapshot version " + std::to_string(version));
   r.tag(fourcc("MCHN"));
   const uint8_t bank = r.u8();
   if (bank > 3) throw StateError("machine: bad sample bank");

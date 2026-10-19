@@ -29,6 +29,12 @@ struct RunOptions {
   std::string trace;  // empty: no trace
   std::string wav;    // empty: no audio; else the WAV file runSchedule's audio goes to
   int rate = 48000;   // --rate: the WAV sample rate (1000..768000)
+  // --snapshot-in: a file written by --snapshot-out (Machine::saveState). It is
+  // loaded after power-on, replacing the boot (and the disk: it holds its own),
+  // before any event is scheduled; event times and --seconds are then relative
+  // to the loaded state. --snapshot-out: written with Machine::saveState() at
+  // the end of the run. Empty: not used.
+  std::string snapshotIn, snapshotOut;
   uint64_t endCycle = 0;
   // Sorted by cycle (ties: trace, keys, then MIDI in command-line order), none
   // after endCycle. Holds of the same key that overlap or touch are merged into
@@ -36,8 +42,7 @@ struct RunOptions {
   std::vector<RunEvent> events;
 };
 
-// Why parsing stopped: exit code 2 = usage error (message empty: print usage),
-// 1 = an option that is not available yet.
+// Why parsing stopped: exit code 2 = usage error (message empty: print usage).
 struct RunArgsError {
   int exitCode;
   std::string message;
@@ -47,8 +52,9 @@ struct RunArgsError {
 std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::string>& args,
                                                     const std::string& defaultRom);
 
-// Runs `m` (already powered on) to o.endCycle in slices, applying each event
-// when its cycle is reached. `trace` is installed at the TraceOn event and
+// Runs `m` (already powered on, or restored from a snapshot) for o.endCycle in
+// slices, applying each event when its cycle is reached; cycles count from the
+// call, not from the machine's own cycle count. `trace` is installed at the TraceOn event and
 // removed at the end. With `audio` non-null the slices go through
 // Machine::render at o.rate and the samples are appended to *audio (round(
 // endCycle * rate / 2 MHz) of them); an event is then applied at the nearest
