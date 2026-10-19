@@ -65,12 +65,38 @@ std::vector<uint8_t> DiskImage::toBytes() const {
 }
 
 void DiskImage::saveFile(const std::filesystem::path& path) const {
-  auto bytes = toBytes();
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) throw DiskImageError("Cannot open '" + pathStr(path) + "' for writing.");
-  out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
-  out.flush();
-  if (!out) throw DiskImageError("Failed writing disk image '" + pathStr(path) + "'.");
+  const auto bytes = toBytes();  // before touching the disk: an unformatted track throws here
+  std::filesystem::path tmp = path;
+  tmp += ".tmp";  // same folder, so the rename stays on one volume
+  std::error_code ec;
+  const auto fail = [&](const std::string& why) {
+    std::filesystem::remove(tmp, ec);
+    throw DiskImageError(why + " '" + pathStr(path) + "'.");
+  };
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) fail("Cannot open temporary file for writing disk image");
+    out.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+    out.flush();
+    if (!out) fail("Failed writing disk image");
+  }  // closed before the rename
+  std::filesystem::rename(tmp, path, ec);  // replaces an existing file
+  if (ec) fail("Cannot replace disk image (" + ec.message() + ")");
+}
+
+DiskImage DiskImage::clone() const {
+  DiskImage d;
+  d.tracks_ = tracks_;
+  d.dirty_ = dirty_;
+  d.writeCount_ = writeCount_;
+  return d;
+}
+
+void DiskImage::copyTo(DiskImage& dest) const {
+  if (dest.tracks_.size() != tracks_.size()) dest.tracks_.resize(tracks_.size());  // moved-from only
+  for (size_t i = 0; i < tracks_.size(); ++i) dest.tracks_[i] = tracks_[i];  // optional<array>: no heap
+  dest.dirty_ = dirty_;
+  dest.writeCount_ = writeCount_;
 }
 
 bool DiskImage::trackFormatted(int track) const {
@@ -104,6 +130,7 @@ void DiskImage::writeSector(int track, int sectorId, std::span<const uint8_t> in
   int off = locate(track, sectorId, in.size(), "writeSector");
   std::copy(in.begin(), in.end(), tracks_[track]->begin() + off);
   dirty_ = true;
+  ++writeCount_;
 }
 
 void DiskImage::save(StateWriter& w) const {

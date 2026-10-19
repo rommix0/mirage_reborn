@@ -5,6 +5,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <type_traits>
 #include <vector>
 
 #include "asset_paths.h"
@@ -176,4 +178,144 @@ TEST_CASE("disk image: non-ANSI file names load, and errors keep their message")
   CHECK_NOTHROW(DiskImage::loadFile(dir / name));
   std::filesystem::remove_all(dir);
   CHECK_THROWS_AS(DiskImage::loadFile(dir / name), DiskImageError);  // missing: its own error too
+}
+
+TEST_CASE("disk image is move-only") {
+  static_assert(!std::is_copy_constructible_v<DiskImage>);
+  static_assert(!std::is_copy_assignable_v<DiskImage>);
+  static_assert(std::is_nothrow_move_constructible_v<DiskImage>);
+  static_assert(std::is_nothrow_move_assignable_v<DiskImage>);
+  SUCCEED();
+}
+
+TEST_CASE("disk image clone and copyTo copy tracks, dirty flag and write count") {
+  std::vector<uint8_t> raw(DiskImage::kImageBytes);
+  for (size_t i = 0; i < raw.size(); ++i) raw[i] = uint8_t(i * 5 + (i >> 9));
+  auto src = DiskImage::fromBytes(raw);
+  std::array<uint8_t, 1024> s{};
+  s[7] = 0x6C;
+  src.writeSector(4, 1, s);
+  src.writeSector(9, 0, s);
+  REQUIRE(src.dirty());
+  REQUIRE(src.writeCount() == 2);
+
+  auto c = src.clone();
+  CHECK(c.toBytes() == src.toBytes());
+  CHECK(c.dirty());
+  CHECK(c.writeCount() == 2);
+  s[7] = 0;
+  c.writeSector(4, 1, s);  // the clone is independent
+  CHECK(src.toBytes() != c.toBytes());
+
+  // copyTo into a blank buffer overwrites everything, including formatted flags.
+  auto dest = DiskImage::blank();
+  src.copyTo(dest);
+  CHECK(dest.toBytes() == src.toBytes());
+  CHECK(dest.dirty());
+  CHECK(dest.writeCount() == 2);
+
+  // ... and into a used one: a clean, unformatted source clears what was there.
+  auto blankSrc = DiskImage::blank();
+  blankSrc.copyTo(dest);
+  CHECK_FALSE(dest.dirty());
+  CHECK(dest.writeCount() == 0);
+  CHECK_FALSE(dest.trackFormatted(0));
+  CHECK_FALSE(dest.trackFormatted(79));
+}
+
+TEST_CASE("disk image writeCount counts writeSector calls") {
+  auto d = DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes));
+  CHECK(d.writeCount() == 0);
+  std::array<uint8_t, 512> s{};
+  d.writeSector(0, 5, s);
+  d.writeSector(0, 5, s);  // the same data again still counts
+  CHECK(d.writeCount() == 2);
+  std::array<uint8_t, 1024> big{};
+  CHECK_THROWS_AS(d.writeSector(0, 5, big), DiskImageError);  // a rejected write does not
+  CHECK(d.writeCount() == 2);
+  d.clearDirty();
+  CHECK(d.writeCount() == 2);
+
+  // Not part of the snapshot: restarts at 0 on load.
+  StateWriter w;
+  d.save(w);
+  auto buf = w.take();
+  StateReader r(buf);
+  d.load(r);
+  CHECK(d.writeCount() == 0);
+}
+
+namespace {
+std::filesystem::path freshTempDir(const char* name) {
+  auto dir = std::filesystem::temp_directory_path() / name;
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+std::filesystem::path tmpSibling(std::filesystem::path p) {
+  p += ".tmp";
+  return p;
+}
+std::vector<uint8_t> readAll(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+}  // namespace
+
+TEST_CASE("disk image saveFile replaces an existing file atomically and leaves no .tmp") {
+  namespace fs = std::filesystem;
+  const auto dir = freshTempDir("mirage_disk_atomic_replace");
+  const auto target = dir / "disk.img";
+  { std::ofstream(target, std::ios::binary) << "old contents"; }
+
+  std::vector<uint8_t> raw(DiskImage::kImageBytes);
+  for (size_t i = 0; i < raw.size(); ++i) raw[i] = uint8_t(i * 3 + (i >> 7));
+  DiskImage::fromBytes(raw).saveFile(target);
+  CHECK(readAll(target) == raw);
+  CHECK_FALSE(fs::exists(tmpSibling(target)));
+
+  // And again over the now full-size file.
+  raw[0] ^= 0xFF;
+  DiskImage::fromBytes(raw).saveFile(target);
+  CHECK(readAll(target) == raw);
+  CHECK_FALSE(fs::exists(tmpSibling(target)));
+  fs::remove_all(dir);
+}
+
+TEST_CASE("disk image saveFile into a missing folder throws and leaves no .tmp") {
+  namespace fs = std::filesystem;
+  const auto dir = freshTempDir("mirage_disk_atomic_missing");
+  const auto target = dir / "no" / "such" / "x.img";
+  auto d = DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes));
+  CHECK_THROWS_WITH(d.saveFile(target), Catch::Matchers::ContainsSubstring("x.img"));
+  CHECK_FALSE(fs::exists(tmpSibling(target)));
+  CHECK_FALSE(fs::exists(dir / "no"));  // nothing was created
+  fs::remove_all(dir);
+}
+
+TEST_CASE("disk image saveFile of a disk with an unformatted track throws and leaves the old file byte-identical") {
+  namespace fs = std::filesystem;
+  const auto dir = freshTempDir("mirage_disk_atomic_unformatted");
+  const auto target = dir / "disk.img";
+  const std::vector<uint8_t> old(DiskImage::kImageBytes, 0x5A);
+  DiskImage::fromBytes(old).saveFile(target);
+
+  // Format all but one track by loading a crafted state.
+  StateWriter w;
+  w.tag(fourcc("DSKI"));
+  w.u8(0);
+  for (int i = 0; i < DiskImage::kTracks; ++i) {
+    w.u8(i == 41 ? 0 : 1);
+    if (i != 41) w.bytes(std::vector<uint8_t>(DiskImage::kTrackBytes, 0x11));
+  }
+  auto buf = w.take();
+  auto d = DiskImage::blank();
+  StateReader r(buf);
+  d.load(r);
+  REQUIRE_FALSE(d.trackFormatted(41));
+
+  CHECK_THROWS_AS(d.saveFile(target), DiskImageError);
+  CHECK(readAll(target) == old);
+  CHECK_FALSE(fs::exists(tmpSibling(target)));
+  fs::remove_all(dir);
 }

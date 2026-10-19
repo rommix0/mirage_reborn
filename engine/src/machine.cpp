@@ -259,23 +259,21 @@ void Machine::tickDevices(uint32_t cycles) {
   }
 }
 
-void Machine::insertDisk(DiskImage disk) {
+std::unique_ptr<DiskImage> Machine::insertDisk(std::unique_ptr<DiskImage> disk) {
   wd_.setDisk(nullptr);  // a disk already in the drive is taken out first
-  disk_.emplace(std::move(disk));
-  wd_.setDisk(&*disk_);
+  std::unique_ptr<DiskImage> old = std::move(disk_);
+  disk_ = std::move(disk);
+  if (disk_) wd_.setDisk(disk_.get());
   updateIrq();
   updateNmi();
+  return old;
 }
 
-std::optional<DiskImage> Machine::ejectDisk() {
-  if (!disk_) return std::nullopt;
-  wd_.setDisk(nullptr);  // aborts a command in flight
-  std::optional<DiskImage> out = std::move(disk_);
-  disk_.reset();
-  updateIrq();
-  updateNmi();
-  return out;
+std::unique_ptr<DiskImage> Machine::insertDisk(DiskImage disk) {
+  return insertDisk(std::make_unique<DiskImage>(std::move(disk)));
 }
+
+std::unique_ptr<DiskImage> Machine::ejectDisk() { return insertDisk(std::unique_ptr<DiskImage>{}); }
 
 void Machine::queueMidi(std::span<const uint8_t> bytes) {
   if (bytes.empty()) return;
@@ -390,7 +388,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   uint64_t nextMidi = 0;
   uint32_t masterRem = 0;
   std::deque<uint8_t> midi;
-  std::optional<DiskImage> disk;
+  std::unique_ptr<DiskImage> disk;
   try {
     cpu_.load(r);
     via_.load(r);
@@ -402,7 +400,10 @@ void Machine::loadState(std::span<const uint8_t> data) {
     wd_.load(r);
     const uint8_t hasDisk = r.u8();
     if (hasDisk > 1) throw StateError("machine: bad disk flag");
-    if (hasDisk) disk.emplace().load(r);
+    if (hasDisk) {
+      disk = std::make_unique<DiskImage>(DiskImage::blank());
+      disk->load(r);
+    }
     acia_.load(r);
     nextMidi = r.u64();
     const uint32_t n = r.u32();
@@ -433,7 +434,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   masterRem_ = masterRem;
   midiIn_ = std::move(midi);
   disk_ = std::move(disk);
-  wd_.attachDisk(disk_ ? &*disk_ : nullptr);
+  wd_.attachDisk(disk_.get());
   updateIrq();
   updateNmi();
   updateFirq();

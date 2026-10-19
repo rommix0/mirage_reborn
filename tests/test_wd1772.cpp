@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -669,9 +670,9 @@ TEST_CASE("machine PB6 is the disk-present level and PB4 low is motor on") {
   CHECK(m.driveActive());
 
   auto out = m.ejectDisk();
-  REQUIRE(out.has_value());
+  REQUIRE(out != nullptr);
   CHECK(m.disk() == nullptr);
-  CHECK_FALSE(m.ejectDisk().has_value());
+  CHECK(m.ejectDisk() == nullptr);
   m.powerOn();
   m.runCycles(80);
   CHECK(m.peek(0x8000) == 0x10);
@@ -699,7 +700,7 @@ TEST_CASE("machine ejecting during a read aborts the command and raises NMI") {
   m.runCycles(kRev / 4);  // seek done, probably searching or reading
   REQUIRE(m.peek(0x8020) == 0);
   auto out = m.ejectDisk();
-  REQUIRE(out.has_value());
+  REQUIRE(out != nullptr);
   m.runCycles(1000);
   CHECK(m.peek(0x8020) == 1);        // the NMI handler ended the read
   CHECK((m.peek(0x8010) & 0x10) != 0);  // RNF
@@ -744,4 +745,33 @@ TEST_CASE("machine loadState with a corrupt FDC section leaves the machine uncha
   CHECK_THROWS_AS(m.loadState(bad), StateError);
   CHECK(m.saveState() == before);
   REQUIRE(m.disk() != nullptr);
+}
+
+TEST_CASE("machine insertDisk returns the previous disk") {
+  Machine m(romFromBytes({}));
+  CHECK(m.insertDisk(makeDisk()) == nullptr);  // empty drive: nothing replaced
+  DiskImage* first = m.disk();
+  REQUIRE(first != nullptr);
+
+  auto second = std::make_unique<DiskImage>(DiskImage::blank());
+  DiskImage* secondRaw = second.get();
+  auto prev = m.insertDisk(std::move(second));  // pointers swap, no copy
+  REQUIRE(prev != nullptr);
+  CHECK(prev.get() == first);
+  CHECK(prev->trackFormatted(3));
+  CHECK(m.disk() == secondRaw);
+  CHECK(m.fdc().diskChanged());
+
+  // A null argument acts as an eject.
+  auto last = m.insertDisk(std::unique_ptr<DiskImage>{});
+  CHECK(last.get() == secondRaw);
+  CHECK(m.disk() == nullptr);
+}
+
+TEST_CASE("machine ejectDisk on an empty drive returns null") {
+  Machine m(romFromBytes({}));
+  CHECK(m.ejectDisk() == nullptr);
+  CHECK(m.disk() == nullptr);
+  const Machine& cm = m;
+  CHECK(cm.disk() == nullptr);
 }

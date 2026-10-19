@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
@@ -71,12 +72,18 @@ class Machine : private Bus {
   std::function<void(uint8_t)> onMidiOut;
 
   // Floppy drive. insertDisk replaces any disk already in the drive (aborting a
-  // command in flight, as an eject does); ejectDisk hands the disk back. VIA PB6
-  // reads 1 while a disk is in. powerOn() never touches the disk. driveActive()
-  // is true while the motor is on (VIA PB4 low).
-  void insertDisk(DiskImage disk);
-  std::optional<DiskImage> ejectDisk();
-  DiskImage* disk() { return disk_ ? &*disk_ : nullptr; }
+  // command in flight, as an eject does) and returns the disk it replaced, or
+  // null; a null argument acts as an eject. ejectDisk hands the disk back (null
+  // if the drive was empty). The unique_ptr overloads swap pointers only: they
+  // never allocate or free, so the audio thread may use them. The DiskImage
+  // overload heap-allocates. VIA PB6 reads 1 while a disk is in. powerOn()
+  // never touches the disk. driveActive() is true while the motor is on (VIA
+  // PB4 low).
+  std::unique_ptr<DiskImage> insertDisk(std::unique_ptr<DiskImage> disk);
+  std::unique_ptr<DiskImage> insertDisk(DiskImage disk);
+  std::unique_ptr<DiskImage> ejectDisk();
+  DiskImage* disk() { return disk_.get(); }
+  const DiskImage* disk() const { return disk_.get(); }
   bool driveActive() const { return wd_.motor(); }
   Wd1772& fdc() { return wd_; }  // diagnostics: sectorsRead(), diskChanged()
   // The DOC sees all 128 KB of sample RAM and is clocked by the 8 MHz master
@@ -168,7 +175,7 @@ class Machine : private Bus {
   Doc5503 doc_;
   FilterBank filters_;
   uint32_t masterRem_ = 0;  // master clocks owed to the DOC, x kCpuClockHz
-  std::optional<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
+  std::unique_ptr<DiskImage> disk_;  // wd_ points at it; the Machine is not movable
   std::deque<uint8_t> midiIn_;
   uint64_t nextMidiCycle_ = 0;  // cycles() at which the next queued byte arrives
   std::function<void(uint16_t, const Regs&)> trace_;  // host-side, not saved

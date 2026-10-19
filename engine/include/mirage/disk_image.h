@@ -19,8 +19,19 @@ struct DiskImageError : std::runtime_error {
 // one of 512 (ids 0-5), 5632 bytes per track. A track is either formatted
 // (holds data) or unformatted (absent), so a blank disk can be formatted by
 // the emulated controller.
+//
+// Move-only: the image is 450 KB, so copies are explicit (clone, copyTo), and
+// the host can hand disks between threads as std::unique_ptr<DiskImage>. A
+// moved-from DiskImage holds no tracks and may only be assigned to or
+// destroyed.
 class DiskImage {
  public:
+  DiskImage() = default;  // same as blank()
+  DiskImage(const DiskImage&) = delete;
+  DiskImage& operator=(const DiskImage&) = delete;
+  DiskImage(DiskImage&&) = default;
+  DiskImage& operator=(DiskImage&&) = default;
+
   static constexpr int kTracks = 80, kTrackBytes = 5632, kImageBytes = 450560;
 
   static DiskImage fromBytes(std::span<const uint8_t>);     // throws DiskImageError
@@ -28,7 +39,20 @@ class DiskImage {
   static DiskImage blank();                                 // every track unformatted
 
   std::vector<uint8_t> toBytes() const;  // throws if any track unformatted
+  // Atomic: the bytes are written to "<path>.tmp" in the same folder, then
+  // renamed over the target, so the target is never left partial. On any
+  // failure the temp file is removed and DiskImageError names the path; an
+  // existing target is untouched. Throws if any track is unformatted.
   void saveFile(const std::filesystem::path&) const;
+
+  // Deep copy (tracks, dirty flag, write count). Allocates.
+  DiskImage clone() const;
+  // Copies tracks and the dirty flag into dest, and dest.writeCount() becomes
+  // writeCount(). Does not allocate (or free) provided dest is not moved-from,
+  // e.g. dest came from DiskImage::blank(): the audio thread relies on this.
+  // If dest is moved-from (empty track vector) it is resized first, which
+  // allocates.
+  void copyTo(DiskImage& dest) const;
 
   bool trackFormatted(int track) const;
   int sectorSize(int track, int sectorId) const;  // 1024, 512, or 0 if absent
@@ -38,6 +62,11 @@ class DiskImage {
 
   bool dirty() const { return dirty_; }
   void clearDirty() { dirty_ = false; }
+  // Number of writeSector calls since construction (clone/copyTo carry it
+  // over). Not saved in snapshots: load() restarts it at 0. A saver compares
+  // it before and after to tell whether a write slipped in, before clearing
+  // dirty.
+  uint64_t writeCount() const { return writeCount_; }
 
   void save(StateWriter&) const;
   void load(StateReader&);
@@ -51,6 +80,7 @@ class DiskImage {
   // Heap-allocated: the whole image is 450 KB, too big to live on the stack.
   std::vector<std::optional<Track>> tracks_ = std::vector<std::optional<Track>>(kTracks);
   bool dirty_ = false;
+  uint64_t writeCount_ = 0;
 };
 
 }  // namespace mirage
