@@ -42,7 +42,9 @@ images are yours and are never copied into this repository.
 `Mirage.exe --panel-png out.png` renders the front panel at 1200 px wide with a
 fixed sample state ("2." "1" on the display, a disk in, drive LED on) and
 exits with code 0. It needs neither an audio device nor the ROM. A missing file
-argument exits with 2, a failed write with 1.
+argument exits with 2, a failed write with 1. The ctest `app_panel_png_smoke`
+(registered when the app is built) runs it and checks for exit code 0 and a
+file that starts with the PNG signature.
 
 ## The window
 
@@ -70,6 +72,7 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 | Menu | Item | Shortcut |
 |---|---|---|
 | File | Open Disk Image... | Ctrl+O |
+| File | New Blank Disk (an unformatted disk named "Untitled (blank)") | Ctrl+N |
 | File | Save Disk Image | Ctrl+S |
 | File | Save Disk Image As... | Ctrl+Shift+S |
 | File | Eject Disk | Ctrl+E |
@@ -84,9 +87,19 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   (never `.hfe`). The Windows file dialog shows one filter, `*.img;*`.
 - **Save** writes the disk to the file it came from; **Save As** asks for a new
   file (`.img` by default). A disk with no file name goes straight to Save As.
-- **Open, Eject and Exit** (also the close button) ask "Save changes to X before
-  ...?" when the disk has unsaved changes: Save, Don't Save or Cancel. A save
-  must succeed before the action goes on.
+- **New Blank Disk** inserts a disk with every track unformatted and no file
+  (the title and strip say "Untitled (blank)", the panel label "Untitled"). The
+  emulated OS has to format it: boot the `EnsoniqOS/fmt2` disk, swap the blank
+  disk in and run the format (acceptance-5 checklist below). Save on an untitled
+  disk goes to Save As.
+- **A disk that is not fully formatted cannot be saved.** The save is refused
+  with "This disk is not fully formatted (N of 80 tracks). Format it with the OS
+  before saving." (while fmt2 is still formatting, or after a failed format).
+  The disk stays modified and no file, not even a `.tmp`, is written.
+- **Open, New Blank Disk, Eject and Exit** (also the close button) ask "Save
+  changes to X before ...?" when the disk has unsaved changes (X is "the new
+  disk" for an untitled one): Save, Don't Save or Cancel. A save must succeed
+  before the action goes on.
 - **Save, Save As, Eject** are greyed out with no disk; no disk action runs
   while a save is in flight.
 - **Panic** discards all MIDI input not yet played and sends All Notes Off
@@ -236,6 +249,43 @@ the panel (or typed with its panel keyboard shortcut).
 
 Re-run it after changes to the disk path (FDC write, `DiskSession`) or the file
 dialogs.
+
+## Acceptance-5 checklist (format a blank disk with fmt2)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+panel keys headlessly (`acceptance 5: fmt2 formats a blank disk that then boots`
+and `acceptance 5: a sound saved to the formatted disk loads back`) and passes.
+Formatting is emulated at real speed (no turbo): on the emulated clock fmt2 takes
+**about 106 s from Enter to "Fc"** (all 80 tracks about 33 s, then OS 3.2 is
+written and every track is read back), so expect a bit under two minutes of
+waiting with the drive LED on.
+
+1. *File → Open Disk Image...* `EnsoniqOS/fmt2`. Wait for the display to show
+   "F" "d" (fmt2 is asking for a blank disk).
+2. *File → New Blank Disk* (Ctrl+N). The title says "Untitled (blank)". The
+   Mirage notices the disk change. (If fmt2 had unsaved changes the app would
+   ask first; it has none.)
+3. Press **1**, then **Enter** (format; OS 3.2 goes onto the disk). The drive
+   LED lights and the head steps through the tracks.
+4. While it runs, try *File → Save Disk Image As...* and pick a name: the save is
+   refused with "This disk is not fully formatted (N of 80 tracks). Format it
+   with the OS before saving." and no file appears. Retry after step 5.
+5. Wait for the display to show "F" "c" (the display's lower-case c) after about
+   106 s.
+6. *File → Save Disk Image As...* `Formatted.img`. It saves (450,560 bytes).
+7. *File → Open Disk Image...* `Formatted.img`. fmt2 wrote OS 3.2 onto it, so it
+   boots like acceptance 1 (about 15 s) and settles on "2." "1".
+8. Save a sound to it: boot `Factory Library/IMG/SND-A01.img`, wait for "2." "1",
+   *File → Open Disk Image...* `Formatted.img` (the Mirage sees the new disk),
+   press **Param**, **1**, **1**, **1**, **Enter** (save lower sound to place 1;
+   wait for the drive LED to go out), then *File → Save Disk Image As...*
+   `Formatted-with-sound.img`.
+9. Boot `SND-A01.img` again, open `Formatted-with-sound.img`, press **Load
+   Lower**, **1**, **Enter** and play: the sound plays. (The test also changes
+   the lower sound's Filter Fc before saving and sees the new value return.)
+
+Re-run it after changes to the FDC (Write Track, Read Address) or to
+`DiskSession`.
 
 ## Known limitations
 

@@ -390,3 +390,88 @@ TEST_CASE("session save during the insert gap says the disk is still going in") 
   CHECK(rig.session.path() == b);
   CHECK(readBytes(b)[0] == 2);  // untouched
 }
+
+TEST_CASE("disk session new blank inserts an unformatted disk with no path") {
+  Rig rig;
+  CHECK(rig.session.newBlank());
+  CHECK(rig.session.path().empty());
+  CHECK(rig.session.title() == "Untitled (blank)");
+  CHECK(rig.session.hasDisk());
+  rig.pump();
+  CHECK(rig.host.status().diskPresent);
+  const DiskImage* disk = rig.host.machineForTest().disk();
+  REQUIRE(disk != nullptr);
+  CHECK(disk->formattedTracks() == 0);
+  CHECK_FALSE(rig.session.needsSaveBeforeReplacing());  // nothing written yet
+  // A plain Save has no file to go to.
+  CHECK_FALSE(rig.session.startSave());
+}
+
+TEST_CASE("disk session new blank replaces a disk; refused while a save is in flight") {
+  TempDir tmp("mirage_session_new_blank_swap");
+  const auto file = makeImage(tmp, "a.img", 0x00);
+  Rig rig;
+  REQUIRE(rig.session.open(file).empty());
+  rig.pump();
+  rig.osWrite(0x01);
+  rig.pump();
+  REQUIRE(rig.session.startSave());
+  CHECK_FALSE(rig.session.newBlank());  // the mark-saved must reach the disk that was copied
+  REQUIRE(rig.finishSave().ok);
+  CHECK(rig.session.newBlank());
+  rig.pump();
+  CHECK(rig.session.title() == "Untitled (blank)");  // the published status has moved on to the new disk
+  CHECK(rig.session.poll() == std::nullopt);  // the old disk is freed
+  CHECK(rig.host.machineForTest().disk() == nullptr);  // waiting out the swap gap
+}
+
+TEST_CASE("disk session refuses to save a partly formatted disk") {
+  TempDir tmp("mirage_session_partial");
+  Rig rig;
+  REQUIRE(rig.session.newBlank());
+  rig.pump();
+  std::array<uint8_t, DiskImage::kTrackBytes> track;
+  track.fill(0x5A);
+  DiskImage* disk = rig.host.machineForTest().disk();
+  REQUIRE(disk != nullptr);
+  disk->setTrack(0, track);
+  disk->setTrack(1, track);
+  disk->setTrack(79, track);
+  rig.pump();
+  CHECK(rig.session.needsSaveBeforeReplacing());
+
+  const auto target = tmp / "out.img";
+  REQUIRE(rig.session.startSave(target));
+  const SaveOutcome outcome = rig.finishSave();
+  CHECK_FALSE(outcome.ok);
+  CHECK(outcome.message ==
+        "This disk is not fully formatted (3 of 80 tracks). Format it with the OS before saving.");
+  CHECK(outcome.path == target);
+  CHECK(fs::is_empty(tmp.dir));  // neither out.img nor out.img.tmp
+  rig.pump();
+  CHECK(rig.host.status().diskDirty);
+  CHECK(rig.session.needsSaveBeforeReplacing());
+  CHECK(rig.session.path().empty());  // still untitled
+  CHECK(rig.session.title() == "Untitled (blank) (modified)");
+}
+
+TEST_CASE("disk session saves a formatted blank disk and then follows its file") {
+  TempDir tmp("mirage_session_blank_save");
+  Rig rig;
+  REQUIRE(rig.session.newBlank());
+  rig.pump();
+  std::array<uint8_t, DiskImage::kTrackBytes> track;
+  track.fill(0x33);
+  DiskImage* disk = rig.host.machineForTest().disk();
+  REQUIRE(disk != nullptr);
+  for (int t = 0; t < DiskImage::kTracks; ++t) disk->setTrack(t, track);
+  rig.pump();
+  const auto target = tmp / "new.img";
+  REQUIRE(rig.session.startSave(target));
+  const SaveOutcome outcome = rig.finishSave();
+  REQUIRE(outcome.ok);
+  CHECK(rig.session.path() == target);
+  rig.pump();
+  CHECK(rig.session.title() == "new.img");
+  CHECK(readBytes(target).size() == size_t(DiskImage::kImageBytes));
+}

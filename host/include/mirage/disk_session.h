@@ -50,6 +50,11 @@ class DiskSession {
   // Returns an error message (empty on success). Does not prompt: the caller
   // checks needsSaveBeforeReplacing() first.
   std::string open(const std::filesystem::path& file);
+  // Inserts a new, wholly unformatted disk (DiskImage::blank()) that has no
+  // file: title "Untitled (blank)", path() empty until a Save As succeeds. The
+  // OS formats it through the controller. False (nothing done) when a save is
+  // in flight or the host's queue is full. Like open(), does not prompt.
+  bool newBlank();
   void eject();
   // Why saving to `file` (current path when empty) is refused regardless of
   // timing, as a message for the user; empty when allowed. Today: .edm targets
@@ -58,6 +63,8 @@ class DiskSession {
   // Starts a save to `file` (current path when empty). Completes in poll().
   // False (nothing started) when no target is known, saveRefusal() is
   // non-empty, a save is already in flight, or the host's queue is full.
+  // The save itself fails, leaving the disk modified and no file (not even a
+  // temporary one), when the copy has unformatted tracks.
   bool startSave(const std::filesystem::path& file = {});
   // Call on the UI thread at >= 10 Hz: frees returned disks, finishes saves.
   // Returns a finished save's outcome once (empty optional while none).
@@ -68,8 +75,10 @@ class DiskSession {
   // the saved copy's counts as clean.
   bool needsSaveBeforeReplacing() const;
   bool saving() const { return saving_; }
-  const std::filesystem::path& path() const { return path_; }  // empty: no disk
-  // UTF-8: "SND-A01.img", "SND-A01.img (modified)" or "No disk".
+  // A disk was inserted (open or newBlank) and not ejected: from a file, or untitled.
+  bool hasDisk() const { return !path_.empty() || untitled_; }
+  const std::filesystem::path& path() const { return path_; }  // empty: no disk, or untitled
+  // UTF-8: "SND-A01.img", "SND-A01.img (modified)", "Untitled (blank)" or "No disk".
   std::string title() const;
 
  private:
@@ -77,7 +86,8 @@ class DiskSession {
 
   RealtimeHost& host_;
   Clock clock_;
-  std::filesystem::path path_;        // the inserted disk's file; empty: none
+  std::filesystem::path path_;        // the inserted disk's file; empty: none, or untitled
+  bool untitled_ = false;             // a newBlank() disk is in and has no file yet
   bool saving_ = false;               // a copy is out, awaiting its return
   double saveStarted_ = 0.0;          // clock_() at startSave
   std::filesystem::path saveTarget_;  // where the copy goes

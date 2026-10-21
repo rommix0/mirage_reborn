@@ -189,6 +189,7 @@ juce::PopupMenu MainWindow::getMenuForIndex(int index, const juce::String&) {
   switch (index) {
     case 0:
       m.addCommandItem(&commands_, cmdOpenDisk);
+      m.addCommandItem(&commands_, cmdNewBlankDisk);
       m.addCommandItem(&commands_, cmdSaveDisk);
       m.addCommandItem(&commands_, cmdSaveDiskAs);
       m.addCommandItem(&commands_, cmdEjectDisk);
@@ -242,20 +243,25 @@ void MainWindow::menuItemSelected(int id, int) {
 }
 
 void MainWindow::getAllCommands(juce::Array<juce::CommandID>& c) {
-  c.addArray({cmdOpenDisk, cmdSaveDisk, cmdSaveDiskAs, cmdEjectDisk, cmdQuit, cmdReset, cmdPanic,
-              cmdAudioSettings});
+  c.addArray({cmdOpenDisk, cmdNewBlankDisk, cmdSaveDisk, cmdSaveDiskAs, cmdEjectDisk, cmdQuit,
+              cmdReset, cmdPanic, cmdAudioSettings});
 }
 
 void MainWindow::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo& info) {
   using juce::ModifierKeys;
   const char* file = "File";
-  // No disk operation while a save is in flight; none but Open without a disk.
+  // No disk operation while a save is in flight; none but Open and New Blank Disk without one.
   const bool idle = !session_.saving();
-  const bool disk = idle && !session_.path().empty();
+  const bool disk = idle && session_.hasDisk();
   switch (id) {
     case cmdOpenDisk:
       info.setInfo("Open Disk Image...", "Insert a disk image", file, 0);
       info.addDefaultKeypress('o', ModifierKeys::ctrlModifier);
+      info.setActive(idle);
+      break;
+    case cmdNewBlankDisk:
+      info.setInfo("New Blank Disk", "Insert an unformatted disk, to format with the OS", file, 0);
+      info.addDefaultKeypress('n', ModifierKeys::ctrlModifier);
       info.setActive(idle);
       break;
     case cmdSaveDisk:
@@ -295,6 +301,9 @@ bool MainWindow::perform(const InvocationInfo& info) {
   switch (info.commandID) {
     case cmdOpenDisk:
       openDisk();
+      return true;
+    case cmdNewBlankDisk:
+      newBlankDisk();
       return true;
     case cmdSaveDisk:
       saveDisk();
@@ -364,16 +373,26 @@ void MainWindow::insertDisk(const juce::File& file) {
   refreshDiskState();
 }
 
+void MainWindow::newBlankDisk() {
+  if (session_.saving() || promptOpen_) return;
+  whenDiskSafe("inserting a new blank disk", [this] {
+    if (!session_.newBlank())
+      showError("Cannot insert a blank disk", "The emulator is busy. Try again.");
+    refreshDiskState();
+  });
+}
+
 void MainWindow::saveDisk(std::function<void()> then) {
-  if (session_.path().empty()) return saveDiskAs(std::move(then));
+  if (session_.path().empty()) return saveDiskAs(std::move(then));  // untitled: ask for a file
   startSave({}, std::move(then));
 }
 
 void MainWindow::saveDiskAs(std::function<void()> then) {
-  if (session_.saving() || session_.path().empty()) return;
+  if (session_.saving() || !session_.hasDisk()) return;
   // The .img extension is the dialog's default (taken from the suggested name).
   const auto suggested =
-      diskFolder().getChildFile(text(session_.path().stem())).withFileExtension(".img");
+      diskFolder().getChildFile(session_.path().empty() ? "Untitled" : text(session_.path().stem()))
+          .withFileExtension(".img");
   chooser_ = std::make_unique<juce::FileChooser>("Save Disk Image As", suggested, "*.img");
   juce::Component::SafePointer<MainWindow> safe(this);
   chooser_->launchAsync(juce::FileBrowserComponent::saveMode |
@@ -422,7 +441,10 @@ void MainWindow::whenDiskSafe(const juce::String& action, std::function<void()> 
   juce::AlertWindow::showAsync(
       juce::MessageBoxOptions::makeOptionsYesNoCancel(
           juce::MessageBoxIconType::QuestionIcon, "Unsaved changes",
-          "Save changes to " + fileName(session_.path()) + " before " + action + "?", "Save",
+          "Save changes to " + (session_.path().empty() ? juce::String("the new disk")
+                                                        : fileName(session_.path())) +
+              " before " + action + "?",
+          "Save",
           "Don't Save", "Cancel", this),
       [safe, then = std::move(then)](int choice) {  // 1 Save, 2 Don't Save, 0 Cancel
         if (safe == nullptr) return;
@@ -450,9 +472,11 @@ void MainWindow::refreshDiskState() {
   const auto title = juce::String(juce::CharPointer_UTF8("Mirage \xe2\x80\x94 ")) +
                      fromUtf8(session_.title());
   if (getName() != title) setName(title);
-  const auto name = fileName(session_.path());  // empty without a disk
+  // The panel's disk label: the file name; "Untitled" for a new blank disk; empty without a disk.
+  const auto name = session_.path().empty() ? juce::String(session_.hasDisk() ? "Untitled" : "")
+                                            : fileName(session_.path());
   content_->setDiskName(name, fromUtf8(session_.title()));  // so the strip matches the window title
-  const bool hasDisk = !session_.path().empty(), saving = session_.saving();
+  const bool hasDisk = session_.hasDisk(), saving = session_.saving();
   if (hasDisk != menusHaveDisk_ || saving != menusSaving_) {
     menusHaveDisk_ = hasDisk;
     menusSaving_ = saving;

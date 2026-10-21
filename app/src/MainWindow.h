@@ -44,9 +44,10 @@ class MirageContent : public juce::Component, private juce::Timer {
   StripText text_;
 };
 
-// File menu: Open, Save, Save As and Eject work through a DiskSession. Open,
-// Eject and Exit (and the close button) ask first when the disk has unsaved
-// changes. The title names the disk: "Mirage <em dash> SND-A01.img (modified)".
+// File menu: Open, New Blank Disk, Save, Save As and Eject work through a
+// DiskSession. Open, New Blank Disk, Eject and Exit (and the close button) ask
+// first when the disk has unsaved changes. The title names the disk: "Mirage
+// <em dash> SND-A01.img (modified)".
 //
 // Keyboard: the digits press 0..9, the up and down arrows On/Off, Return Enter
 // and Escape Cancel, one press per physical press, released when the key comes
@@ -71,6 +72,7 @@ class MainWindow : public juce::DocumentWindow,
  private:
   enum CommandIds {
     cmdOpenDisk = 1,
+    cmdNewBlankDisk,
     cmdSaveDisk,
     cmdSaveDiskAs,
     cmdEjectDisk,
@@ -102,6 +104,7 @@ class MainWindow : public juce::DocumentWindow,
 
   // Disk files.
   void openDisk();
+  void newBlankDisk();
   void insertDisk(const juce::File& file);
   void saveDisk(std::function<void()> then = {});  // Save As when the disk has no file
   void saveDiskAs(std::function<void()> then = {});

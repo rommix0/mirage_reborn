@@ -3,6 +3,7 @@
 #include <chrono>
 #include <exception>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace mirage {
@@ -41,14 +42,25 @@ std::string DiskSession::open(const std::filesystem::path& file) {
   }
   if (!host_.postInsert(std::move(disk))) return "The emulator is busy. Try again.";
   path_ = file;
+  untitled_ = false;
   savedWrites_.reset();
   return {};
+}
+
+bool DiskSession::newBlank() {
+  if (saving_) return false;
+  if (!host_.postInsert(std::make_unique<DiskImage>(DiskImage::blank()))) return false;
+  path_.clear();
+  untitled_ = true;
+  savedWrites_.reset();
+  return true;
 }
 
 void DiskSession::eject() {
   if (saving_) return;
   if (host_.postEject()) {
     path_.clear();
+    untitled_ = false;
     savedWrites_.reset();
   }
 }
@@ -88,18 +100,24 @@ std::optional<SaveOutcome> DiskSession::poll() {
       // With a path the disk is still in its swap gap (inserting takes about
       // 0.5 s), not missing.
       outcome = SaveOutcome{false,
-                            path_.empty() ? "There is no disk in the drive."
-                                          : "The disk is still going into the drive; try again in a moment.",
+                            !hasDisk() ? "There is no disk in the drive."
+                                       : "The disk is still going into the drive; try again in a moment.",
                             saveTarget_};
       continue;
     }
     try {
+      // Checked here, before saveFile: a partly formatted copy leaves no file.
+      if (const int formatted = r->disk->formattedTracks(); formatted < DiskImage::kTracks)
+        throw DiskImageError("This disk is not fully formatted (" + std::to_string(formatted) +
+                             " of " + std::to_string(DiskImage::kTracks) +
+                             " tracks). Format it with the OS before saving.");
       r->disk->saveFile(saveTarget_);
       // Clears dirty unless the OS wrote again since the copy. If the queue
       // is full the disk merely stays marked modified.
       host_.postMarkSaved(r->writeCount);
       savedWrites_ = r->writeCount;
       path_ = saveTarget_;
+      untitled_ = false;
       outcome = SaveOutcome{true, {}, saveTarget_};
     } catch (const std::exception& e) {
       outcome = SaveOutcome{false, e.what(), saveTarget_};
@@ -115,7 +133,7 @@ std::optional<SaveOutcome> DiskSession::poll() {
 }
 
 bool DiskSession::modified() const {
-  if (path_.empty()) return false;
+  if (!hasDisk()) return false;
   const HostStatus s = host_.status();
   // The published write count equal to the saved copy's: every write is in the
   // file, even if the mark-saved has not been applied (or published) yet.
@@ -125,8 +143,8 @@ bool DiskSession::modified() const {
 bool DiskSession::needsSaveBeforeReplacing() const { return modified(); }
 
 std::string DiskSession::title() const {
-  if (path_.empty()) return "No disk";
-  std::string t = utf8(path_.filename());
+  if (!hasDisk()) return "No disk";
+  std::string t = untitled_ ? "Untitled (blank)" : utf8(path_.filename());
   if (modified()) t += " (modified)";
   return t;
 }
