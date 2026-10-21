@@ -7,9 +7,12 @@
 #   3. a perspective transform maps their corners onto a rectangle with the
 #      proportions of the same lines on the front-on DSK decal (261 x 52 px there);
 #   4. inside the outline the letters are filled (counters stay open) and the fill
-#      is pulled back to the middle of the stroke, which is the letter edge.
+#      is pulled back a quarter of a half-stroke from the outline's outer edge: the
+#      outline sits inside the letter edge. That pull-back matches the counters of
+#      a, g and e on the front-on DSK decal (4.jpg) to within 1% of their area; the
+#      stroke middle (pull 1) made them 25-35% too big.
 # Needs numpy and opencv-python-headless.
-# usage: flatten_outline_logo.py <mirage.webp> <out-mask.png> [scale=8]
+# usage: flatten_outline_logo.py <mirage.webp> <out-mask.png> [scale=8] [pull=0.25]
 # The output is white letters on black, ready for:
 #   trace_wordmark.py <out-mask.png> mirage_wordmark.svg preview.png <box> FIELD_GRAY=1
 import sys
@@ -75,6 +78,9 @@ def intersect(l1, l2):
 def main():
     src, out = sys.argv[1], sys.argv[2]
     scale = float(sys.argv[3]) if len(sys.argv) > 3 else 8.0
+    # How far the fill is pulled back from the outline's outer edge, in half stroke
+    # widths: 0 keeps the whole stroke, 1 is the stroke middle, 2 drops the stroke.
+    pull = float(sys.argv[4]) if len(sys.argv) > 4 else 0.25
     img = cv2.imread(src, cv2.IMREAD_COLOR)
     if img is None:
         sys.exit(f"cannot read {src}")
@@ -128,7 +134,7 @@ def main():
     dist_in = cv2.distanceTransform(stroke, cv2.DIST_L2, 5)
     half = float(np.percentile(dist_in[stroke > 0], 95))  # about half the stroke width
     dist_out = cv2.distanceTransform(filled, cv2.DIST_L2, 5)
-    letters = (dist_out > half).astype(np.uint8) * 255
+    letters = (dist_out > half * pull).astype(np.uint8) * 255
     print(f"half stroke {half / s:.2f} ref px  output {size[0]}x{size[1]}")
     cv2.imwrite(out, letters)
 
