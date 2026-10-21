@@ -25,6 +25,7 @@ add_executable(mirage_tests
   test_realtime_host.cpp
   test_disk_session.cpp
   test_acceptance.cpp
+  test_wav_import.cpp
   alloc_counter.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_host mirage_cli_core Catch2::Catch2WithMain)
