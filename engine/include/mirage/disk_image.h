@@ -59,13 +59,20 @@ class DiskImage {
   // Throw DiskImageError if the sector is absent or the span size != sectorSize.
   void readSector(int track, int sectorId, std::span<uint8_t> out) const;
   void writeSector(int track, int sectorId, std::span<const uint8_t> in);  // sets dirty
+  // Formats the track with `data` (sector order as in the raw image), or
+  // makes it unformatted, as the controller's Write Track does. Both set
+  // dirty and count one write, and never allocate. Throw DiskImageError for a
+  // track outside 0-79.
+  void setTrack(int track, std::span<const uint8_t, kTrackBytes> data);
+  void unformatTrack(int track);
+  int formattedTracks() const;  // 0-80
 
   bool dirty() const { return dirty_; }
   void clearDirty() { dirty_ = false; }
-  // Number of writeSector calls since construction (clone/copyTo carry it
-  // over). Not saved in snapshots: load() restarts it at 0. A saver compares
-  // it before and after to tell whether a write slipped in, before clearing
-  // dirty.
+  // Number of writeSector, setTrack and unformatTrack calls since
+  // construction (clone/copyTo carry it over). Not saved in snapshots: load()
+  // restarts it at 0. A saver compares it before and after to tell whether a
+  // write slipped in, before clearing dirty.
   uint64_t writeCount() const { return writeCount_; }
 
   void save(StateWriter&) const;

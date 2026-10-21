@@ -141,6 +141,27 @@ void DiskImage::writeSector(int track, int sectorId, std::span<const uint8_t> in
   ++writeCount_;
 }
 
+void DiskImage::setTrack(int track, std::span<const uint8_t, kTrackBytes> data) {
+  if (track < 0 || track >= kTracks)
+    throw DiskImageError("setTrack: no track " + std::to_string(track) + ".");
+  std::copy(data.begin(), data.end(), tracks_[track].emplace().begin());  // inline: no heap
+  dirty_ = true;
+  ++writeCount_;
+}
+
+void DiskImage::unformatTrack(int track) {
+  if (track < 0 || track >= kTracks)
+    throw DiskImageError("unformatTrack: no track " + std::to_string(track) + ".");
+  tracks_[track].reset();
+  dirty_ = true;
+  ++writeCount_;
+}
+
+int DiskImage::formattedTracks() const {
+  return int(std::count_if(tracks_.begin(), tracks_.end(),
+                           [](const std::optional<Track>& t) { return t.has_value(); }));
+}
+
 void DiskImage::save(StateWriter& w) const {
   w.tag(kStateTag);
   w.u8(dirty_ ? 1 : 0);

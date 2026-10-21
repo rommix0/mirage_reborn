@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "alloc_counter.h"
 #include "mirage/clocks.h"
 #include "mirage/disk_image.h"
 #include "mirage/machine.h"
@@ -64,6 +65,62 @@ struct Rig {
     return out;
   }
 };
+
+// A Write Track byte stream (what the CPU loads, $F5/$F7 uninterpreted) for
+// the given sectors (id, size code), each holding `fill`: gap 1, then per
+// sector 00x12, F5 F5 F5 FE t 00 id size F7, 4Ex22, 00x12, F5 F5 F5 FB, data,
+// F7, 4Ex32.
+struct Sec {
+  uint8_t id, size;
+};
+std::vector<uint8_t> trackStream(int track, std::initializer_list<Sec> sectors, uint8_t fill) {
+  std::vector<uint8_t> s(16, 0x4E);
+  for (auto [id, size] : sectors) {
+    s.insert(s.end(), 12, 0x00);
+    s.insert(s.end(), {0xF5, 0xF5, 0xF5, 0xFE, uint8_t(track), 0x00, id, size, 0xF7});
+    s.insert(s.end(), 22, 0x4E);
+    s.insert(s.end(), 12, 0x00);
+    s.insert(s.end(), {0xF5, 0xF5, 0xF5, 0xFB});
+    s.insert(s.end(), size_t(128) << size, fill);
+    s.push_back(0xF7);
+    s.insert(s.end(), 32, 0x4E);
+  }
+  return s;
+}
+
+// The Mirage layout: ids 0-4 of 1024 bytes, id 5 of 512. 6200 CPU bytes,
+// 6212 byte times on the disk (each F7 writes two CRC bytes).
+std::vector<uint8_t> mirageTrackStream(int track, uint8_t fill) {
+  return trackStream(track, {{0, 3}, {1, 3}, {2, 3}, {3, 3}, {4, 3}, {5, 2}}, fill);
+}
+
+// Loads `stream` into a running Write Track one byte per DRQ, then $4E until
+// the command ends; returns the status. At stream byte `skipAt` it first lets
+// `skipBytes` byte times pass without loading anything.
+uint8_t feedTrack(Rig& r, const std::vector<uint8_t>& stream, size_t skipAt = SIZE_MAX,
+                  uint32_t skipBytes = 0) {
+  size_t sent = 0;
+  for (uint64_t guard = 0; r.fdc.busy() && guard < 4ull * kRev; ++guard) {
+    if (!r.fdc.drq()) {
+      r.fdc.tick(1);
+    } else if (sent == skipAt && skipBytes > 0) {
+      r.fdc.tick(skipBytes * kFdcByteCycles);
+      skipBytes = 0;
+    } else {
+      r.fdc.write(3, sent < stream.size() ? stream[sent] : 0x4E);
+      ++sent;
+    }
+  }
+  REQUIRE_FALSE(r.fdc.busy());
+  return r.fdc.read(0);
+}
+
+// Issues Write Track (h=1) on the head's track and feeds it.
+uint8_t writeTrack(Rig& r, const std::vector<uint8_t>& stream, size_t skipAt = SIZE_MAX,
+                   uint32_t skipBytes = 0) {
+  r.fdc.write(0, 0xF8);
+  return feedTrack(r, stream, skipAt, skipBytes);
+}
 
 uint16_t crcCcitt(std::initializer_list<uint8_t> bytes) {
   uint16_t crc = 0xFFFF;
@@ -526,15 +583,184 @@ TEST_CASE("wd1772 h=1 skips spin-up and E adds a 15 ms settle") {
   CHECK(took < 31000);
 }
 
-TEST_CASE("wd1772 Read Track and Write Track complete without data or error") {
+TEST_CASE("wd1772 Read Track completes without data or error") {
   Rig r;
   r.seek(3);
-  for (uint8_t cmd : {uint8_t(0xE8), uint8_t(0xF8)}) {
-    const uint8_t st = r.run(cmd);
-    CHECK((st & 0x5D) == 0);
-    CHECK_FALSE(r.fdc.drq());
-  }
+  const uint8_t st = r.run(0xE8);
+  CHECK((st & 0x5D) == 0);
+  CHECK_FALSE(r.fdc.drq());
   CHECK_FALSE(r.disk.dirty());
+}
+
+TEST_CASE("wd1772 write track in the Mirage layout formats the track") {
+  Rig r;
+  r.disk = DiskImage::blank();
+  r.seek(7);
+  const auto stream = mirageTrackStream(7, 0x6D);
+  uint8_t st;
+  {
+    mirage_test::AllocationScope scope;  // the parse and the commit run on the audio thread
+    st = writeTrack(r, stream);
+    CHECK(scope.count() == 0);
+    CHECK(scope.frees() == 0);
+  }
+  CHECK((st & 0x5D) == 0);  // no write protect, RNF, CRC, lost data; not busy
+  CHECK(r.disk.trackFormatted(7));
+  CHECK(r.disk.formattedTracks() == 1);
+  CHECK(r.disk.dirty());
+  CHECK(r.disk.writeCount() == 1);
+  for (int id = 0; id < 6; ++id) {
+    std::vector<uint8_t> sec(size_t(r.disk.sectorSize(7, id)));
+    REQUIRE(sec.size() == (id < 5 ? 1024u : 512u));
+    r.disk.readSector(7, id, sec);
+    for (uint8_t b : sec) REQUIRE(b == 0x6D);
+  }
+}
+
+TEST_CASE("wd1772 write track waits for the index pulse and writes one revolution") {
+  Rig r;  // head on track 0, the disk at its index pulse
+  r.disk = DiskImage::blank();
+  r.fdc.tick(kRev / 4);  // a quarter of the way round
+  const auto stream = mirageTrackStream(0, 0x11);
+  r.fdc.write(0, 0xF8);
+  uint64_t n = 0;
+  size_t sent = 0;
+  while (r.fdc.busy() && n < 4ull * kRev) {
+    if (r.fdc.drq()) {
+      r.fdc.write(3, sent < stream.size() ? stream[sent] : 0x4E);
+      ++sent;
+    } else {
+      r.fdc.tick(1);
+      ++n;
+    }
+  }
+  // Three quarters of a revolution to the index pulse, then one revolution.
+  CHECK(n == kRev * 7 / 4);
+  // One byte per byte time (each F7 takes two): 6238 bytes reach the disk.
+  // The first is loaded before the index pulse; the load answering the DRQ
+  // after the last one is cut off by the next index pulse.
+  CHECK(sent == 6250 - 12 + 1);
+  CHECK(r.disk.trackFormatted(0));
+}
+
+TEST_CASE("wd1772 write track with a foreign layout leaves the track unformatted") {
+  const auto foreign = trackStream(3, {{1, 2}, {2, 2}, {3, 2}, {4, 2}, {5, 2}, {6, 2}, {7, 2},
+                                       {8, 2}, {9, 2}}, 0xE5);
+  {
+    Rig r;
+    r.disk = DiskImage::blank();
+    r.seek(3);
+    const uint8_t st = writeTrack(r, foreign);
+    CHECK((st & 0x5D) == 0);
+    CHECK_FALSE(r.disk.trackFormatted(3));
+    CHECK(r.disk.writeCount() == 1);
+  }
+  {
+    // On a formatted track the old contents go.
+    Rig r;
+    r.seek(3);
+    REQUIRE(r.disk.trackFormatted(3));
+    writeTrack(r, foreign);
+    CHECK_FALSE(r.disk.trackFormatted(3));
+    CHECK(r.disk.dirty());
+    CHECK(r.disk.formattedTracks() == 79);
+    r.fdc.write(2, 2);
+    CHECK((r.run(0x88) & 0x10) != 0);  // nothing to read: Record Not Found
+  }
+  {
+    // The Mirage layout with the wrong track byte, a duplicate id or a wrong size code.
+    for (const auto& bad : {mirageTrackStream(4, 0),
+                            trackStream(3, {{0, 3}, {1, 3}, {2, 3}, {3, 3}, {4, 3}, {4, 2}}, 0),
+                            trackStream(3, {{0, 3}, {1, 3}, {2, 3}, {3, 3}, {4, 3}, {5, 3}}, 0)}) {
+      Rig r;
+      r.seek(3);
+      writeTrack(r, bad);
+      CHECK_FALSE(r.disk.trackFormatted(3));
+    }
+  }
+}
+
+TEST_CASE("wd1772 write track that misses DRQs writes zeros and sets lost data") {
+  Rig r;
+  r.disk = DiskImage::blank();
+  r.seek(5);
+  // Sector 1's data starts after gap 1 (16), sector 0 (1116 CPU bytes) and
+  // sector 1's header (12 + 9 + 22 + 12 + 4). Drop 40 of its bytes after the
+  // first 100 and miss 40 DRQs there instead: the chip writes 40 zeros.
+  auto stream = mirageTrackStream(5, 0x77);
+  const size_t at = 16 + 1116 + 59 + 100;
+  REQUIRE(stream[at - 100 - 1] == 0xFB);
+  stream.erase(stream.begin() + ptrdiff_t(at), stream.begin() + ptrdiff_t(at + 40));
+  const uint8_t st = writeTrack(r, stream, at, 40);
+  CHECK((st & 0x04) != 0);  // Lost Data
+  CHECK((st & 0x59) == 0);
+  REQUIRE(r.disk.trackFormatted(5));
+  std::array<uint8_t, 1024> sec{};
+  r.disk.readSector(5, 1, sec);
+  for (size_t i = 0; i < sec.size(); ++i)
+    REQUIRE(sec[i] == ((i >= 100 && i < 140) ? 0x00 : 0x77));
+  r.disk.readSector(5, 0, sec);
+  for (uint8_t b : sec) REQUIRE(b == 0x77);
+}
+
+TEST_CASE("wd1772 a formatted track reads with Read Sector") {
+  Rig r;
+  r.disk = DiskImage::blank();
+  r.seek(9);
+  r.fdc.write(2, 0);
+  REQUIRE((r.run(0x88) & 0x10) != 0);  // unformatted: Record Not Found
+  writeTrack(r, mirageTrackStream(9, 0xC3));
+  for (int id : {0, 5}) {
+    r.fdc.write(2, uint8_t(id));
+    r.fdc.write(0, 0x88);
+    const size_t size = id < 5 ? 1024 : 512;
+    const auto got = r.readBytes(size);
+    REQUIRE(got.size() == size);
+    for (uint8_t b : got) REQUIRE(b == 0xC3);
+    r.runIdle();
+    CHECK((r.fdc.read(0) & 0x1D) == 0);
+  }
+  // Read Address sees the new ID fields.
+  r.fdc.write(0, 0xC8);
+  const auto id = r.readBytes(6);
+  REQUIRE(id.size() == 6);
+  CHECK(id[0] == 9);
+  r.runIdle();
+}
+
+TEST_CASE("wd1772 eject during write track leaves the track as it was") {
+  Rig r;
+  r.seek(3);
+  r.fdc.write(0, 0xF8);
+  size_t sent = 0;
+  for (uint64_t guard = 0; sent < 3000 && guard < 4ull * kRev; ++guard) {
+    if (r.fdc.drq()) r.fdc.write(3, 0x4E), ++sent;
+    else r.fdc.tick(1);
+  }
+  REQUIRE(sent == 3000);
+  r.fdc.setDisk(nullptr);
+  CHECK_FALSE(r.fdc.busy());
+  CHECK(r.fdc.intrq());
+  CHECK((r.fdc.read(0) & 0x10) != 0);
+  CHECK_FALSE(r.disk.dirty());
+  CHECK(r.disk.writeCount() == 0);
+  std::array<uint8_t, 1024> sec{};
+  r.disk.readSector(3, 2, sec);
+  CHECK(sec[5] == 5);
+}
+
+TEST_CASE("wd1772 write track with no disk waits, as Type II") {
+  Rig r;
+  r.seek(1);
+  DiskImage blank = DiskImage::blank();
+  r.fdc.setDisk(nullptr);
+  r.fdc.write(0, 0xF8);
+  r.fdc.tick(3 * kRev);
+  CHECK(r.fdc.busy());
+  r.fdc.setDisk(&blank);
+  const uint8_t st = feedTrack(r, mirageTrackStream(1, 0x22));
+  CHECK((st & 0x5D) == 0);
+  CHECK(blank.trackFormatted(1));
 }
 
 TEST_CASE("wd1772 save/load mid-read resumes identically") {

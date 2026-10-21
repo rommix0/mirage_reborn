@@ -34,7 +34,7 @@ class Machine : private Bus {
   static constexpr uint32_t kSampleRamSize = 0x20000;
   // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
   // the layout changes; loadState() rejects any other value.
-  static constexpr uint32_t kSnapshotVersion = 2;
+  static constexpr uint32_t kSnapshotVersion = 3;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);
@@ -165,7 +165,8 @@ class Machine : private Bus {
   // RAM), CPU (registers, wait state, interrupt lines), VIA, DOC (oscillators,
   // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
   // DC blocker, fractional cycles, pending samples), WD1772 (registers and any
-  // command in flight), the inserted disk with its dirty flag (or "no disk"),
+  // command in flight, with a Write Track's bytes so far), the inserted disk
+  // with its dirty flag (or "no disk"),
   // ACIA (with the transmit holding register and shifter), the MIDI input queue with its next-delivery cycle, and the panel
   // (held keys and display history). Restoring a snapshot into any Machine built
   // with the same boot ROM, then running the same inputs, gives bit-identical

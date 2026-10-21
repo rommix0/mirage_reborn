@@ -53,6 +53,44 @@ constexpr uint32_t slotStart(int k) {  // in cycles from the index pulse
 static_assert(kGap3 == 50 && slotBytes(0) == 1074 && slotBytes(5) == 562);
 static_assert(slotStart(5) + (slotBytes(5) + kGap3) * kFdcByteCycles <= kDiskIndexCycles);
 
+// Write Track's stream holds the Mirage layout if its ID fields, F5 F5 F5 FE
+// t s n z F7, are exactly ids 0-5 once each, all with t = `track`, s = 0 and
+// size codes 3 (ids 0-4) and 2 (id 5), and each is followed, before the next
+// ID field, by a data field F5 F5 F5 FB <data> F7. The data land in `out` in
+// the raw image's sector order (id n at n x 1024). See fdc.md.
+bool parseMirageTrack(std::span<const uint8_t> s, int track,
+                      std::span<uint8_t, DiskImage::kTrackBytes> out) {
+  const size_t n = s.size();
+  const auto mark = [&](size_t i, uint8_t am) {
+    return i + 4 <= n && s[i] == 0xF5 && s[i + 1] == 0xF5 && s[i + 2] == 0xF5 && s[i + 3] == am;
+  };
+  bool seen[kSlots] = {};
+  int found = 0;
+  size_t i = 0;
+  while (i < n) {
+    if (!mark(i, 0xFE)) {
+      ++i;
+      continue;
+    }
+    i += 4;
+    if (i + 5 > n || s[i + 4] != 0xF7) return false;
+    const uint8_t id = s[i + 2];
+    if (s[i] != track || s[i + 1] != 0 || id >= kSlots || seen[id] || s[i + 3] != (id < 5 ? 3 : 2))
+      return false;
+    seen[id] = true;
+    ++found;
+    i += 5;
+    while (i < n && !mark(i, 0xFE) && !mark(i, 0xFB)) ++i;
+    if (!mark(i, 0xFB)) return false;
+    i += 4;
+    const size_t size = id < 5 ? 1024 : 512;
+    if (i + size >= n || s[i + size] != 0xF7) return false;
+    std::copy_n(s.begin() + ptrdiff_t(i), size, out.begin() + ptrdiff_t(id) * 1024);
+    i += size + 1;
+  }
+  return found == kSlots;
+}
+
 uint16_t crcCcitt(const uint8_t* p, size_t n) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < n; ++i) {
@@ -204,8 +242,9 @@ void Wd1772::enter(Phase p, uint32_t wait, bool needSpin) {
   phase_ = p;
   wait_ = wait;
   needSpin_ = needSpin;
-  // SpinUp and SearchFail end on index pulses, not on a timer.
-  if (wait == 0 && p != Phase::SpinUp && p != Phase::SearchFail && p != Phase::Idle)
+  // SpinUp, SearchFail and TrackWaitIndex end on index pulses, not on a timer.
+  if (wait == 0 && p != Phase::SpinUp && p != Phase::SearchFail && p != Phase::TrackWaitIndex &&
+      p != Phase::Idle)
     onWaitDone();
 }
 
@@ -255,6 +294,8 @@ void Wd1772::onIndex() {
     case Phase::SearchFail:
       if (++indexCount_ >= kMaxRevs) fail();
       break;
+    case Phase::TrackWaitIndex: trackByte(); break;  // writing starts at the index pulse
+    case Phase::TrackStream: writeTrackEnd(); break;  // and stops at the next one
     default: break;
   }
 }
@@ -289,6 +330,7 @@ void Wd1772::onWaitDone() {
       break;
     case Phase::WriteStream: writeByte(); break;
     case Phase::WriteEnd: writeEnd(); break;
+    case Phase::TrackStream: trackByte(); break;
     default: break;
   }
 }
@@ -374,7 +416,13 @@ void Wd1772::startBody() {
     case Kind::ReadSector:
     case Kind::WriteSector:
     case Kind::ReadAddress: startSearch(); break;
-    default: complete();  // Read Track / Write Track: Plan 3
+    case Kind::WriteTrack:
+      // DRQ goes up at once; the first byte is taken at the index pulse.
+      trackLen_ = 0;
+      drq_ = true;
+      enter(Phase::TrackWaitIndex, 0, true);
+      break;
+    default: complete();  // Read Track: not modelled
   }
 }
 
@@ -513,6 +561,34 @@ void Wd1772::writeEnd() {
   complete();
 }
 
+// One byte time of Write Track: the data register goes to the disk ($00, with
+// Lost Data, if the CPU has not reloaded it) and DRQ asks for the next byte.
+// $F5 and $F6 write one byte ($A1, $C2), $F7 two (the CRC), so the byte after
+// an $F7 is taken two byte times later. The stream keeps the CPU's bytes; the
+// parse at the next index pulse reads the marks from them.
+void Wd1772::trackByte() {
+  uint8_t b = 0;
+  if (drq_) lost_ = true;
+  else b = dataReg_;
+  if (trackLen_ < trackBuf_.size()) trackBuf_[trackLen_++] = b;
+  drq_ = true;
+  enter(Phase::TrackStream, (b == 0xF7 ? 2 : 1) * kB, true);
+}
+
+// The next index pulse ends Write Track: the track becomes formatted if the
+// stream holds the Mirage layout, otherwise unformatted (a drive would find
+// none of the Mirage's sectors on it).
+void Wd1772::writeTrackEnd() {
+  if (disk_ != nullptr && head_ < DiskImage::kTracks) {
+    std::array<uint8_t, DiskImage::kTrackBytes> data{};
+    if (parseMirageTrack(std::span<const uint8_t>(trackBuf_.data(), trackLen_), head_, data))
+      disk_->setTrack(head_, data);
+    else
+      disk_->unformatTrack(head_);
+  }
+  complete();
+}
+
 void Wd1772::save(StateWriter& w) const {
   w.tag(kStateTag);
   w.u8(trackReg_);
@@ -539,6 +615,8 @@ void Wd1772::save(StateWriter& w) const {
   w.u16(idx_);
   w.u16(len_);
   w.bytes(buf_);
+  w.u16(trackLen_);
+  w.bytes(std::span<const uint8_t>(trackBuf_.data(), trackLen_));
   w.u64(sectorsRead_);
 }
 
@@ -577,6 +655,9 @@ void Wd1772::load(StateReader& r) {
   t.idx_ = r.u16();
   t.len_ = r.u16();
   r.bytes(t.buf_);
+  t.trackLen_ = r.u16();
+  if (t.trackLen_ > t.trackBuf_.size()) throw StateError("wd1772: bad track stream length");
+  r.bytes(std::span<uint8_t>(t.trackBuf_.data(), t.trackLen_));
   t.sectorsRead_ = r.u64();
 
   if (bits >> 13) throw StateError("wd1772: bad flags");
@@ -590,6 +671,9 @@ void Wd1772::load(StateReader& r) {
   t.phase_ = static_cast<Phase>(phase);
   if ((t.phase_ == Phase::Idle) == t.busy_) throw StateError("wd1772: phase/busy mismatch");
   if ((t.phase_ == Phase::Stream || t.phase_ == Phase::WriteStream) && t.idx_ >= t.len_)
+    throw StateError("wd1772: bad transfer state");
+  if ((t.phase_ == Phase::TrackWaitIndex || t.phase_ == Phase::TrackStream) &&
+      t.kind() != Kind::WriteTrack)
     throw StateError("wd1772: bad transfer state");
 
   t.disk_ = disk_;

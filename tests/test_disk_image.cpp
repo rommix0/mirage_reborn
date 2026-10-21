@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -243,6 +244,43 @@ TEST_CASE("disk image writeCount counts writeSector calls") {
   StateReader r(buf);
   d.load(r);
   CHECK(d.writeCount() == 0);
+}
+
+TEST_CASE("disk image setTrack formats a track and unformatTrack removes it") {
+  auto d = DiskImage::blank();
+  CHECK(d.formattedTracks() == 0);
+  std::array<uint8_t, DiskImage::kTrackBytes> t{};
+  for (size_t i = 0; i < t.size(); ++i) t[i] = uint8_t(i * 3 + 1);
+  d.setTrack(4, t);
+  CHECK(d.trackFormatted(4));
+  CHECK(d.formattedTracks() == 1);
+  CHECK(d.dirty());
+  CHECK(d.writeCount() == 1);
+  // Sector order as in the raw image: ids 0-4 at 1024 x id, id 5 at 5120.
+  std::array<uint8_t, 1024> big{};
+  d.readSector(4, 3, big);
+  CHECK(std::equal(big.begin(), big.end(), t.begin() + 3 * 1024));
+  std::array<uint8_t, 512> small{};
+  d.readSector(4, 5, small);
+  CHECK(std::equal(small.begin(), small.end(), t.begin() + 5120));
+
+  d.clearDirty();
+  d.unformatTrack(4);
+  CHECK_FALSE(d.trackFormatted(4));
+  CHECK(d.formattedTracks() == 0);
+  CHECK(d.dirty());
+  CHECK(d.writeCount() == 2);
+
+  CHECK_THROWS_AS(d.setTrack(80, t), DiskImageError);
+  CHECK_THROWS_AS(d.unformatTrack(-1), DiskImageError);
+  CHECK(d.writeCount() == 2);  // a rejected write does not count
+
+  auto full = DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes));
+  CHECK(full.formattedTracks() == 80);
+  full.setTrack(79, t);  // over a formatted track
+  CHECK(full.formattedTracks() == 80);
+  full.readSector(79, 0, big);
+  CHECK(std::equal(big.begin(), big.end(), t.begin()));
 }
 
 namespace {

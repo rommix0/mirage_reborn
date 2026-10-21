@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 
+#include "mirage/clocks.h"
 #include "mirage/disk_image.h"
 #include "mirage/state_io.h"
 
@@ -14,8 +15,9 @@ namespace mirage {
 //   Type I   Restore, Seek, Step, Step In, Step Out (6/12/2/3 ms, verify, 6-index
 //            spin-up unless h=1)
 //   Type II  Read Sector, Write Sector, single and multi-sector (m), E settle
-//   Type III Read Address; Read Track and Write Track complete at once with no
-//            data and no error (Plan 3)
+//   Type III Read Address, Write Track (one revolution, index to index, parsed
+//            into a formatted or unformatted track); Read Track completes at
+//            once with no data and no error
 //   Type IV  Force Interrupt ($D0 terminate, $D8 immediate, $D4 on index)
 // Time is counted in E cycles. The disk turns (and index pulses occur) only while
 // the drive motor is on AND a disk is present; with no rotation the chip waits,
@@ -69,7 +71,9 @@ class Wd1772 {
     WriteGap,    // 22-byte gap in which the first byte must arrive
     WriteStream, // consuming write bytes
     WriteEnd,    // last byte, CRC, trailing $FF
-    Last = WriteEnd,
+    TrackWaitIndex,  // Write Track: DRQ up, waiting for the index pulse
+    TrackStream,     // Write Track: one byte per byte time to the next index pulse
+    Last = TrackStream,
   };
   enum class Kind : uint8_t {
     Restore, Seek, Step, StepIn, StepOut, ReadSector, WriteSector, ReadAddress, ReadTrack,
@@ -101,6 +105,8 @@ class Wd1772 {
   void streamEnd();
   void writeByte();
   void writeEnd();
+  void trackByte();
+  void writeTrackEnd();
   uint32_t delayToSlot(int slot) const;
   void idField(int slot, uint8_t out[6]) const;
 
@@ -128,6 +134,10 @@ class Wd1772 {
   uint8_t slot_ = 0;
   uint16_t idx_ = 0, len_ = 0;
   std::array<uint8_t, 1024> buf_{};
+  // Write Track: the bytes the CPU loaded since the index pulse (late ones as
+  // $00), $F5-$F7 not yet interpreted. At most one per byte time.
+  std::array<uint8_t, kDiskIndexCycles / kFdcByteCycles> trackBuf_{};
+  uint16_t trackLen_ = 0;
   uint64_t sectorsRead_ = 0;
 };
 

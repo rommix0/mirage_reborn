@@ -80,8 +80,37 @@ window comes from the controller documentation. None of it is a measurement of a
   with S2 set and writes nothing.
 - **Head.** 0-83, stops mechanically. Power-on homes it to track 0 (determinism).
   Restore gives up with Seek Error (V=1) after 255 steps.
-- **Read Track / Write Track.** Complete with INTRQ, no data, no error (Plan 3).
+- **Read Track.** Not modelled: completes with INTRQ, no data, no error.
+- **Write Track.** See the next section.
 - **Force Interrupt.** `$D0` terminates without INTRQ and clears DRQ; `$D8` raises INTRQ until
   `$D0` or the next command (status reads do not clear it); `$D4` raises it at the next index pulse.
   Idle `$Dx` refreshes the status as Type I.
 - **Disk change.** `diskChanged()` latches on any insert/eject; it is not PB6.
+
+## Write Track (format)
+
+`$F0-$FF` (h and E as in Type II; P is ignored). After the command latency (and spin-up / settle
+as asked) DRQ goes up at once; the first byte is taken at the next index pulse, then one byte per
+byte time until the index pulse after that, which ends the command. Each time a byte is taken,
+DRQ asks for the next. A byte the CPU did not load in time is written as `$00` and sets Lost
+Data (S2); the command carries on. `$F5` writes `$A1` and presets the CRC, `$F6` writes `$C2`,
+`$F7` writes the two CRC bytes and so takes two byte times (the next byte is taken two byte times
+later). The datasheet's "no first byte within three byte times ends the command" is not modelled:
+an unanswered start just writes zeros.
+
+The controller keeps the bytes the CPU loaded (at most 6250, one revolution) and at the closing
+index pulse parses them as follows:
+
+- Find every ID field, `F5 F5 F5 FE t s n z F7`.
+- After each ID field, the next address mark must be a data mark, `F5 F5 F5 FB`, followed by the
+  sector's bytes (1024 for size code 3, 512 for 2) and `F7`.
+- If the ID fields are exactly ids 0-5, once each, all with t = the head's track, s = 0 and size
+  codes 3, 3, 3, 3, 3, 2, the track becomes **formatted** holding the written data
+  (`DiskImage::setTrack`, sector order as in the raw image). Anything else makes it
+  **unformatted** (`DiskImage::unformatTrack`): a non-Mirage layout reads as unreadable, as it
+  would on the Mirage. Either way the disk is dirty and counts one write.
+
+Gaps, sync bytes and the exact byte positions are not kept: the track reads back with the fixed
+layout above. A head beyond track 79 writes nothing. No disk: the command waits for rotation, as
+Type II. Eject during the command aborts it with RNF and leaves the track as it was. A snapshot
+holds the bytes loaded so far (machine snapshot version 3).
