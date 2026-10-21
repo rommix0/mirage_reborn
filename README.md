@@ -59,8 +59,8 @@ Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
 engine and `mirage_host` contain no JUCE code, so the licence choice for any
 other front end (for example a VST3) stays open.
 
-Panel lettering: the "Mirage" wordmark is drawn from outlines of the Anybody
-font and the "DIGITAL SAMPLING KEYBOARD" legend uses the Michroma font, both
-under the SIL Open Font License 1.1 (licences in `app/resources/fonts/`). They
-stand in for the panel's commercial typefaces and are embedded in the exe.
-`tools/fonts/make_wordmark.py` regenerates the wordmark.
+Panel lettering: the "Mirage" wordmark is traced from a photo of a DSK panel
+(`tools/fonts/trace_wordmark.py`) and the "DIGITAL SAMPLING KEYBOARD" legend
+uses the Michroma font (SIL Open Font License 1.1, licence in
+`app/resources/fonts/`), a free stand-in for the panel's Microgramma-style face.
+Both are embedded in the exe.

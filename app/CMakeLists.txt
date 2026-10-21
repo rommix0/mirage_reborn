@@ -34,8 +34,8 @@ target_compile_definitions(MirageApp PRIVATE
   MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
 
 # Panel artwork embedded in the exe: the ensoniq badge, the "Mirage" wordmark
-# (Anybody outlines) and the subtitle font (Michroma). Both fonts are SIL OFL
-# 1.1; their licences are in resources/fonts/.
+# (traced from a photo of the panel) and the subtitle font (Michroma, SIL OFL
+# 1.1; licence in resources/fonts/).
 juce_add_binary_data(MirageBranding NAMESPACE MirageBranding SOURCES
   resources/ensoniq_logo.svg
   resources/mirage_wordmark.svg
