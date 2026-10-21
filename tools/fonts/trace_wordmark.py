@@ -9,14 +9,20 @@
 #      lines (snapped horizontal or vertical when within a few degrees) and the
 #      rest are smoothed and written as cubic Beziers.
 # Needs numpy, Pillow, scipy and scikit-image (pip install numpy pillow scipy scikit-image).
-# The committed SVG was made from a 1600x1140 photo with the defaults:
-#   trace_wordmark.py 4.jpg mirage_wordmark.svg preview.png
-# usage: trace_wordmark.py <photo.jpg> <out.svg> <preview.png> [x0 y0 x1 y1]
+# The committed SVG comes from an angled photo of the outlined logo, flattened and
+# filled first (1280x720 mirage.webp):
+#   flatten_outline_logo.py mirage.webp mask.png 8
+#   trace_wordmark.py mask.png mirage_wordmark.svg preview.png FIELD_GRAY=1 UPSCALE=1 TV_WEIGHT=0
+#       BLUR=2 STEP=1 CORNER_SPAN=8 CORNER_DEG=40 STRAIGHT_TOL=1.2 SNAP_DEG=4 SMOOTH_SIGMA=3
+#       CURVE_STEP=8 MIN_AREA=400 PREVIEW_SCALE=0.5
+# The defaults suit a front-on photo of the solid decal (1600x1140 4.jpg).
+# usage: trace_wordmark.py <photo.jpg> <out.svg> <preview.png> [x0 y0 x1 y1] [NAME=value ...]
+#   (NAME is any of the settings below, e.g. TV_WEIGHT=0.05 SMOOTH_SIGMA=0.6)
 import sys
 
 import numpy as np
 from PIL import Image, ImageDraw
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from skimage import measure, restoration
 
 UPSCALE = 4          # work on a 4x bicubic upscale of the crop
@@ -29,6 +35,9 @@ SNAP_DEG = 5         # lines this close to horizontal or vertical are made exact
 SMOOTH_SIGMA = 1.8   # smoothing of curved runs along their length, photo px
 CURVE_STEP = 2.5     # spacing of Bezier knots on curved runs, photo px
 MIN_AREA = 4.0       # contours smaller than this (photo px^2) are noise
+FIELD_GRAY = 0       # 1: the input is a white-letters-on-black mask (flatten_outline_logo.py)
+BLUR = 0.0           # Gaussian blur of the field before edge finding, input px (anti-aliases a mask)
+PREVIEW_SCALE = 8    # preview magnification
 
 
 def cross2(a, b):
@@ -37,14 +46,22 @@ def cross2(a, b):
 
 
 def load_field(photo, box):
-    x0, y0, x1, y1 = box
+    up = int(UPSCALE)
     img = Image.open(photo).convert("RGB").crop(box)
-    img = img.resize((img.width * UPSCALE, img.height * UPSCALE), Image.BICUBIC)
+    if up != 1:
+        img = img.resize((img.width * up, img.height * up), Image.BICUBIC)
     a = np.asarray(img).astype(float)
-    y = np.minimum(a[..., 0], a[..., 1]) - a[..., 2]
-    lo, hi = np.percentile(y, 5), np.percentile(y, 97)
-    y = np.clip((y - lo) / (hi - lo), 0.0, 1.0)
-    return restoration.denoise_tv_chambolle(y, weight=TV_WEIGHT)
+    if FIELD_GRAY:
+        y = a.mean(axis=2) / 255.0
+    else:
+        y = np.minimum(a[..., 0], a[..., 1]) - a[..., 2]
+        lo, hi = np.percentile(y, 5), np.percentile(y, 97)
+        y = np.clip((y - lo) / (hi - lo), 0.0, 1.0)
+    if BLUR > 0:
+        y = gaussian_filter(y, BLUR * up)
+    if TV_WEIGHT > 0.002:
+        y = restoration.denoise_tv_chambolle(y, weight=TV_WEIGHT)
+    return y
 
 
 def resample(pts, step):
@@ -187,15 +204,28 @@ def bezier_points(p0, c1, c2, p3, n=8):
 
 
 def main():
-    photo, out, preview = sys.argv[1:4]
-    box = tuple(int(v) for v in sys.argv[4:8]) if len(sys.argv) > 7 else (680, 366, 1008, 448)
+    # NAME=value arguments override the settings above (e.g. TV_WEIGHT=0.05).
+    args = []
+    for a in sys.argv[1:]:
+        if "=" in a and a.split("=", 1)[0].isupper():
+            name, value = a.split("=", 1)
+            globals()[name] = float(value)
+        else:
+            args.append(a)
+    photo, out, preview = args[0:3]
+    if len(args) > 6:
+        box = tuple(int(v) for v in args[3:7])
+    elif FIELD_GRAY:
+        box = (0, 0) + Image.open(photo).size
+    else:
+        box = (680, 366, 1008, 448)
     field = load_field(photo, box)
     contours = measure.find_contours(field, 0.5)
     paths, polys = [], []
     for c in contours:
         if np.linalg.norm(c[0] - c[-1]) > 1e-6:
             continue  # open (touches the crop edge)
-        xy = np.column_stack([c[:, 1], c[:, 0]]) / UPSCALE  # photo px, relative to the crop
+        xy = np.column_stack([c[:, 1], c[:, 0]]) / int(UPSCALE)  # input px, relative to the crop
         area = 0.5 * abs(np.dot(xy[:, 0], np.roll(xy[:, 1], 1)) - np.dot(xy[:, 1], np.roll(xy[:, 0], 1)))
         if area < MIN_AREA:
             continue
@@ -206,7 +236,7 @@ def main():
     x0, y0 = allp.min(axis=0)
     x1, y1 = allp.max(axis=0)
     w, h = x1 - x0, y1 - y0
-    m_left = allp[allp[:, 0] < x0 + 20]
+    m_left = allp[allp[:, 0] < x0 + 0.06 * w]
     base = m_left[:, 1].max()  # bottom of the "M"
     print(f"contours {len(paths)}  bbox {w:.1f} x {h:.1f} px  aspect {w / h:.3f}  "
           f"baseline fraction {(base - y0) / h:.3f}")
@@ -217,7 +247,7 @@ def main():
         fh.write(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{x0:.2f} {y0:.2f} {w:.2f} {h:.2f}">\n')
         fh.write('  <path fill="#000000" fill-rule="evenodd" d="' + "".join(paths) + '"/>\n</svg>\n')
     # Preview: the traced outline filled (even-odd) at 8x, under the photo crop at 8x.
-    S = 8
+    S = PREVIEW_SCALE
     mask = Image.new("1", (int(w * S) + 4, int(h * S) + 4), 0)
     for poly in polys:
         layer = Image.new("1", mask.size, 0)
