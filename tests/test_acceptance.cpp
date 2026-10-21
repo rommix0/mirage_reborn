@@ -1,8 +1,9 @@
-// Acceptance 2, 3 and 5, headless. 2: edit a parameter from the panel, save with the
+// Acceptance 2-6, headless. 2: edit a parameter from the panel, save with the
 // OS, write the disk to a file and boot a fresh machine from it. 3: import a WAV
 // into wave RAM, play it across the keyboard, save the sound with the OS and
-// reopen the image. 5: format a blank disk with fmt2, boot it, save a sound to it
-// and load it back. The panel keys are the ones in docs/app.md (OS 3.2,
+// reopen the image. 4: other OS images boot and play. 5: format a blank disk with
+// fmt2, boot it, save a sound to it and load it back. 6: .edm disks, raw and
+// Giebler, boot and play. The panel keys are the ones in docs/app.md (OS 3.2,
 // musician's manual).
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -409,4 +410,29 @@ TEST_CASE("acceptance 4: each OS image boots and plays", "[assets][acceptance]")
   SECTION("rhodes") { bootsAndPlays("EnsoniqOS/rhodes"); }
   SECTION("resmos32.s") { bootsAndPlays("EnsoniqOS/resmos32.s"); }
   SECTION("Soundprocess OS") { bootsAndPlays("Soundprocess/Soundprocess OS/Soundprocess OS.img"); }
+}
+
+// ---- Acceptance 6: .edm disks, raw and Giebler -------------------------------
+
+TEST_CASE("acceptance 6: a Metascape .edm boots and plays", "[assets][acceptance]") {
+  // A 450,560-byte .edm is a raw image; acceptance 1's conditions: the display
+  // settles on "2." "1" (DB 06) and a note plays.
+  constexpr const char* kMetascape = "MetascapeMetaSounds/mp1.edm";
+  bootsAndPlays(kMetascape);
+  const auto m = bootedMachineAt(kMetascape);
+  CHECK(m->display().left == 0xDB);
+  CHECK(m->display().right == 0x06);
+}
+
+TEST_CASE("acceptance 6: a Giebler .EDM boots its OS", "[assets][acceptance]") {
+  // SNDPROCS.EDM holds the same disk as Soundprocess OS.img (fdc.md, "Disk file
+  // formats"), so it boots and settles exactly like it, and plays.
+  constexpr const char* kGiebler = "Soundprocess/TritonSoundprocess/SNDPROCS.EDM";
+  constexpr const char* kImg = "Soundprocess/Soundprocess OS/Soundprocess OS.img";
+  REQUIRE_ASSET(assetPath(kImg));
+  bootsAndPlays(kGiebler);
+  const auto edm = bootedMachineAt(kGiebler), img = bootedMachineAt(kImg);
+  CHECK(bootedSnapshotAt(kGiebler).seconds == bootedSnapshotAt(kImg).seconds);
+  CHECK(sameDisplay(edm->display(), img->display()));
+  CHECK(edm->fdc().sectorsRead() == img->fdc().sectorsRead());
 }

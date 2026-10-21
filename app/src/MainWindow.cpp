@@ -374,8 +374,9 @@ void MainWindow::showAudioSettings() {
 
 void MainWindow::openDisk() {
   if (session_.saving() || promptOpen_) return;
-  // Any file of exactly 450,560 bytes is a disk image, whatever its extension.
-  chooser_ = std::make_unique<juce::FileChooser>("Open Disk Image", diskFolder(), "*.img;*");
+  // Any file of exactly 450,560 bytes is a disk image, whatever its extension,
+  // and so is a Giebler .edm file (detected by content).
+  chooser_ = std::make_unique<juce::FileChooser>("Open Disk Image", diskFolder(), "*.img;*.edm;*");
   juce::Component::SafePointer<MainWindow> safe(this);
   chooser_->launchAsync(
       juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
@@ -411,11 +412,14 @@ void MainWindow::saveDisk(std::function<void()> then) {
 
 void MainWindow::saveDiskAs(std::function<void()> then) {
   if (session_.saving() || !session_.hasDisk()) return;
-  // The .img extension is the dialog's default (taken from the suggested name).
+  // The dialog's default extension is taken from the suggested name: .edm for a
+  // disk opened from a .edm file, else .img. A .edm name saves Giebler .edm,
+  // anything else a raw image (DiskSession::startSave).
+  const auto& path = session_.path();
   const auto suggested =
-      diskFolder().getChildFile(session_.path().empty() ? "Untitled" : text(session_.path().stem()))
-          .withFileExtension(".img");
-  chooser_ = std::make_unique<juce::FileChooser>("Save Disk Image As", suggested, "*.img");
+      diskFolder().getChildFile(path.empty() ? "Untitled" : text(path.stem()))
+          .withFileExtension(fileName(path).endsWithIgnoreCase(".edm") ? ".edm" : ".img");
+  chooser_ = std::make_unique<juce::FileChooser>("Save Disk Image As", suggested, "*.img;*.edm");
   juce::Component::SafePointer<MainWindow> safe(this);
   chooser_->launchAsync(juce::FileBrowserComponent::saveMode |
                             juce::FileBrowserComponent::canSelectFiles |

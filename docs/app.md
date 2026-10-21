@@ -76,10 +76,10 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 
 | Menu | Item | Shortcut |
 |---|---|---|
-| File | Open Disk Image... | Ctrl+O |
+| File | Open Disk Image... (a raw image or a Giebler `.edm`) | Ctrl+O |
 | File | New Blank Disk (an unformatted disk named "Untitled (blank)") | Ctrl+N |
-| File | Save Disk Image | Ctrl+S |
-| File | Save Disk Image As... | Ctrl+Shift+S |
+| File | Save Disk Image (in the format the file was read in) | Ctrl+S |
+| File | Save Disk Image As... (a `.edm` name saves Giebler `.edm`, any other a raw image) | Ctrl+Shift+S |
 | File | Eject Disk | Ctrl+E |
 | File | Import WAV... | Ctrl+I |
 | File | Exit | |
@@ -90,9 +90,17 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 | Audio | Audio Settings... (output device, rate, buffer size) | |
 
 - **Open** accepts any file of exactly 450,560 bytes whatever its extension
-  (never `.hfe`). The Windows file dialog shows one filter, `*.img;*`.
-- **Save** writes the disk to the file it came from; **Save As** asks for a new
-  file (`.img` by default). A disk with no file name goes straight to Save As.
+  (a raw image, including the 450,560-byte `.edm` files) and any Giebler `.edm`
+  file (it starts with "Mirage Disk"), detected by content, never `.hfe`
+  (`docs/hardware/fdc.md`, "Disk file formats"). Anything else is refused with
+  "*name*: not a Mirage disk image (expected 450,560 bytes or a Giebler .edm
+  file)". The Windows file dialog shows one filter, `*.img;*.edm;*`.
+- **Save** writes the disk to the file it came from, in the format it was read
+  in: a Giebler `.edm` stays Giebler, a raw `.edm` stays raw. **Save As** asks
+  for a new file (`.img` by default, `.edm` for a disk opened from a `.edm`
+  file) and writes a Giebler `.edm` for a name ending in `.edm` (any case), a
+  raw image for any other name; later Saves keep that format. A disk with no
+  file name goes straight to Save As.
 - **New Blank Disk** inserts a disk with every track unformatted and no file
   (the title and strip say "Untitled (blank)", the panel label "Untitled"). The
   emulated OS has to format it: boot the `EnsoniqOS/fmt2` disk, swap the blank
@@ -255,6 +263,7 @@ Queues (all lock-free single-producer, single-consumer):
 | Faithful emulation | The host only presses panel keys, queues MIDI bytes, inserts or ejects disks and writes wave RAM for WAV import | No OS-specific code paths, no OS patching. |
 | Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
 | WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |
+| Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise. The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw so other tools keep reading it. |
 | Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
 
 ## Acceptance-1 checklist (by ear, on your machine)
@@ -479,6 +488,32 @@ waits for a blank disk (acceptance 5).
 
 Re-run it after changes to the DOC, the VIA wiring or the FDC.
 
+## Acceptance-6 checklist (`.edm` disks, raw and Giebler)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` boots both
+disks headlessly and plays note 60 (`acceptance 6: a Metascape .edm boots and
+plays`, `acceptance 6: a Giebler .EDM boots its OS`), and `tests/test_edm_format.cpp`
+and `tests/test_disk_session.cpp` cover the format and Save / Save As; all pass.
+Times are on the emulated clock.
+
+1. Acceptance 1 with `MetascapeMetaSounds/mp1.edm` (a raw 450,560-byte `.edm`)
+   instead of `SND-A01.img`: *File → Open Disk Image...* `mp1.edm`, wait for the
+   display to settle on "2." "1" (about 15 s), then play.
+2. *File → Open Disk Image...* `Soundprocess/TritonSoundprocess/SP1.EDM` (a Giebler
+   file, 389,633 bytes). It carries the Soundprocess OS, so follow the
+   Soundprocess row of the acceptance-4 checklist: the display settles on "0"
+   "1" (about 13 s), then play; **SEQ REC** and two digits select other programs.
+   It should sound like `SoundProcess_Vol1.edm`, the same disk as a raw rip.
+3. With `SP1.EDM` still in the drive, *File → Save Disk Image As...*: the dialog
+   suggests `SP1.edm`. Save it as `SP1-copy.edm` (keep the original as it is).
+   It is written as a Giebler file: it starts with "Mirage Disk" in a text
+   editor and is 389,633 bytes, like `SP1.EDM`, unless the OS wrote to the disk.
+4. *File → Open Disk Image...* `SP1-copy.edm`. It boots and plays like `SP1.EDM`.
+   *File → Save Disk Image As...* `SP1-copy.img` writes a 450,560-byte raw image
+   of the same disk.
+
+Re-run it after changes to `DiskImage` or `DiskSession`.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot
@@ -495,5 +530,5 @@ Re-run it after changes to the DOC, the VIA wiring or the FDC.
   rejects any single message over 12 KB (1024 queue commands of 12 bytes).
   Plan 3 adds a paced feeder.
 - Windows only so far; the Windows file chooser shows a single filter,
-  `*.img;*`.
+  `*.img;*.edm;*`.
 - No audio input: *Import WAV* replaces sampling (spec 6.7).

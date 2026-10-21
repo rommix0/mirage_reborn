@@ -1,10 +1,11 @@
 // DiskSession (host/include/mirage/disk_session.h): the UI thread's open, save,
 // save as and eject on top of RealtimeHost. Asset-free: a synthetic ROM and
-// generated 450,560-byte images in a temp folder; the test thread plays the
-// audio thread by calling process() itself.
+// generated disk images (raw and Giebler .edm) in a temp folder; the test
+// thread plays the audio thread by calling process() itself.
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -92,9 +93,8 @@ TEST_CASE("session open rejects a wrong-size file with a clear message and leave
   const auto file = tmp / "short.img";
   writeBytes(file, std::vector<uint8_t>(1000, 0x11));
   Rig rig;
-  const std::string error = rig.session.open(file);
-  CHECK_THAT(error, ContainsSubstring("450,560"));
-  CHECK_THAT(error, ContainsSubstring("1000"));
+  CHECK(rig.session.open(file) ==
+        "short.img: not a Mirage disk image (expected 450,560 bytes or a Giebler .edm file)");
   CHECK(rig.session.path().empty());
   CHECK(rig.session.title() == "No disk");
   rig.pump();
@@ -116,7 +116,7 @@ TEST_CASE("session open of a directory or missing file reports an error") {
 
 TEST_CASE("session open inserts and reports the title") {
   TempDir tmp("mirage_session_open");
-  // Any extension: only the size matters.
+  // Any extension: only the content matters.
   const auto file = makeImage(tmp, "SND-A01.dsk", 0x42);
   Rig rig;
   CHECK(rig.session.title() == "No disk");
@@ -350,30 +350,81 @@ TEST_CASE("session frees ejected disks") {
   CHECK_FALSE(rig.host.status().diskPresent);
 }
 
-TEST_CASE("session refuses to save to a .edm file, plain or as, in any case") {
-  TempDir tmp("mirage_session_edm");
-  const auto edm = makeImage(tmp, "disk.edm", 0x55);  // opening it is allowed
+namespace {
+// The first 13 bytes of a Giebler .edm file (docs/hardware/fdc.md).
+bool isGiebler(const std::vector<uint8_t>& file) {
+  return file.size() > 13 && std::string(file.begin(), file.begin() + 13) == "\r\nMirage Disk";
+}
+}  // namespace
+
+TEST_CASE("session saves a Giebler .edm back as Giebler") {
+  TempDir tmp("mirage_session_giebler");
+  const auto file = tmp / "SP1.EDM";
+  DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes, 0x55))
+      .saveFile(file, DiskFormat::GieblerEdm);
+  Rig rig;
+  REQUIRE(rig.session.open(file).empty());
+  rig.pump();
+  CHECK(rig.session.saveRefusal().empty());
+  rig.osWrite(0xA5);
+  REQUIRE(rig.session.startSave());
+  REQUIRE(rig.finishSave().ok);
+  const auto saved = readBytes(file);
+  CHECK(isGiebler(saved));
+  std::vector<uint8_t> expected(DiskImage::kImageBytes, 0x55);
+  std::fill_n(expected.begin(), 1024, uint8_t(0xA5));
+  CHECK(DiskImage::fromFileBytes(saved).toBytes() == expected);
+
+  // Save As follows the new name: .img is raw, after which plain Save stays raw.
+  REQUIRE(rig.session.startSave(tmp / "copy.img"));
+  REQUIRE(rig.finishSave().ok);
+  CHECK(readBytes(tmp / "copy.img") == expected);
+  rig.osWrite(0x5A);
+  REQUIRE(rig.session.startSave());
+  REQUIRE(rig.finishSave().ok);
+  CHECK(readBytes(tmp / "copy.img").size() == size_t(DiskImage::kImageBytes));
+  CHECK(readBytes(tmp / "copy.img")[0] == 0x5A);
+}
+
+TEST_CASE("session Save As picks the format by name: .edm (any case) Giebler, else raw") {
+  TempDir tmp("mirage_session_save_as_format");
+  const auto original = makeImage(tmp, "a.img", 0x11);
+  Rig rig;
+  REQUIRE(rig.session.open(original).empty());
+  rig.pump();
+  for (const char* name : {"x.edm", "y.EdM", "z.img", "noext"}) {
+    INFO(name);
+    CHECK(rig.session.saveRefusal(tmp / name).empty());
+    REQUIRE(rig.session.startSave(tmp / name));
+    REQUIRE(rig.finishSave().ok);
+    const auto saved = readBytes(tmp / name);
+    const bool edm = name[0] == 'x' || name[0] == 'y';
+    CHECK(isGiebler(saved) == edm);
+    CHECK(DiskImage::fromFileBytes(saved).toBytes() ==
+          std::vector<uint8_t>(DiskImage::kImageBytes, 0x11));
+    if (!edm) CHECK(saved.size() == size_t(DiskImage::kImageBytes));
+  }
+  // Then plain Save keeps the last one's format (raw for "noext").
+  rig.osWrite(0x22);
+  REQUIRE(rig.session.startSave());
+  REQUIRE(rig.finishSave().ok);
+  CHECK(readBytes(tmp / "noext").size() == size_t(DiskImage::kImageBytes));
+}
+
+TEST_CASE("session saves a raw .edm back as raw") {
+  TempDir tmp("mirage_session_raw_edm");
+  const auto edm = makeImage(tmp, "disk.edm", 0x55);
   Rig rig;
   REQUIRE(rig.session.open(edm).empty());
   rig.pump();
   rig.osWrite(0xA5);
-  rig.pump();
-  const std::string message =
-      "Saving .edm files comes in a later version; use Save As to save a .img copy.";
-  CHECK(rig.session.saveRefusal() == message);
-  CHECK(rig.session.saveRefusal(tmp / "other.EdM") == message);
-  CHECK(rig.session.saveRefusal(tmp / "copy.img").empty());
-  CHECK_FALSE(rig.session.startSave());                 // plain Save
-  CHECK_FALSE(rig.session.startSave(tmp / "x.EDM"));    // Save As to .edm
-  CHECK_FALSE(rig.session.saving());
-  rig.pump();
-  CHECK_FALSE(rig.session.poll().has_value());          // no copy was ever requested
-  CHECK(readBytes(edm) == std::vector<uint8_t>(DiskImage::kImageBytes, 0x55));
-  CHECK_FALSE(fs::exists(tmp / "x.EDM"));
-  // Save As to a .img still works, and the session then follows the new file.
-  REQUIRE(rig.session.startSave(tmp / "copy.img"));
-  CHECK(rig.finishSave().ok);
   CHECK(rig.session.saveRefusal().empty());
+  REQUIRE(rig.session.startSave());
+  REQUIRE(rig.finishSave().ok);
+  const auto saved = readBytes(edm);
+  REQUIRE(saved.size() == size_t(DiskImage::kImageBytes));
+  CHECK(saved[0] == 0xA5);
+  CHECK(saved[1024] == 0x55);
 }
 
 TEST_CASE("session save during the insert gap says the disk is still going in") {
@@ -440,14 +491,17 @@ TEST_CASE("disk session refuses to save a partly formatted disk") {
   rig.pump();
   CHECK(rig.session.needsSaveBeforeReplacing());
 
-  const auto target = tmp / "out.img";
-  REQUIRE(rig.session.startSave(target));
-  const SaveOutcome outcome = rig.finishSave();
-  CHECK_FALSE(outcome.ok);
-  CHECK(outcome.message ==
-        "This disk is not fully formatted (3 of 80 tracks). Format it with the OS before saving.");
-  CHECK(outcome.path == target);
-  CHECK(fs::is_empty(tmp.dir));  // neither out.img nor out.img.tmp
+  for (const char* name : {"out.img", "out.edm"}) {
+    INFO(name);
+    const auto target = tmp / name;
+    REQUIRE(rig.session.startSave(target));
+    const SaveOutcome outcome = rig.finishSave();
+    CHECK_FALSE(outcome.ok);
+    CHECK(outcome.message ==
+          "This disk is not fully formatted (3 of 80 tracks). Format it with the OS before saving.");
+    CHECK(outcome.path == target);
+    CHECK(fs::is_empty(tmp.dir));  // neither the file nor its .tmp
+  }
   rig.pump();
   CHECK(rig.host.status().diskDirty);
   CHECK(rig.session.needsSaveBeforeReplacing());

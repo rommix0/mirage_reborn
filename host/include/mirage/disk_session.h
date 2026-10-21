@@ -22,10 +22,11 @@ struct SaveOutcome {
 // UI thread only, JUCE-free; the caller does the prompting and the dialogs.
 //
 // A save copies the disk out on the audio thread (postCopyDisk into a blank
-// buffer), then writes the copy here with DiskImage::saveFile (atomic) and
-// sends postMarkSaved with the copy's write count, so a write the OS makes in
-// between keeps the disk modified. poll() must run regularly (>= 10 Hz): it
-// finishes saves and frees every disk the host hands back.
+// buffer), then writes the copy here with DiskImage::saveFile (atomic, in the
+// format below) and sends postMarkSaved with the copy's write count, so a
+// write the OS makes in between keeps the disk modified. poll() must run
+// regularly (>= 10 Hz): it finishes saves and frees every disk the host hands
+// back.
 //
 // The copy only comes back if the audio thread runs process(). If it has not
 // come back kSaveTimeoutSeconds after startSave (no audio device, a failed
@@ -35,6 +36,10 @@ struct SaveOutcome {
 //
 // While a save is in flight, open() and eject() are refused: the mark-saved
 // must reach the disk that was copied.
+//
+// Formats (docs/hardware/fdc.md): open() takes a raw image or a Giebler .edm,
+// by content. Save writes the format the file was read in (or last saved as);
+// Save As writes Giebler for a name ending in .edm (any case), raw otherwise.
 class DiskSession {
  public:
   // A monotonic clock in seconds (tests inject their own).
@@ -46,7 +51,8 @@ class DiskSession {
   DiskSession(const DiskSession&) = delete;
   DiskSession& operator=(const DiskSession&) = delete;
 
-  // Loads and validates now; on success posts the insert and remembers the path.
+  // Loads and validates now; on success posts the insert and remembers the path
+  // and the format.
   // Returns an error message (empty on success). Does not prompt: the caller
   // checks needsSaveBeforeReplacing() first.
   std::string open(const std::filesystem::path& file);
@@ -57,10 +63,12 @@ class DiskSession {
   bool newBlank();
   void eject();
   // Why saving to `file` (current path when empty) is refused regardless of
-  // timing, as a message for the user; empty when allowed. Today: .edm targets
-  // (any case), whose format is unconfirmed, so Save and Save As both refuse.
+  // timing, as a message for the user; empty when allowed. Today nothing is
+  // refused up front (.edm saves since Plan 3): a partly formatted disk is
+  // refused when the save runs, in poll().
   std::string saveRefusal(const std::filesystem::path& file = {}) const;
-  // Starts a save to `file` (current path when empty). Completes in poll().
+  // Starts a save to `file` (current path when empty, in the current format;
+  // otherwise in the format its name picks). Completes in poll().
   // False (nothing started) when no target is known, saveRefusal() is
   // non-empty, a save is already in flight, or the host's queue is full.
   // The save itself fails, leaving the disk modified and no file (not even a
@@ -86,11 +94,13 @@ class DiskSession {
 
   RealtimeHost& host_;
   Clock clock_;
-  std::filesystem::path path_;        // the inserted disk's file; empty: none, or untitled
-  bool untitled_ = false;             // a newBlank() disk is in and has no file yet
-  bool saving_ = false;               // a copy is out, awaiting its return
-  double saveStarted_ = 0.0;          // clock_() at startSave
-  std::filesystem::path saveTarget_;  // where the copy goes
+  std::filesystem::path path_;               // the inserted disk's file; empty: none, or untitled
+  DiskFormat format_ = DiskFormat::Raw;      // path_'s format: what a plain Save writes
+  bool untitled_ = false;                    // a newBlank() disk is in and has no file yet
+  bool saving_ = false;                      // a copy is out, awaiting its return
+  double saveStarted_ = 0.0;                 // clock_() at startSave
+  std::filesystem::path saveTarget_;         // where the copy goes
+  DiskFormat saveFormat_ = DiskFormat::Raw;  // and in which format
   // Copies posted and not yet returned. Copies come back in order, so the one
   // answering the current save is the last: it returns when this drops to 0.
   size_t copiesOut_ = 0;

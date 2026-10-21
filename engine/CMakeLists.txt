@@ -1,6 +1,7 @@
 add_library(mirage_engine STATIC
   src/state_io.cpp
   src/disk_image.cpp
+  src/edm_format.cpp
   src/opcodes6809.cpp
   src/cpu6809.cpp
   src/cpu6809_ops.cpp
