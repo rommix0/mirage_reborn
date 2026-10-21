@@ -143,7 +143,8 @@ With a MIDI keyboard:
   the passband volume drop as resonance rises. It's driven by the per-voice
   cutoff and resonance values the OS writes.
 - **Window:** a replica of the hardware front panel (design "A"). That means
-  the dark case, ensoniq/Mirage branding, red two-digit LED, a drive-activity
+  the dark case, ensoniq/Mirage branding, yellow two-digit LED readout (the
+  original Mirage's colour; owner decision 2026-10-21), a drive-activity
   light, and every hardware button in its real position with its real label.
   Menus sit above it: *File*, *Machine*, *MIDI* (input and output devices —
   output added as my call, since the OS's sequencer, MIDI thru and SysEx

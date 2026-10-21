@@ -15,7 +15,8 @@ const Colour kWell{0xff0b0b0d};      // the recess around each cap
 const Colour kLegend{0xfff2f2f0};    // labels, headings, rules
 const Colour kBranding{0xffc6c6c4};  // the ensoniq badge and the subtitle
 const Colour kMirageYellow{0xfff2c22e};
-const Colour kLedOn{0xffff3322}, kLedOff{0xff3a0e0b};
+const Colour kDigitOn{0xffffd030}, kDigitOff{0xff352b08};  // the yellow two-digit readout
+const Colour kLedOn{0xffff3322}, kLedOff{0xff3a0e0b};      // the drive activity LED
 
 constexpr float kLabelFont = 9.5f, kHeadingFont = 8.5f;
 constexpr float kRuleThickness = 1.0f;
@@ -73,10 +74,10 @@ Rectangle<float> driveBezel() {
 
 void fillLed(juce::Graphics& g, const juce::Path& p, bool lit, float glow) {
   if (lit) {
-    g.setColour(kLedOn.withAlpha(0.3f));
+    g.setColour(kDigitOn.withAlpha(0.3f));
     g.strokePath(p, juce::PathStrokeType(glow));
   }
-  g.setColour(lit ? kLedOn : kLedOff);
+  g.setColour(lit ? kDigitOn : kDigitOff);
   g.fillPath(p);
 }
 
@@ -401,8 +402,8 @@ void PanelComponent::paintDisplay(juce::Graphics& g) const {
   g.setColour(Colour(0xff09090a));
   g.fillRoundedRectangle(d, 3.0f);
   const auto window = d.reduced(3.0f);
-  g.setGradientFill(juce::ColourGradient(Colour(0xff1e0706), 0.0f, window.getY(),
-                                         Colour(0xff0c0303), 0.0f, window.getBottom(), false));
+  g.setGradientFill(juce::ColourGradient(Colour(0xff1a1606), 0.0f, window.getY(),
+                                         Colour(0xff0b0a03), 0.0f, window.getBottom(), false));
   g.fillRoundedRectangle(window, 2.0f);
 
   // Each dot sits at its digit's lower left; the left dot is over Param.
