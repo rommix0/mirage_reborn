@@ -1,9 +1,12 @@
 #include "MainWindow.h"
 
+#include <exception>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <utility>
+
+#include "ImportDialog.h"
 
 namespace {
 
@@ -43,6 +46,12 @@ void MirageContent::setDiskName(const juce::String& name, const juce::String& ti
   panel_->setDiskName(name);
 }
 
+void MirageContent::showNotice(const juce::String& text) {
+  notice_ = text;
+  noticeUntil_ = juce::Time::getMillisecondCounter() + kNoticeMs;
+  timerCallback();
+}
+
 void MirageContent::resized() {
   auto r = getLocalBounds();
   r.removeFromBottom(kStripHeight);
@@ -75,6 +84,8 @@ MirageContent::StripText MirageContent::buildText() const {
   const auto s = host_.status();
   if (diskTitle_.isNotEmpty()) t.left = diskTitle_;  // the window title's view (DiskSession)
   juce::StringArray problems;
+  if (notice_.isNotEmpty() && juce::Time::getMillisecondCounter() < noticeUntil_)
+    problems.add(notice_);
   if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
   if (s.midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
   t.right = problems.joinIntoString("   ");
@@ -117,6 +128,7 @@ MainWindow::~MainWindow() {
   // The app can quit with the dialog open (Windows ending the session), and
   // the dialog must not outlive the engine's AudioDeviceManager.
   delete audioSettings_.getComponent();
+  delete importDialog_.getComponent();
   chooser_.reset();
   removeKeyListener(this);
   setMenuBar(nullptr);
@@ -194,6 +206,8 @@ juce::PopupMenu MainWindow::getMenuForIndex(int index, const juce::String&) {
       m.addCommandItem(&commands_, cmdSaveDiskAs);
       m.addCommandItem(&commands_, cmdEjectDisk);
       m.addSeparator();
+      m.addCommandItem(&commands_, cmdImportWav);
+      m.addSeparator();
       m.addCommandItem(&commands_, cmdQuit);
       break;
     case 1:
@@ -243,8 +257,8 @@ void MainWindow::menuItemSelected(int id, int) {
 }
 
 void MainWindow::getAllCommands(juce::Array<juce::CommandID>& c) {
-  c.addArray({cmdOpenDisk, cmdNewBlankDisk, cmdSaveDisk, cmdSaveDiskAs, cmdEjectDisk, cmdQuit,
-              cmdReset, cmdPanic, cmdAudioSettings});
+  c.addArray({cmdOpenDisk, cmdNewBlankDisk, cmdSaveDisk, cmdSaveDiskAs, cmdEjectDisk,
+              cmdImportWav, cmdQuit, cmdReset, cmdPanic, cmdAudioSettings});
 }
 
 void MainWindow::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo& info) {
@@ -278,6 +292,11 @@ void MainWindow::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo
       info.setInfo("Eject Disk", "Eject the disk", file, 0);
       info.addDefaultKeypress('e', ModifierKeys::ctrlModifier);
       info.setActive(disk);
+      break;
+    case cmdImportWav:
+      info.setInfo("Import WAV...", "Write a WAV file into wave RAM", file, 0);
+      info.addDefaultKeypress('i', ModifierKeys::ctrlModifier);
+      info.setActive(canImportWav());
       break;
     case cmdQuit:
       info.setInfo("Exit", "Quit Mirage", file, 0);
@@ -313,6 +332,9 @@ bool MainWindow::perform(const InvocationInfo& info) {
       return true;
     case cmdEjectDisk:
       ejectDisk();
+      return true;
+    case cmdImportWav:
+      importWav();
       return true;
     case cmdQuit:
       juce::JUCEApplication::getInstance()->systemRequestedQuit();
@@ -465,6 +487,7 @@ void MainWindow::pollDisk() {
       showError("Cannot save disk image", fromUtf8(outcome->message));
     }
   }
+  pollWaves();
   refreshDiskState();
 }
 
@@ -476,10 +499,11 @@ void MainWindow::refreshDiskState() {
   const auto name = session_.path().empty() ? juce::String(session_.hasDisk() ? "Untitled" : "")
                                             : fileName(session_.path());
   content_->setDiskName(name, fromUtf8(session_.title()));  // so the strip matches the window title
-  const bool hasDisk = session_.hasDisk(), saving = session_.saving();
-  if (hasDisk != menusHaveDisk_ || saving != menusSaving_) {
+  const bool hasDisk = session_.hasDisk(), saving = session_.saving(), canImport = canImportWav();
+  if (hasDisk != menusHaveDisk_ || saving != menusSaving_ || canImport != menusCanImport_) {
     menusHaveDisk_ = hasDisk;
     menusSaving_ = saving;
+    menusCanImport_ = canImport;
     commands_.commandStatusChanged();
   }
 }
@@ -493,4 +517,90 @@ juce::File MainWindow::diskFolder() const {
 void MainWindow::showError(const juce::String& title, const juce::String& message) {
   juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, message, {},
                                          this);
+}
+
+// ---- WAV import ------------------------------------------------------------
+
+bool MainWindow::canImportWav() const {
+  // Without a running device process() never runs, so the write would wait.
+  auto* dev = engine_.devices().getCurrentAudioDevice();
+  return dev != nullptr && dev->isPlaying() && !host_.status().driveActive;
+}
+
+void MainWindow::importWav() {
+  if (!canImportWav() || importDialog_ != nullptr) return;
+  const auto folder = lastWavDir_.isDirectory() ? lastWavDir_ : diskFolder();
+  chooser_ = std::make_unique<juce::FileChooser>("Import WAV", folder, "*.wav");
+  juce::Component::SafePointer<MainWindow> safe(this);
+  chooser_->launchAsync(
+      juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+      [safe](const juce::FileChooser& fc) {
+        const auto file = fc.getResult();
+        if (safe == nullptr || file == juce::File()) return;
+        safe->lastWavDir_ = file.getParentDirectory();
+        safe->showImportDialog(file);
+      });
+}
+
+void MainWindow::showImportDialog(const juce::File& file) {
+  std::shared_ptr<const mirage::WavAudio> audio;
+  try {
+    audio = std::make_shared<const mirage::WavAudio>(mirage::readWavFile(toPath(file)));
+  } catch (const mirage::WavError& e) {
+    return showError("Cannot import " + file.getFileName(), fromUtf8(e.what()));
+  } catch (const std::exception&) {  // std::bad_alloc for a file too big to hold
+    return showError("Cannot import " + file.getFileName(), "The WAV file could not be read.");
+  }
+  auto* dialog = new ImportDialog(audio, file.getFileName(), [this] { return canImportWav(); });
+  juce::Component::SafePointer<MainWindow> safe(this);
+  dialog->onImport = [safe, audio](const mirage::ImportSettings& settings) {
+    if (safe == nullptr) return;
+    safe->postImport(*audio, settings);
+    if (auto* w = safe->importDialog_.getComponent()) w->exitModalState(0);
+  };
+  dialog->onCancel = [safe] {
+    if (safe != nullptr)
+      if (auto* w = safe->importDialog_.getComponent()) w->exitModalState(0);
+  };
+  juce::DialogWindow::LaunchOptions o;
+  o.dialogTitle = "Import WAV";
+  o.content.setOwned(dialog);
+  o.componentToCentreAround = this;
+  o.dialogBackgroundColour = getBackgroundColour();
+  o.escapeKeyTriggersCloseButton = true;
+  o.useNativeTitleBar = true;
+  o.resizable = false;
+  // Modal: the panel's keyboard shortcuts stay off and held keys are let go
+  // (keyPressed, timerCallback) while it is open.
+  importDialog_ = o.launchAsync();
+}
+
+void MainWindow::postImport(const mirage::WavAudio& audio, const mirage::ImportSettings& settings) {
+  if (!canImportWav())
+    return showError("Not imported", "The drive light is on or no audio device runs. Try again.");
+  auto write = std::make_unique<mirage::WaveWrite>();
+  write->address = mirage::planImport(audio, settings).address;
+  write->bytes = mirage::convertForWaveRam(audio, settings);
+  if (write->bytes.empty()) return;  // the dialog keeps Import off while the plan has a problem
+  if (!host_.postWaveWrite(std::move(write)))
+    showError("Not imported", "The emulator is busy. Try again.");
+}
+
+void MainWindow::pollWaves() {
+  while (auto r = host_.takeReturnedWave()) {
+    if (r->why == mirage::WaveReturn::RefusedDriveBusy) {
+      content_->showNotice("Not imported: the drive was busy");
+      continue;
+    }
+    // Pages within the half, decimal and in hex as the OS shows them.
+    const auto& w = *r->write;
+    const int first = int(w.address & 0xFFFF) / 256;
+    const int last = int((w.address & 0xFFFF) + w.bytes.size() - 1) / 256;
+    auto hex = [](int v, int digits) {
+      return juce::String::toHexString(v).toUpperCase().paddedLeft('0', digits);
+    };
+    content_->showNotice("Imported " + juce::String((juce::int64)w.bytes.size()) + " bytes at $" +
+                         hex(int(w.address), 5) + " (pages " + juce::String(first) + "-" +
+                         juce::String(last) + ", hex " + hex(first, 2) + "-" + hex(last, 2) + ")");
+  }
 }

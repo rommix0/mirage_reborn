@@ -46,6 +46,11 @@ argument exits with 2, a failed write with 1. The ctest `app_panel_png_smoke`
 (registered when the app is built) runs it and checks for exit code 0 and a
 file that starts with the PNG signature.
 
+`Mirage.exe --import-dialog-png in.wav out.png` renders the *Import WAV* dialog for
+`in.wav` with its default settings and exits: 0 on success, 1 if the WAV cannot
+be read or the PNG written, 2 with an argument missing. It needs neither an
+audio device nor the ROM and is there to review the dialog's layout.
+
 ## The window
 
 The window is the replica panel (display, keypad, drive bezel with the LED and
@@ -62,9 +67,9 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   changes, `Mirage — No disk` with an empty drive.
 - **Status strip:** left, the disk's file name (`(modified)` when it has unsaved
   writes) or "No disk"; middle, the audio device, its rate and the audio CPU
-  load; right, a warning only when something is wrong: `illegal ops: N` (the
-  CPU met an undefined opcode) and `MIDI dropped: N` (MIDI bytes lost, see
-  below). The strip refreshes at 10 Hz and reads the audio thread's published
+  load; right, the outcome of the last WAV import for 15 s, then a warning only
+  when something is wrong: `illegal ops: N` (the CPU met an undefined opcode)
+  and `MIDI dropped: N` (MIDI bytes lost, see below). The strip refreshes at 10 Hz and reads the audio thread's published
   status, so "(modified)" can lag a block or two behind the first write.
 
 ## Menus and shortcuts
@@ -76,6 +81,7 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 | File | Save Disk Image | Ctrl+S |
 | File | Save Disk Image As... | Ctrl+Shift+S |
 | File | Eject Disk | Ctrl+E |
+| File | Import WAV... | Ctrl+I |
 | File | Exit | |
 | Machine | Reset (power-cycles the Mirage; the disk and unsaved changes stay) | Ctrl+R |
 | MIDI | MIDI input: None / one device (radio list) | |
@@ -105,6 +111,9 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 - **Panic** discards all MIDI input not yet played and sends All Notes Off
   (CC 123) on all 16 channels. If the OS ignores CC 123 that is faithful
   behaviour.
+- **Import WAV** is greyed out while the drive LED is on (the OS may be loading
+  a sound into wave RAM) and while no audio device runs. See *The Import WAV
+  dialog* below.
 - **MIDI input:** one device at a time. The chosen devices are saved when you
   pick them, and a saved device that is missing at launch stays saved.
 
@@ -123,6 +132,48 @@ Each physical key press is one panel press, released when the key comes up
 chooser is open, Ctrl and Alt combinations go to the menus, and every held key
 is released when the window loses focus or a dialog opens.
 
+## The Import WAV dialog
+
+*File → Import WAV...* (Ctrl+I) asks for a `.wav` file (it starts in the folder
+of the last import, or the disk folder), reads it, and opens the import dialog,
+a window of its own so the replica panel stays as it is. A file the reader
+refuses (not PCM 8/16/24/32-bit or 32-bit float, not mono or stereo) shows its
+message instead. The dialog is modal: the panel's keyboard shortcuts are off
+and held keys are let go while it is open.
+
+- **Waveform:** the file's mono mix (min/max per pixel column) with a green
+  start marker and an orange end marker. Click or drag to move the nearer
+  marker. The selection is light blue; any part of it that does not fit before
+  the end of the half is drawn in orange.
+- **Start / End:** the selection in seconds (also typed in the boxes).
+- **Rate:** 10,101-33,333 Hz, the Mirage's own sampling range; *Default* sets
+  29,412 Hz. The bytes are converted to play at this rate.
+- **Into:** *Lower sound ($00000)* (wave RAM `$00000-$0FFFF`) or *Upper sound
+  ($10000)* (`$10000-$1FFFF`), the halves OS 3.2 loads the lower and upper
+  sounds into.
+- **Start page:** 0-255 (256-byte pages from the start of the half), shown in
+  decimal and in hex as the OS shows page numbers.
+- **Normalise** (on by default): scale the selection so its peak uses all 8 bits.
+- **Live text:** the selected length in seconds, the bytes and the percentage of
+  the half they fill, the wave RAM range and pages written with the last page
+  (decimal and hex), and the pitch hint "Plays at original pitch around B2
+  (with the loaded sound's tuning)" (see below; it depends on the sound in
+  memory). In orange: "Too long for the half: only the first N s fits ..."
+  when the selection is cut off, any problem that refuses the import (Import is
+  greyed while there is one), and a note while the drive LED is on or no audio
+  device runs (Import is greyed then too).
+- **Import** converts the selection on the UI thread (mono mix, low-pass and
+  resample, optional normalise, unsigned 8-bit), posts it to the audio thread
+  and closes the dialog. When the write comes back the status strip shows
+  `Imported N bytes at $XXXXX (pages A-B, hex AA-BB)` (pages within the half),
+  or `Not imported: the drive was busy` if the drive started before the write
+  was applied (nothing is written then). *Cancel* or Esc closes it.
+
+The OS is not told about the import: its wavesample start, end, loop and
+tuning stay as they were, as on a real Mirage after sampling. The imported
+sample is kept only once you save the sound with the OS (and then the disk
+image with *Save*); a reset loses it.
+
 ## Settings
 
 JUCE `ApplicationProperties` with application and folder name `MirageEmulator`,
@@ -140,7 +191,7 @@ JUCE-free:
 | Thread | Does | Talks to the audio thread through |
 |---|---|---|
 | Audio | `RealtimeHost::process()` per device block: drains the queues, runs the machine, publishes status | n/a |
-| UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`) | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved` |
+| UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`), WAV import | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved`; the wave queue: `postWaveWrite` |
 | MIDI input (one device) | `postMidi` with a timestamp | the MIDI queue |
 | "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device | the MIDI-out queue |
 
@@ -152,12 +203,21 @@ Queues (all lock-free single-producer, single-consumer):
 | MIDI out | 8192 bytes | Each byte carries the machine's cycle stamp; a full queue drops the byte. |
 | UI commands | 256 | A full queue makes the `post...` call return false and leave its argument untouched. |
 | Returned disks | 64 | Up to 4 more wait inside the host if this fills. |
+| Wave writes | 16 | `postWaveWrite` returns false when full (or for a null write or one past the end of wave RAM). |
+| Returned wave writes | 16 | While it is full, `process()` leaves the writes waiting in the wave queue. |
 
 - After `prepare()` the audio thread never allocates, frees, locks or does
   I/O. Disks cross as `unique_ptr`s that change hands only on the audio thread,
   and **every disk leaving the machine goes back to the UI thread to be
   freed there** (an ejected disk, an insert that never went in, a save copy).
-  An allocation-counting test enforces this.
+  Wave writes (WAV import) travel the same way: a `unique_ptr<WaveWrite>` that
+  comes back `Written` or `RefusedDriveBusy` through `takeReturnedWave`, polled
+  at 10 Hz with the disk returns. An allocation-counting test enforces this.
+- **Wave writes** are applied at the start of a block, after the UI queue and
+  before rendering, so the CPU and the DOC see the new bytes for the whole
+  block. One that arrives while the drive is active (`driveActive()`, the motor
+  on) is refused and handed back untouched: the UI greys Import out while the
+  drive LED is on, and this closes the gap between that check and the write.
 - **MIDI timing:** an event is placed in the block by its timestamp
   (`frames - round((now - t) * rate)`, clamped and non-decreasing). This adds up
   to one block of latency and no jitter.
@@ -192,7 +252,10 @@ Queues (all lock-free single-producer, single-consumer):
 | Atomic `DiskImage::saveFile` | Moved here from Plan 3 because Save UI ships now | n/a |
 | MIDI panic | Flush the input queue and send CC 123 on all 16 channels | If an OS ignores CC 123, that's faithful behaviour. |
 | JUCE licence | JUCE 8 (AGPLv3 or JUCE's free Starter licence). The engine and host stay JUCE-free, so VST3 and licence choices stay open. | Noted in the README. |
-| Faithful emulation | The host only presses panel keys, queues MIDI bytes and inserts or ejects disks | No OS-specific code paths, no OS patching. |
+| Faithful emulation | The host only presses panel keys, queues MIDI bytes, inserts or ejects disks and writes wave RAM for WAV import | No OS-specific code paths, no OS patching. |
+| Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
+| WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |
+| Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
 
 ## Acceptance-1 checklist (by ear, on your machine)
 
@@ -291,7 +354,7 @@ Re-run it after changes to the FDC (Write Track, Read Address) or to
 
 The import writes converted bytes straight into the 128 KB sample RAM
 (`Machine::writeWaveRam`, wave RAM only; the engine API is shared by the dialog and
-`mirage_cli --import`). Task 6 adds the dialog; the headless route is below.
+`mirage_cli --import`). The dialog is described above; the headless route is below.
 
 **Halves.** The dialog's *Lower* half is wave RAM `$00000-$0FFFF` and *Upper* is
 `$10000-$1FFFF`. Measured under OS 3.2 (SND-A01 booted, then `Load Lower` and `Load Upper`
@@ -317,7 +380,8 @@ SND-A01 is busy until about 14.6 s, so import at 15 s or later:
 mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
 ```
 
-**Pitch hint** (Task 6 shows it as "plays at original pitch around C3"):
+**Pitch hint** (the dialog shows it as "Plays at original pitch around B2 (with the
+loaded sound's tuning)", the note name of `originalPitchKey(rate)`):
 
     key ~= k0 + 12 * log2(rate / r0),   k0 = 47.3,   r0 = 29412 Hz
 
@@ -348,12 +412,50 @@ The musician's manual says a single-wavesample sound set up by the OS plays at k
 B2/E3" is the lower-half range to expect; relative tuning (parameters 67, 68) moves it.
 The hint is a starting point, not a promise for every sound.
 
+## Acceptance-3 checklist (import a WAV, play it, save it with the OS, reopen)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+route headlessly (`acceptance 3: an imported sine plays at a pitch set by the key`
+and `acceptance 3: the imported sound survives an OS save and reopen`) and
+passes. No wavesample start or end edits are needed: SND-A01's lower sound
+plays its wavesamples from fixed pages of the lower half (keys 41-56 from page
+`$48` on, the others from pages `$00` to `$D8`), so an import that fills the half
+is what those keys play.
+
+1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img` and wait for the
+   display to settle on "2." "1" with the drive LED off (about 15 s). *Import
+   WAV* stays greyed while the LED is on.
+2. *File → Import WAV...* (Ctrl+I) and pick a WAV of at least 2.3 s, for example
+   a sustained note or a voice.
+3. In the dialog leave **Rate** at 29412 Hz (*Default*), **Into** at *Lower sound
+   ($00000)*, **Start page** at 0 and **Normalise** on. Keep the selection at
+   2.3 s or more: the text says "65536 bytes at 29412 Hz, 100.0% of the half",
+   pages 0 to 255 (and, for a longer file, the orange "Too long for the half"
+   note: the rest is cut off). Click **Import**.
+4. The status strip shows `Imported 65536 bytes at $00000 (pages 0-255, hex 00-FF)`.
+5. Play across the lower keyboard (MIDI 36-71, C2 to B4). Every key plays the
+   import, each from its own wavesample's page. Keys 41-56 play it from about
+   0.63 s into the selection (page `$48`) a semitone apart, at its original
+   pitch around B2 (MIDI 47). The upper keyboard (72 and up) still plays the
+   factory upper sound.
+6. Save the lower sound to place 1 with the OS: **Param**, **1**, **1**, **1**,
+   **Enter** (as in acceptance 2). Wait for the drive LED to go out. The title
+   shows "(modified)".
+7. *File → Save Disk Image As...* `SND-A01-import.img` (keep the factory disk
+   as it is; *Save* would write the import into `SND-A01.img`).
+8. *File → Open Disk Image...* `SND-A01-import.img`, wait for "2." "1" and play
+   the lower keyboard again: the import plays as in step 5.
+
+Re-run it after changes to the WAV reader or converter, the host's wave queue
+or the dialog.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot
   hear the output.
-- The file dialogs, MIDI devices, audio device selection, menu shortcuts and
-  panel keyboard shortcuts are not exercised by automated tests (the queues,
+- The file dialogs, the Import WAV dialog, MIDI devices, audio device
+  selection, menu shortcuts and panel keyboard shortcuts are not exercised by
+  automated tests (the queues,
   the MIDI parser, `DiskSession`, the panel layout and the soft clip are).
 - The boot calibration tones are deliberately not muted (see the decisions).
 - The status strip's "(modified)" can lag by a block or two.
@@ -364,4 +466,4 @@ The hint is a starting point, not a promise for every sound.
   Plan 3 adds a paced feeder.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*`.
-- No audio input. WAV import has the engine call and `mirage_cli --import`; the dialog is Plan 3 Task 6.
+- No audio input: *Import WAV* replaces sampling (spec 6.7).

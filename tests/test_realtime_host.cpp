@@ -41,6 +41,13 @@ std::unique_ptr<DiskImage> filledDisk(uint8_t fill) {
 
 std::unique_ptr<DiskImage> blankDisk() { return std::make_unique<DiskImage>(DiskImage::blank()); }
 
+std::unique_ptr<WaveWrite> waveWrite(uint32_t address, std::vector<uint8_t> bytes) {
+  auto w = std::make_unique<WaveWrite>();
+  w->address = address;
+  w->bytes = std::move(bytes);
+  return w;
+}
+
 // One block at 48 kHz into a scratch buffer; returns the buffer.
 std::vector<float> block(RealtimeHost& host, size_t frames, double now = 0.0) {
   std::vector<float> buf(frames);
@@ -280,6 +287,10 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
   auto copyDest = blankDisk();
   DiskImage *rawA01 = a01.get(), *rawA02 = a02.get(), *rawCopy = copyDest.get();
   std::vector<ReturnedDisk> returned;
+  std::vector<ReturnedWave> waves;
+  auto busyWrite = waveWrite(0x10000, std::vector<uint8_t>(4096, 0x55));
+  auto idleWrite = waveWrite(0x00100, std::vector<uint8_t>(4096, 0x66));
+  WaveWrite *rawBusy = busyWrite.get(), *rawIdle = idleWrite.get();
   std::vector<float> buf(kMax);
   const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
   std::vector<uint8_t> sysex(20, 0x01);  // non-commercial ID: the OS ignores it
@@ -297,6 +308,10 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
         REQUIRE(host.postKey(PanelKey::Cancel, true));
         REQUIRE(host.postKey(PanelKey::Cancel, false));  // deferred release
         break;
+      case 15:
+        REQUIRE(host.status().driveActive);  // the ROM is loading the OS: refused
+        REQUIRE(host.postWaveWrite(std::move(busyWrite)));
+        break;
       case 20: REQUIRE(host.postMidi(on, now - 0.01)); break;
       case 25: REQUIRE(host.postMidi(off, now - 0.03)); break;
       case 30: REQUIRE(host.postMidi(sysex, now - 0.02)); break;  // two commands
@@ -312,6 +327,10 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
         sectorsRead = host.machineForTest().fdc().sectorsRead();  // powerOn() zeroes it
         REQUIRE(host.postReset());
         break;
+      case 95:
+        REQUIRE_FALSE(host.status().driveActive);  // after the reset, before the ROM looks for a disk
+        REQUIRE(host.postWaveWrite(std::move(idleWrite)));
+        break;
       default: break;
     }
     {
@@ -322,6 +341,7 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
     }
     now += double(kMax) / rate;
     while (auto r = host.takeReturnedDisk()) returned.push_back(std::move(*r));
+    while (auto r = host.takeReturnedWave()) waves.push_back(std::move(*r));
   }
   CHECK(allocations == 0);
   CHECK(frees == 0);
@@ -337,6 +357,136 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
   CHECK(returned[2].why == DiskReturn::Ejected);
   CHECK(returned[1].disk->toBytes() == returned[2].disk->toBytes());
   CHECK_FALSE(host.status().diskPresent);
+  REQUIRE(waves.size() == 2);
+  CHECK(waves[0].write.get() == rawBusy);
+  CHECK(waves[0].why == WaveReturn::RefusedDriveBusy);
+  CHECK(waves[1].write.get() == rawIdle);
+  CHECK(waves[1].why == WaveReturn::Written);
+}
+
+TEST_CASE("host applies a wave write before the block and returns it Written") {
+  // LDA $0005; STA $8000; BRA: the CPU copies wave RAM byte 5 (bank 0) all the time.
+  RealtimeHost host(romWith({0xB6, 0x00, 0x05, 0xB7, 0x80, 0x00, 0x20, 0xF8}));
+  host.prepare(64, 48000);
+  block(host, 64);
+  REQUIRE(host.machineForTest().peek(0x8000) == 0x00);
+
+  auto low = waveWrite(0x00004, {0x11, 0x77, 0x33});
+  auto high = waveWrite(0x1FFFE, {0xA1, 0xA2});  // the last two bytes of wave RAM
+  const WaveWrite *rawLow = low.get(), *rawHigh = high.get();
+  REQUIRE(host.postWaveWrite(std::move(low)));
+  CHECK(low == nullptr);
+  REQUIRE(host.postWaveWrite(std::move(high)));
+  CHECK(host.machineForTest().sampleRam(0x00005) == 0x00);  // nothing before process()
+  CHECK_FALSE(host.takeReturnedWave().has_value());
+
+  block(host, 64);
+  const Machine& m = host.machineForTest();
+  CHECK(host.machineForTest().peek(0x8000) == 0x77);  // the CPU read it during the block
+  CHECK(m.sampleRam(0x00003) == 0x00);
+  CHECK(m.sampleRam(0x00004) == 0x11);
+  CHECK(m.sampleRam(0x00005) == 0x77);
+  CHECK(m.sampleRam(0x00006) == 0x33);
+  CHECK(m.sampleRam(0x00007) == 0x00);
+  CHECK(m.sampleRam(0x1FFFD) == 0x00);
+  CHECK(m.sampleRam(0x1FFFE) == 0xA1);
+  CHECK(m.sampleRam(0x1FFFF) == 0xA2);
+
+  auto first = host.takeReturnedWave();
+  REQUIRE(first.has_value());
+  CHECK(first->write.get() == rawLow);
+  CHECK(first->why == WaveReturn::Written);
+  CHECK(first->write->bytes == std::vector<uint8_t>{0x11, 0x77, 0x33});
+  auto second = host.takeReturnedWave();
+  REQUIRE(second.has_value());
+  CHECK(second->write.get() == rawHigh);
+  CHECK(second->why == WaveReturn::Written);
+  CHECK_FALSE(host.takeReturnedWave().has_value());
+}
+
+TEST_CASE("host rejects a null, oversized or queue-full wave write without taking it") {
+  RealtimeHost host(kIdleRom);
+  CHECK_FALSE(host.postWaveWrite(nullptr));
+  auto past = waveWrite(0x1FFFF, {1, 2});  // one byte past the end of wave RAM
+  CHECK_FALSE(host.postWaveWrite(std::move(past)));
+  REQUIRE(past != nullptr);
+  CHECK(past->bytes.size() == 2);
+  auto far = waveWrite(0x20001, {});
+  CHECK_FALSE(host.postWaveWrite(std::move(far)));
+  CHECK(far != nullptr);
+  CHECK(host.postWaveWrite(waveWrite(0x20000 - 4, {1, 2, 3, 4})));  // fits exactly
+
+  for (size_t i = 1; i < RealtimeHost::kWaveQueueWrites; ++i)
+    REQUIRE(host.postWaveWrite(waveWrite(0, {1})));
+  auto extra = waveWrite(0, {9});
+  CHECK_FALSE(host.postWaveWrite(std::move(extra)));
+  CHECK(extra != nullptr);
+}
+
+TEST_CASE("host keeps wave writes queued while the return queue is full") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  constexpr size_t kN = RealtimeHost::kWaveQueueWrites;
+  for (size_t i = 0; i < kN; ++i) REQUIRE(host.postWaveWrite(waveWrite(uint32_t(i), {1})));
+  block(host, 64);  // all applied; the return queue is now full
+  std::vector<const WaveWrite*> second;
+  for (size_t i = 0; i < kN; ++i) {
+    auto w = waveWrite(uint32_t(0x100 + i), {2});
+    second.push_back(w.get());
+    REQUIRE(host.postWaveWrite(std::move(w)));
+  }
+  block(host, 64);  // nowhere to return them: none is applied, none is freed
+  CHECK(host.machineForTest().sampleRam(0x100) == 0x00);
+  for (size_t i = 0; i < kN; ++i) {
+    auto r = host.takeReturnedWave();
+    REQUIRE(r.has_value());
+    CHECK(r->write->address == i);
+  }
+  CHECK_FALSE(host.takeReturnedWave().has_value());
+  block(host, 64);
+  for (size_t i = 0; i < kN; ++i) {
+    CHECK(host.machineForTest().sampleRam(uint32_t(0x100 + i)) == 0x02);
+    auto r = host.takeReturnedWave();
+    REQUIRE(r.has_value());
+    CHECK(r->write.get() == second[i]);
+    CHECK(r->why == WaveReturn::Written);
+  }
+}
+
+TEST_CASE("host refuses a wave write while the drive is active and returns it untouched",
+          "[assets]") {
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  // Two hosts booting the same disk with the same blocks stay identical; only
+  // one is sent the write, which must change nothing.
+  RealtimeHost host(mirage_test::bootRomBytes()), twin(mirage_test::bootRomBytes());
+  constexpr size_t kFrames = 1024;
+  for (RealtimeHost* h : {&host, &twin}) {
+    h->prepare(kFrames, 48000);
+    REQUIRE(h->postInsert(std::make_unique<DiskImage>(
+        DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")))));
+  }
+  int blocks = 0;
+  while (!host.status().driveActive && blocks < 2000) {
+    block(host, kFrames);
+    block(twin, kFrames);
+    ++blocks;
+  }
+  REQUIRE(host.status().driveActive);
+
+  auto w = waveWrite(0x08000, std::vector<uint8_t>(256, 0x55));
+  const WaveWrite* raw = w.get();
+  REQUIRE(host.postWaveWrite(std::move(w)));
+  block(host, kFrames);
+  block(twin, kFrames);
+  CHECK(host.machineForTest().saveState() == twin.machineForTest().saveState());
+  auto r = host.takeReturnedWave();
+  REQUIRE(r.has_value());
+  CHECK(r->write.get() == raw);
+  CHECK(r->why == WaveReturn::RefusedDriveBusy);
+  CHECK(r->write->address == 0x08000);
+  CHECK(r->write->bytes == std::vector<uint8_t>(256, 0x55));
+  CHECK_FALSE(host.takeReturnedWave().has_value());
 }
 
 TEST_CASE("host copy returns the disk contents and mark-saved clears dirty only when unchanged") {
@@ -605,14 +755,15 @@ TEST_CASE("host threads: a MIDI producer and a UI producer against a processing 
     }
   });
 
-  // The UI side: keys, disks in and out, copies, saves, panic, reset.
-  uint64_t inserted = 0, copiesPosted = 0, keyPosts = 0;
+  // The UI side: keys, disks in and out, copies, saves, wave writes, panic, reset.
+  uint64_t inserted = 0, copiesPosted = 0, keyPosts = 0, wavesPosted = 0, wavesBack = 0;
   uint64_t back[4] = {};  // returned, by DiskReturn
   auto takeAll = [&] {
     while (auto r = host.takeReturnedDisk()) {
       ++back[size_t(r->why)];
       if (r->why == DiskReturn::Copy) host.postMarkSaved(r->writeCount);
     }
+    while (host.takeReturnedWave()) ++wavesBack;
   };
   std::thread ui([&] {
     for (uint64_t i = 0; !stop.load(); ++i) {
@@ -622,6 +773,8 @@ TEST_CASE("host threads: a MIDI producer and a UI producer against a processing 
       if (i % 3 == 0 && host.postInsert(blankDisk())) ++inserted;
       if (i % 5 == 0) host.postEject();
       if (i % 4 == 0 && host.postCopyDisk(blankDisk())) ++copiesPosted;
+      if (i % 6 == 0 && host.postWaveWrite(waveWrite(uint32_t(i % 512) * 256, {1, 2, 3})))
+        ++wavesPosted;
       if (i % 50 == 0) host.postPanic();
       if (i % 200 == 199) host.postReset();
       takeAll();
@@ -662,6 +815,8 @@ TEST_CASE("host threads: a MIDI producer and a UI producer against a processing 
   CHECK(copiesPosted > 10);
   CHECK(back[size_t(DiskReturn::Ejected)] + back[size_t(DiskReturn::Unused)] == inserted);
   CHECK(back[size_t(DiskReturn::Copy)] + back[size_t(DiskReturn::NoDiskToCopy)] == copiesPosted);
+  CHECK(wavesPosted > 10);
+  CHECK(wavesBack == wavesPosted);
   CHECK(host.machineForTest().disk() == nullptr);
 }
 
@@ -688,4 +843,22 @@ TEST_CASE("host destructor frees disks still in its queues") {
   };
   const size_t bare = destructorFrees(false);
   CHECK(destructorFrees(true) >= bare + 4 * 2);
+}
+
+TEST_CASE("host destructor frees wave writes still in its queues") {
+  // One write returned and not taken, one still waiting in the wave queue: each
+  // is at least its WaveWrite and its byte buffer.
+  auto destructorFrees = [](bool withWrites) {
+    auto host = std::make_unique<RealtimeHost>(kIdleRom);
+    host->prepare(64, 48000);
+    std::vector<float> buf(64);
+    if (withWrites) REQUIRE(host->postWaveWrite(waveWrite(0, {1, 2, 3})));
+    host->process(buf.data(), 64, 48000.0, 0.0);
+    if (withWrites) REQUIRE(host->postWaveWrite(waveWrite(0x10000, {4, 5, 6})));
+    AllocationScope scope;
+    host.reset();
+    return scope.frees();
+  };
+  const size_t bare = destructorFrees(false);
+  CHECK(destructorFrees(true) >= bare + 2 * 2);
 }

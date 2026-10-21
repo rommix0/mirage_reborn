@@ -44,6 +44,8 @@ struct RealtimeHost::Queues {
   SpscQueue<MidiCommand, kMidiQueueCommands> midi;     // MIDI input -> audio
   SpscQueue<MidiOutByte, kMidiOutQueueBytes> midiOut;  // audio -> MIDI output
   SpscQueue<ReturnedDisk, kReturnQueueDisks> returns;  // audio -> UI
+  SpscQueue<std::unique_ptr<WaveWrite>, kWaveQueueWrites> waves;  // UI -> audio
+  SpscQueue<ReturnedWave, kWaveQueueWrites> waveReturns;          // audio -> UI
   // process() scratch: this block's MIDI events and their frame offsets.
   std::array<MidiCommand, kMidiCommandsPerBlock> events{};
   std::array<size_t, kMidiCommandsPerBlock> offsets{};
@@ -68,6 +70,7 @@ void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
 void RealtimeHost::process(float* out, size_t frames, double hostRate, double nowSeconds) {
   flushStalled();
   applyUi();
+  applyWaves();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
     midiDropped_.fetch_add(discardMidiInput(), kRelaxed);  // stale by the time audio resumes
@@ -172,6 +175,21 @@ void RealtimeHost::applyUi() {
         if (DiskImage* d = machine_->disk(); d && d->writeCount() == c.writeCount) d->clearDirty();
         break;
     }
+  }
+}
+
+void RealtimeHost::applyWaves() {
+  // Take a write only when its return has room: from the producer side
+  // sizeApprox() can only overstate the fill, so the push cannot fail. Until
+  // the UI takes some back, the rest wait in the wave queue.
+  std::unique_ptr<WaveWrite> w;
+  while (q_->waveReturns.sizeApprox() < kWaveQueueWrites && q_->waves.pop(w)) {
+    WaveReturn why = WaveReturn::RefusedDriveBusy;
+    if (!machine_->driveActive()) {  // the OS may be loading a sound into wave RAM
+      machine_->writeWaveRam(w->address, w->bytes);
+      why = WaveReturn::Written;
+    }
+    q_->waveReturns.push(ReturnedWave{std::move(w), why});
   }
 }
 
@@ -306,6 +324,20 @@ bool RealtimeHost::postMarkSaved(uint64_t writeCount) {
   c.type = Queues::UiCommand::Type::MarkSaved;
   c.writeCount = writeCount;
   return q_->ui.push(std::move(c));
+}
+
+bool RealtimeHost::postWaveWrite(std::unique_ptr<WaveWrite>&& w) {
+  // Checked here so the audio thread never meets writeWaveRam's throw.
+  if (!w || w->address > Machine::kSampleRamSize ||
+      w->bytes.size() > Machine::kSampleRamSize - w->address)
+    return false;
+  return q_->waves.push(std::move(w));  // a full queue leaves w untouched
+}
+
+std::optional<ReturnedWave> RealtimeHost::takeReturnedWave() {
+  ReturnedWave r{};
+  if (!q_->waveReturns.pop(r)) return std::nullopt;
+  return r;
 }
 
 std::optional<ReturnedDisk> RealtimeHost::takeReturnedDisk() {

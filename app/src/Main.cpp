@@ -1,15 +1,20 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <exception>
+#include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "AudioEngine.h"
+#include "ImportDialog.h"
 #include "MainWindow.h"
 #include "PanelComponent.h"
 #include "Settings.h"
 #include "mirage/boot_rom.h"
 #include "mirage/realtime_host.h"
+#include "mirage/wav_import.h"
 
 namespace {
 
@@ -19,6 +24,13 @@ juce::String sha1Hex(const std::array<uint8_t, 20>& sha) {
   juce::String s;
   for (auto b : sha) s << juce::String::toHexString((int)b).paddedLeft('0', 2);
   return s;
+}
+
+bool writePng(const juce::Image& image, const juce::String& path) {
+  const auto file = juce::File::getCurrentWorkingDirectory().getChildFile(path);
+  file.deleteFile();
+  juce::FileOutputStream out(file);
+  return out.openedOk() && juce::PNGImageFormat().writeImageToStream(image, out);
 }
 
 // Renders the front panel at 1200 px wide to a PNG (--panel-png), showing a
@@ -33,12 +45,24 @@ int renderPanelPng(const juce::String& path) {
   PanelComponent panel(status, "Sound Disk 1.img");
   const int w = 1200;
   panel.setSize(w, juce::roundToInt(w * (double)panel.getHeight() / panel.getWidth()));
-  auto image = panel.createComponentSnapshot(panel.getLocalBounds(), true, 1.0f);
-  const auto file = juce::File::getCurrentWorkingDirectory().getChildFile(path);
-  file.deleteFile();
-  juce::FileOutputStream out(file);
-  if (!out.openedOk()) return 1;
-  return juce::PNGImageFormat().writeImageToStream(image, out) ? 0 : 1;
+  return writePng(panel.createComponentSnapshot(panel.getLocalBounds(), true, 1.0f), path) ? 0 : 1;
+}
+
+// Renders the Import WAV dialog for `wavPath` with its default settings to a
+// PNG (--import-dialog-png), for reviewing its layout. Needs neither an audio
+// device nor the ROM. Exit code 1 if the WAV cannot be read or the PNG written.
+int renderImportDialogPng(const juce::String& wavPath, const juce::String& pngPath) {
+  const auto wav = juce::File::getCurrentWorkingDirectory().getChildFile(wavPath);
+  std::shared_ptr<const mirage::WavAudio> audio;
+  try {
+    audio = std::make_shared<const mirage::WavAudio>(mirage::readWavFile(std::filesystem::path(
+        std::u8string(reinterpret_cast<const char8_t*>(wav.getFullPathName().toRawUTF8())))));
+  } catch (const std::exception&) {
+    return 1;
+  }
+  ImportDialog dialog(audio, wav.getFileName(), {});
+  return writePng(dialog.createComponentSnapshot(dialog.getLocalBounds(), true, 1.0f), pngPath) ? 0
+                                                                                                 : 1;
 }
 
 }  // namespace
@@ -54,6 +78,12 @@ class MirageApplication : public juce::JUCEApplication {
     const int flag = args.indexOf("--panel-png");
     if (flag >= 0) {
       setApplicationReturnValue(flag + 1 < args.size() ? renderPanelPng(args[flag + 1]) : 2);
+      quit();
+      return;
+    }
+    if (const int f = args.indexOf("--import-dialog-png"); f >= 0) {
+      setApplicationReturnValue(
+          f + 2 < args.size() ? renderImportDialogPng(args[f + 1], args[f + 2]) : 2);
       quit();
       return;
     }
