@@ -689,3 +689,65 @@ back-to-back test is far inside gap 3. The settle time is still dominated by the
 `bootedSnapshot` rule adds (its 1 s lit window overlaps the 2 s quiet window), not by the FDC layout. Tests: `boot: SND-A01 settles with its lower
 sound loaded in under 15 s`, `wd1772 reads sectors 0-5 of a track in under two revolutions back to
 back`.
+
+### 13.7 Other OS images and the Soundprocess sync wait (Plan 3, Task 7)
+
+**Why Soundprocess was silent.** The Soundprocess OS disk booted to "01" (`3F 06`) but a note
+played nothing, on any MIDI channel. The note reached the OS: the ACIA handler (`$800B` →
+`$8D5B`) read `90 3C 64`, the note-on code (`$8F2B`-`$903D`) filled the voice tables, and the
+timer IRQ (`$99A3` → `$B3C6`) ran the voice start (`$AD13` → `$A65E`, `$A990`) for voice 7. No
+DOC register changed in the 0.3 s after the note (probe: every `$EC00-$ECE1` register compared
+before each instruction). The voice start had stopped in `$AC66`:
+
+```
+AC66  LDA   #$20
+AC68  BITA  $E200      ; VIA port B
+AC6B  BEQ   $AC68      ; wait for PB5 = 1
+AC6D  NOP x 12
+AC79  ...              ; write FC lo/hi of oscillators 4v and 4v+1
+AC89  (the same wait)  ; then their volumes
+```
+
+Every DOC write in the voice code (`$ABD9`-`$AD12`, four copies chosen by voice & 6) first waits
+for PB5 = 1, then delays 0, 4, 8 or 12 NOPs by oscillator group before writing the frequency and
+volume registers of the voice's oscillators. The model read PB5 as a constant 0 ("no evidence any
+OS uses it"), so the OS waited for ever inside the interrupt handler; the display kept running
+because the handler had re-enabled interrupts (`$B42C ANDCC #$AF`).
+
+**What PB5 is.** MAME's `enmirage.cpp` names port B bit 5 "Q Chip sync" and drives it from a
+clock it calls `ca3_clock`, i.e. the DOC's CA3 channel-address output (as a free 500 kHz square
+wave, with the comment "may not be used in the firmware"). A free square wave cannot be what the
+OS expects: its per-group NOP delays only make sense if PB5 marks a fixed point of every DOC
+scan. The OS gives every oscillator CA3 = 0 (control `$02`, `$12` ... `$72` at `$9753`), so the
+line can only go high in the two refresh slots. The model: CA3 is control bit 7 of the
+oscillator in the current slot and 1 in the refresh slots (`Doc5503::ca3()`), and PB5 reads it
+(`Machine`). What the DOC drives on CA3-CA0 during refresh is not documented; this is the
+assumption that makes the observed OS code work. After the fix each wait lasts about one scan
+(mean 69 E cycles, at most 133, over 1480 waits in 4 s of a held note). Of the OS images
+here only Soundprocess contains `BITA $E200` (12 times: these wait loops); the others read
+`$E200` only with `LDA`/`LDB` (not examined one by one), and their boots did not change. Tests: `doc CA3 is control bit 7 in an oscillator slot and high in the refresh
+slots`, `machine PB5 reads the DOC's CA3 line`.
+
+**What Soundprocess plays after boot.** Its manual (section 1, *Starting Soundprocess*): when the
+OS has loaded, the display shows "01" (the selected program) and the keyboard plays. The system
+disk carries its own sound bank; no sound pack is needed. It answers MIDI on every channel at
+boot (OMNI on; notes on channels 1, 2 and 16 all play). The sound packs boot the same OS (13.2).
+
+**Each OS image, booted and played** (`bootedSnapshotAt` settle rule; then note 60, velocity
+100, held 1 s; `mirage_cli run --seconds 18 --note 60:100@16:1`). Settle times, displays and
+sector counts are the same before and after the Task 7 changes (PB5, the WD1772 `$D4`/MO rules,
+the DOC swap-partner rule).
+
+| Image | Settled | Display | Sectors | Note 60 (peak, RMS over the held second) |
+|---|---|---|---|---|
+| `Factory Library/IMG/SND-A01.img` | 14.56 s | `DB 06` "2." "1" | 155 | (acceptance 1) |
+| `EnsoniqOS/os32` | 14.56 s | `DB 06` | 155 | 0.26, 0.053 |
+| `EnsoniqOS/masos` | 14.57 s | `DB 06` | 155 | 0.32, 0.036 |
+| `EnsoniqOS/pianos` | 14.56 s | `DB 06` | 155 | 0.34, 0.053 |
+| `EnsoniqOS/rhodes` | 14.56 s | `DB 06` | 155 | 0.21, 0.057 |
+| `EnsoniqOS/resmos32.s` | 14.56 s | `DB 06` | 155 | 0.26, 0.079 |
+| `EnsoniqOS/fmt2` | 14.87 s | `71 5E` "F" "d" | 162 | not played: fmt2 asks for a blank disk (acceptance 5) |
+| `Soundprocess/Soundprocess OS/Soundprocess OS.img` | 13.28 s | `3F 06` "0" "1" | 142 | 0.73, 0.080 (was silent before the PB5 fix) |
+| `Soundprocess Sound Packs/IMG/Soundprocess Sound Pack 1.img` | 13.28 s | `3F 06` | 142 | 0.061, 0.019 (pack 3: 0.32, 0.035) |
+
+No illegal opcodes on any of them. Test: `acceptance 4: each OS image boots and plays`.

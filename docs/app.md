@@ -449,6 +449,36 @@ is what those keys play.
 Re-run it after changes to the WAV reader or converter, the host's wave queue
 or the dialog.
 
+## Acceptance-4 checklist (other OS images boot and play)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` boots each image
+headlessly and plays note 60 (`acceptance 4: each OS image boots and plays`) and
+passes. Times are on the emulated clock (`docs/hardware/boot-rom.md` §13.7).
+
+For each image: *File → Open Disk Image...*, wait for the display to settle with
+the drive LED off, then play a few notes from your MIDI keyboard.
+
+| Image | The display settles on | Then |
+|---|---|---|
+| `EnsoniqOS/os32` | "2." "1" (about 15 s) | Play. OS 3.2 auto-loads the lower sound, as SND-A01. |
+| `EnsoniqOS/masos` | "2." "1" (about 15 s) | Play. |
+| `EnsoniqOS/pianos` | "2." "1" (about 15 s) | Play. |
+| `EnsoniqOS/rhodes` | "2." "1" (about 15 s) | Play. |
+| `EnsoniqOS/resmos32.s` | "2." "1" (about 15 s) | Play. |
+| `Soundprocess/Soundprocess OS/Soundprocess OS.img` | "0" "1" (about 13 s) | Play. "01" is the selected program; the system disk carries its own sounds, so no sound pack is needed, and it answers on every MIDI channel. |
+
+Soundprocess was silent until Plan 3 Task 7: it waits for a DOC timing signal on
+VIA PB5 before every DOC write, which the emulator did not provide (§13.7). To
+try its other sounds: **SEQ REC** (Soundprocess's *PROG* key, manual section 1)
+and two digits 01-32 select a program. Each pack in
+`Soundprocess/Soundprocess Sound Packs/IMG/` also boots the OS by itself and
+plays the same way. (Loading a bank from a pack with the manual's *LOAD* key, a
+bank number 1-3 and *ENTER* is not tried here; the manual's key overlay says
+which panel key *LOAD* is.) `EnsoniqOS/fmt2` is not in the table: it shows "F" "d" and
+waits for a blank disk (acceptance 5).
+
+Re-run it after changes to the DOC, the VIA wiring or the FDC.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot

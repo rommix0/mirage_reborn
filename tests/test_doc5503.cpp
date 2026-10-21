@@ -269,6 +269,64 @@ TEST_CASE("doc swap: at the end the even oscillator halts and the odd one starts
   CHECK(r.halted(3));  // osc 3 then plays its one-shot table
 }
 
+// MAME's rule (es5503.cpp halt_osc): an even oscillator that the DOC halts
+// starts its odd partner when the partner is in swap mode, whatever the even
+// one's own mode. An odd oscillator halting does not start an even swap partner.
+TEST_CASE("doc an even oscillator halting starts its odd swap partner") {
+  SECTION("even one-shot ends its table") {
+    Rig r;
+    r.enable(2);
+    r.osc(0, 0x20, 0x0200, kOneShot);
+    r.osc(1, 0x30, 0x0200, kSwap | kHalt);
+    r.scans(255);
+    CHECK(r.halted(1));
+    r.scans(1);  // osc 0 halts in slot 0; osc 1 runs in slot 1 of the same scan
+    CHECK(r.halted(0));
+    CHECK_FALSE(r.halted(1));
+    REQUIRE(r.readsFrom(0x30).size() == 1);
+    CHECK(r.readsFrom(0x30)[0] == 0x3001);  // started from the top
+  }
+  SECTION("even free-run reads a zero byte") {
+    Rig r;
+    r.enable(2);
+    r.mem[0x2002] = 0x00;
+    r.osc(0, 0x20, 0x0200, 0x00);
+    r.osc(1, 0x30, 0x0200, kSwap | kHalt);
+    r.scans(2);
+    CHECK(r.halted(0));
+    CHECK_FALSE(r.halted(1));
+  }
+  SECTION("an odd one-shot ending leaves its even swap partner halted") {
+    Rig r;
+    r.enable(4);
+    r.osc(2, 0x20, 0x0200, kSwap | kHalt);
+    r.osc(3, 0x30, 0x0200, kOneShot);
+    r.scans(256);
+    CHECK(r.halted(3));
+    CHECK(r.halted(2));
+    CHECK(r.readsFrom(0x20).empty());
+  }
+}
+
+// CA3 is the Mirage's VIA PB5 ("Q Chip sync", MAME enmirage.cpp). During an
+// oscillator's slot it carries control bit 7; during the two refresh slots it is
+// high (the model's assumption; see doc5503.h).
+TEST_CASE("doc CA3 is control bit 7 in an oscillator slot and high in the refresh slots") {
+  Rig r;
+  r.enable(3);
+  r.doc.write(kCtrl + 1, 0x80 | kHalt);  // CA = 8 on oscillator 1 (halted)
+  std::vector<bool> seen;
+  for (int s = 0; s < 10; ++s) {  // two scans of 5 slots
+    seen.push_back(r.doc.ca3());
+    r.doc.tickMasterClocks(8);
+  }
+  CHECK(seen == std::vector<bool>{false, true, false, true, true, false, true, false, true, true});
+  r.doc.tickMasterClocks(7);  // within a slot the line holds
+  CHECK_FALSE(r.doc.ca3());
+  r.doc.tickMasterClocks(1);
+  CHECK(r.doc.ca3());
+}
+
 TEST_CASE("doc sync: when the even oscillator wraps, its odd partner's accumulator resets") {
   for (bool sync : {true, false}) {
     Rig r;

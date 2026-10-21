@@ -342,7 +342,23 @@ TEST_CASE("machine PB6 reads 0 (no disk) and DDRB masks port B reads") {
   Machine m(romFrom({ldaSta(0x1F, 0xE202), ldaSta(0x1F, 0xE200), {0xB6, 0xE2, 0x00, 0xB7, 0x80, 0x00}}));
   m.powerOn();
   m.runCycles(40);
-  CHECK(m.peek(0x8000) == 0x1F);  // PB5-7 inputs read 0
+  CHECK((m.peek(0x8000) & 0xDF) == 0x1F);  // PB6-7 inputs read 0 (PB5 is the DOC's CA3)
+}
+
+// PB5 is the DOC's CA3 output ("Q Chip sync", MAME enmirage.cpp). After reset
+// the DOC scans one oscillator (control $01, CA3 = 0) and two refresh slots of
+// 1 us each, so PB5 reads low for one slot in three.
+TEST_CASE("machine PB5 reads the DOC's CA3 line") {
+  Machine m(romWith({}));  // NOPs: 2 E cycles = one DOC slot each
+  m.powerOn();
+  std::vector<int> pb5;
+  for (int i = 0; i < 12; ++i) {
+    pb5.push_back((m.debugRead(0xE200) >> 5) & 1);
+    m.runCycles(2);
+  }
+  const int lowAt = int(std::find(pb5.begin(), pb5.end(), 0) - pb5.begin());
+  REQUIRE(lowAt < 3);
+  for (int i = 0; i < 12; ++i) CHECK(pb5[size_t(i)] == ((i - lowAt) % 3 == 0 ? 0 : 1));
 }
 
 TEST_CASE("machine boot ROM fills sample RAM through the VIA bank bits", "[assets]") {

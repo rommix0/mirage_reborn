@@ -275,11 +275,9 @@ void Wd1772::tick(uint32_t n) {
 }
 
 void Wd1772::onIndex() {
-  if (forceOnIndex_) {
-    forceOnIndex_ = false;
-    intrq_ = true;
-    forcedIrq_ = true;
-  }
+  // $D4: an interrupt at every index pulse until the next Force Interrupt or
+  // command. A status read clears each one (only $D8 holds INTRQ).
+  if (forceOnIndex_) intrq_ = true;
   switch (phase_) {
     case Phase::Idle:
       // The chip turns its motor line off after 9 idle revolutions.
@@ -336,9 +334,11 @@ void Wd1772::onWaitDone() {
 }
 
 void Wd1772::afterStart() {
-  if (!(cmd_ & 8) && !chipMotor_) {
-    // h=0 and the motor line is off: switch it on and wait 6 index pulses.
-    chipMotor_ = true;
+  // Every command turns the motor line (MO) on; h=1 only skips the wait.
+  const bool wasOn = chipMotor_;
+  chipMotor_ = true;
+  if (!(cmd_ & 8) && !wasOn) {
+    // h=0 and the motor line was off: wait 6 index pulses.
     spinCount_ = 0;
     enter(Phase::SpinUp, 0, true);
     return;

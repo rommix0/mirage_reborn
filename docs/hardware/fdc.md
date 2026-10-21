@@ -13,7 +13,10 @@ section 5. Code: `engine/src/wd1772.cpp`, wired in `Machine` (`$E800-$E803`).
 | Disk present | VIA PB6, **level**, 1 = disk in | `$F116` tests it before any step |
 
 The 1772's own spin-up is unused: every ROM command sets h=1. Status bit 7 (MO) is the chip's
-internal motor line, not the drive motor.
+internal motor line, not the drive motor. Every command turns MO on; h=1 only skips the
+6-revolution wait (`wd1772.txt`: h "disable[s] the motor spin-up sequence"). Until Plan 3 the
+model left MO off for h=1 commands, so it read 0 throughout the ROM's boot; it now reads 1 from
+the first command until 9 idle revolutions pass. No boot time moved (Plan 3 Task 7).
 
 ## Timing (E cycles, `clocks.h`)
 
@@ -21,7 +24,7 @@ internal motor line, not the drive motor.
 - Index: 300 rpm = 200 ms = 400000 cycles (`kDiskIndexCycles`). The index status bit is high for
   the first 2 ms of a revolution.
 - Step rates r1r0 = 00/01/10/11: 6/12/2/3 ms. Head settle (E, and V before verify): 15 ms.
-- Spin-up (h=0, MO off): 6 index pulses. MO drops after 9 idle revolutions.
+- Spin-up (h=0, MO off): 6 index pulses. Any command sets MO; it drops after 9 idle revolutions.
 - Time-outs (RNF, Seek Error) are 5 index pulses.
 - **The disk turns only while the motor is on AND a disk is present.** Anything that waits for
   rotation (spin-up, sector search, data bytes) stalls otherwise. This is the datasheet's index-counted
@@ -83,7 +86,13 @@ window comes from the controller documentation. None of it is a measurement of a
 - **Read Track.** Not modelled: completes with INTRQ, no data, no error.
 - **Write Track.** See the next section.
 - **Force Interrupt.** `$D0` terminates without INTRQ and clears DRQ; `$D8` raises INTRQ until
-  `$D0` or the next command (status reads do not clear it); `$D4` raises it at the next index pulse.
+  `$D0` or the next command (status reads do not clear it); `$D4` raises it at **every** index
+  pulse until the next Force Interrupt or command, and a status read clears each one. The Western
+  Digital data sheets list the I2 condition as "every index pulse" (they are not in the asset
+  tree; MAME's `wd_fdc` behaves the same way);
+  `wd1772.txt` only says the chip acknowledges "at the next index pulse", which is the first of
+  them and does not say it stops there, so the two agree. Until Plan 3 Task 7 the model raised
+  one sticky interrupt.
   Idle `$Dx` refreshes the status as Type I.
 - **Disk change.** `diskChanged()` latches on any insert/eject; it is not PB6.
 

@@ -12,7 +12,7 @@ constexpr uint32_t kClocksPerSlot = 8;
 constexpr int kRefreshSlots = 2;
 constexpr uint32_t kAccMask = 0xFFFFFF;  // 24-bit accumulator
 // Control register bits.
-constexpr uint8_t kH = 0x01, kM0 = 0x02, kIe = 0x08;
+constexpr uint8_t kH = 0x01, kM0 = 0x02, kIe = 0x08, kCa3 = 0x80;
 constexpr int kModeOneShot = 1, kModeSyncAm = 2, kModeSwap = 3;
 // Size register bits.
 constexpr uint8_t kBs = 0x40;
@@ -45,6 +45,10 @@ void Doc5503::reset() {
 // OER bits 5-1 (E4-E0) hold count - 1: the datasheet's register summary, and
 // the SQ80's $2E enables 24 oscillators (buchty). 1 to 32.
 int Doc5503::enabledOscillators() const { return ((oer_ >> 1) & 0x1F) + 1; }
+
+bool Doc5503::ca3() const {
+  return slot_ >= enabledOscillators() || (osc_[size_t(slot_)].control & kCa3) != 0;
+}
 
 double Doc5503::sampleRate() const {
   return double(kMasterClockHz) / (kClocksPerSlot * double(enabledOscillators() + kRefreshSlots));
@@ -159,13 +163,15 @@ void Doc5503::updateOscillator(int n) {
   frame_[(o.control >> 4) & (kChannels - 1)] += (int32_t(o.data) - 128) * volume;
 }
 
-// The DOC halts oscillator n: H = 1 (A = 0 when M0 = 1); in swap mode the
-// partner is started from the top of its table.
+// The DOC halts oscillator n: H = 1 (A = 0 when M0 = 1). The partner is
+// started from the top of its table when n is in swap mode, or when n is even
+// and the partner is in swap mode.
 void Doc5503::halt(int n) {
   Osc& o = osc_[n];
   o.control |= kH;
   if (o.control & kM0) o.acc = 0;
-  if (modeOf(o.control) == kModeSwap) {
+  if (modeOf(o.control) == kModeSwap ||
+      ((n & 1) == 0 && modeOf(osc_[n + 1].control) == kModeSwap)) {
     Osc& p = osc_[n ^ 1];
     p.control &= uint8_t(~kH);
     p.acc = 0;

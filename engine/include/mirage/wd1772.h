@@ -13,12 +13,12 @@ namespace mirage {
 //
 // Modelled (docs/hardware/fdc.md has the timing model and the choices made):
 //   Type I   Restore, Seek, Step, Step In, Step Out (6/12/2/3 ms, verify, 6-index
-//            spin-up unless h=1)
+//            spin-up unless h=1; every command sets MO)
 //   Type II  Read Sector, Write Sector, single and multi-sector (m), E settle
 //   Type III Read Address, Write Track (one revolution, index to index, parsed
 //            into a formatted or unformatted track); Read Track completes at
 //            once with no data and no error
-//   Type IV  Force Interrupt ($D0 terminate, $D8 immediate, $D4 on index)
+//   Type IV  Force Interrupt ($D0 terminate, $D8 immediate, $D4 every index pulse)
 // Time is counted in E cycles. The disk turns (and index pulses occur) only while
 // the drive motor is on AND a disk is present; with no rotation the chip waits,
 // BUSY set, exactly as the datasheet's index-counted time-outs do.

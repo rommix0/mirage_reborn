@@ -72,9 +72,16 @@ Plan 1, the engine core.
   any Save UI ships. Done in Plan 2 (d3fc478/ad7dcd9).
 - Other-OS sweep: WD1772 `$D4` index interrupt and the MO bit with h=1; DOC
   swap/AM/sync edge cases, including MAME's even-one-shot-starts-odd-swap
-  partner rule, which nothing so far needs.
+  partner rule, which nothing so far needs. Done in Plan 3 Task 7 (commit
+  "feat: other OSes boot and play; WD1772 $D4 and MO, DOC swap partner
+  (acceptance 4)"): `$D4` interrupts at every index pulse, every command sets
+  MO, an even oscillator's halt starts an odd swap partner, sync/AM wrap per
+  the datasheet (doc5503.h). The sweep also found why Soundprocess was silent:
+  VIA PB5 is the DOC's CA3 line, which the OS polls before every DOC write
+  (boot-rom.md 13.7).
 - WAV import (spec §6.7) replaces sampling from audio input (owner decision,
-  2026-10-18). Engine work: a wave RAM write API on `Machine` that the host
+  2026-10-18). Done in Plan 3 Tasks 4-6 (4d5cd96 converter, 60a150c wave RAM
+  writes and `mirage_cli --import`, 92ae28b Import WAV dialog). Engine work: a wave RAM write API on `Machine` that the host
   calls between slices, the WAV-to-8-bit converter (no JUCE dependency), and
   a CLI import option. App work: *File → Import WAV…* and the import dialog.
   The OS's own sampling path through filter 7 (OS `$9702`) stays unmodelled;

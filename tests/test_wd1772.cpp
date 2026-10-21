@@ -52,7 +52,7 @@ struct Rig {
   }
   void seek(int track) {
     fdc.write(3, uint8_t(track));
-    REQUIRE((run(0x18) & 0x99) == 0);  // seek, h=1, no verify
+    REQUIRE((run(0x18) & 0x19) == 0);  // seek, h=1, no verify (MO is set)
     REQUIRE(fdc.read(1) == track);
   }
   // Services DRQ immediately, collecting `n` bytes.
@@ -412,7 +412,7 @@ TEST_CASE("wd1772 no disk: Read Sector never hangs the host and stays busy; no i
   REQUIRE_NOTHROW(r.fdc.tick(20 * kRev));
   CHECK(r.fdc.busy());
   CHECK_FALSE(r.fdc.intrq());
-  CHECK(r.fdc.read(0) == 0x01);  // busy, nothing else
+  CHECK(r.fdc.read(0) == 0x81);  // MO and busy, nothing else
   // Force Interrupt frees the chip.
   r.fdc.write(0, 0xD0);
   CHECK_FALSE(r.fdc.busy());
@@ -528,6 +528,50 @@ TEST_CASE("wd1772 force interrupt $D8 raises INTRQ until $D0") {
   CHECK(r.fdc.intrq());
   r.fdc.write(0, 0xD0);
   CHECK_FALSE(r.fdc.intrq());
+}
+
+// I2: the interrupt condition is every index pulse (WD data sheet; wd1772.txt
+// says the first comes at the next index pulse). Unlike $D8 it is an ordinary
+// interrupt: a status read clears it until the next pulse.
+TEST_CASE("wd1772 $D4 interrupts on every index pulse") {
+  Rig r;  // the disk turns; the first index pulse is one revolution away
+  r.fdc.write(0, 0xD4);
+  CHECK_FALSE(r.fdc.intrq());
+  r.fdc.tick(kRev - 1);
+  CHECK_FALSE(r.fdc.intrq());
+  for (int pulse = 0; pulse < 3; ++pulse) {
+    r.fdc.tick(1);
+    CHECK(r.fdc.intrq());
+    r.fdc.read(0);
+    CHECK_FALSE(r.fdc.intrq());
+    r.fdc.tick(kRev - 1);
+    CHECK_FALSE(r.fdc.intrq());
+  }
+  r.fdc.write(0, 0xD0);  // the next Force Interrupt ends it
+  r.fdc.tick(2 * kRev);
+  CHECK_FALSE(r.fdc.intrq());
+  r.fdc.write(0, 0xD4);
+  r.fdc.tick(kRev);
+  CHECK(r.fdc.intrq());
+  r.run(0x58);  // and so does the next command
+  r.fdc.tick(2 * kRev);
+  CHECK_FALSE(r.fdc.intrq());
+}
+
+// h=1 skips only the 6-revolution wait: the chip still turns its motor line on
+// (wd1772.txt: h "disable[s] the motor spin-up sequence"; MO drops after 9 idle
+// revolutions either way).
+TEST_CASE("wd1772 MO is set by a command with h=1") {
+  Rig r;
+  CHECK((r.fdc.read(0) & 0x80) == 0);
+  r.fdc.write(0, 0x58);  // Step In, h=1
+  const uint64_t took = r.runIdle();
+  CHECK(took < 20000);  // no spin-up
+  CHECK((r.fdc.read(0) & 0x80) != 0);
+  r.fdc.tick(8 * kRev);
+  CHECK((r.fdc.read(0) & 0x80) != 0);
+  r.fdc.tick(kRev);
+  CHECK((r.fdc.read(0) & 0x80) == 0);
 }
 
 TEST_CASE("wd1772 force interrupt while idle gives Type I status") {
@@ -873,6 +917,7 @@ TEST_CASE("machine reads a sector with the boot ROM's SYNC/NMI usage pattern") {
 
 TEST_CASE("machine PB6 is the disk-present level and PB4 low is motor on") {
   // DDRB = $1F; ORB = $10 (motor off); read ORB -> $8000; ORB = 0; read -> $8001.
+  // PB5 (the DOC's CA3) is masked off.
   std::vector<uint8_t> rom = romFromBytes({0x86, 0x1F, 0xB7, 0xE2, 0x02,
                                            0x86, 0x10, 0xB7, 0xE2, 0x00,
                                            0xB6, 0xE2, 0x00, 0xB7, 0x80, 0x00,
@@ -882,17 +927,17 @@ TEST_CASE("machine PB6 is the disk-present level and PB4 low is motor on") {
   m.powerOn();
   CHECK_FALSE(m.driveActive());
   m.runCycles(80);
-  CHECK(m.peek(0x8000) == 0x10);  // no disk: PB6 = 0
+  CHECK((m.peek(0x8000) & 0xDF) == 0x10);  // no disk: PB6 = 0
   CHECK(m.driveActive());         // PB4 now low
-  CHECK(m.peek(0x8001) == 0x00);
+  CHECK((m.peek(0x8001) & 0xDF) == 0x00);
 
   m.insertDisk(makeDisk());
   m.powerOn();  // powerOn must not eject
   REQUIRE(m.disk() != nullptr);
   CHECK_FALSE(m.driveActive());
   m.runCycles(80);
-  CHECK(m.peek(0x8000) == 0x50);  // PB6 = 1: disk in, a level
-  CHECK(m.peek(0x8001) == 0x40);
+  CHECK((m.peek(0x8000) & 0xDF) == 0x50);  // PB6 = 1: disk in, a level
+  CHECK((m.peek(0x8001) & 0xDF) == 0x40);
   CHECK(m.driveActive());
 
   auto out = m.ejectDisk();
@@ -901,7 +946,7 @@ TEST_CASE("machine PB6 is the disk-present level and PB4 low is motor on") {
   CHECK(m.ejectDisk() == nullptr);
   m.powerOn();
   m.runCycles(80);
-  CHECK(m.peek(0x8000) == 0x10);
+  CHECK((m.peek(0x8000) & 0xDF) == 0x10);
 }
 
 TEST_CASE("machine powerOn leaves the inserted disk (and its dirty flag) alone") {

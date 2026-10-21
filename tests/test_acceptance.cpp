@@ -371,3 +371,42 @@ TEST_CASE("acceptance 3: the imported sound survives an OS save and reopen",
   CHECK(after.peak == Catch::Approx(before.peak).epsilon(0.10));
   CHECK(after.hz == Catch::Approx(before.hz).epsilon(0.03));
 }
+
+
+// ---- Acceptance 4: each OS image boots and plays ----------------------------
+
+namespace {
+// Boots the image to settled and holds note 60 at velocity 100 for 1 s on MIDI
+// channel 1. Every OS here loads or holds a sound at boot and listens on channel
+// 1 (Soundprocess: program 01 plays as soon as the display shows "01", manual
+// section 1; boot-rom.md 13.7), so no panel action is needed.
+void bootsAndPlays(const char* image) {
+  REQUIRE_ASSET(assetPath(image));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  const Booted& b = bootedSnapshotAt(image);
+  auto m = bootedMachineAt(image);
+  const DisplayState d = m->display();
+  INFO(image << ": settled at " << b.seconds << " s, display " << int(d.left) << " "
+             << int(d.right) << ", " << m->fdc().sectorsRead() << " sectors");
+  REQUIRE(b.seconds < 90.0);
+  const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
+  m->queueMidi(on);
+  std::vector<float> v(48000);
+  m->render(v.data(), v.size(), 48000);
+  m->queueMidi(off);
+  float peak = 0;
+  for (float x : v) peak = std::max(peak, std::fabs(x));
+  INFO("peak " << peak);
+  CHECK(peak > 0.05f);
+  CHECK(m->illegalOps() == 0);
+}
+}  // namespace
+
+TEST_CASE("acceptance 4: each OS image boots and plays", "[assets][acceptance]") {
+  SECTION("os32") { bootsAndPlays("EnsoniqOS/os32"); }
+  SECTION("masos") { bootsAndPlays("EnsoniqOS/masos"); }
+  SECTION("pianos") { bootsAndPlays("EnsoniqOS/pianos"); }
+  SECTION("rhodes") { bootsAndPlays("EnsoniqOS/rhodes"); }
+  SECTION("resmos32.s") { bootsAndPlays("EnsoniqOS/resmos32.s"); }
+  SECTION("Soundprocess OS") { bootsAndPlays("Soundprocess/Soundprocess OS/Soundprocess OS.img"); }
+}
