@@ -33,6 +33,8 @@ struct HostStatus {
   // postPanic discarded from the queue. A panic flush is in neither
   // midiDropped nor midiBytesTaken. midiQueueDepth: Machine::midiQueueDepth() at
   // the end of the block (bytes queued and not yet delivered to the ACIA).
+  // status() never returns a taken or flushed count from a block newer than the
+  // depth, so (posted - taken - flushed + depth) can only overstate.
   uint64_t midiBytesTaken = 0, midiBytesFlushed = 0;
   size_t midiQueueDepth = 0;
 };
@@ -138,8 +140,8 @@ class RealtimeHost {
   // do not replay when the rate recovers.
   void process(float* out, size_t frames, double hostRate, double nowSeconds);
 
-  // MIDI-input thread only (the single producer of the MIDI queue); the app
-  // goes through MidiInFeeder, which paces long messages. Messages
+  // One producer at a time (MidiInFeeder serialises its callers; the app goes
+  // through it, and it paces long messages). Messages
   // longer than kMidiCommandBytes (SysEx) travel as consecutive commands with
   // the same timestamp. A message over 12 KB (kMidiQueueCommands x
   // kMidiCommandBytes) can never fit and is always rejected. All or nothing: if the queue lacks room for the whole

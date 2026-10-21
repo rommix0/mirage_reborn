@@ -201,7 +201,7 @@ JUCE-free:
 | Audio | `RealtimeHost::process()` per device block: drains the queues, runs the machine, publishes status | n/a |
 | UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`), WAV import | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved`; the wave queue: `postWaveWrite` |
 | MIDI input (one device) | `MidiInFeeder::push` with a timestamp | the feeder, which calls `postMidi` (the only caller) |
-| "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device; `MidiInFeeder::pump()` every millisecond or so (never on the audio thread) | the MIDI-out queue; the MIDI queue, through the feeder |
+| "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device; `MidiInFeeder::pump()` once per loop pass, at least every 16 ms (never on the audio thread) | the MIDI-out queue; the MIDI queue, through the feeder |
 
 Queues (all lock-free single-producer, single-consumer):
 
@@ -233,7 +233,8 @@ Queues (all lock-free single-producer, single-consumer):
   all MIDI input goes through it, so a long SysEx (a wavesample dump is
   hundreds of KB, delivered by JUCE in one message) is not truncated by the
   machine's 4096-byte input ring. A mutex serialises `push` (MIDI-input
-  thread), `pump` (the "MIDI out" thread, about every millisecond) and `clear`
+  thread), `pump` (the "MIDI out" thread, once per loop pass: `wait(1)` can sleep about
+  15.6 ms at the default Windows timer resolution) and `clear`
   (UI thread), so `postMidi` has one producer at a time; none of them runs on
   the audio thread. While nothing is backlogged, a message that fits goes
   straight to `postMidi` with its own timestamp, so playing is unchanged. A
@@ -242,7 +243,11 @@ Queues (all lock-free single-producer, single-consumer):
   `midiBytesTaken`, `midiBytesFlushed` and `midiQueueDepth`), and anything
   arriving behind a backlog, waits in order; `pump` posts it in chunks as the
   machine consumes it (a byte per 320 us), each chunk with its message's
-  timestamp. The backlog is capped at 1 MiB: a message that does not fit is
+  timestamp. A slow pump costs no throughput: 2048 bytes in flight is about
+  650 ms of wire time. The in-flight count can only overstate, never
+  understate: `publishStatus` stores the queue depth before the taken and
+  flushed counts (release) and `status()` loads them in the opposite order
+  (acquire), so a read never pairs a newer taken count with an older depth. The backlog is capped at 1 MiB: a message that does not fit is
   dropped whole and counted. Panic clears the backlog first, so no SysEx
   follows the All Notes Off.
 - **Dropped MIDI** (`MIDI dropped` in the strip) counts bytes rejected by a

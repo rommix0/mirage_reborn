@@ -254,9 +254,15 @@ void RealtimeHost::publishStatus() {
   diskDirty_.store(disk && disk->dirty(), std::memory_order_release);
   illegalOps_.store(machine_->illegalOps(), kRelaxed);
   cycles_.store(machine_->cycles(), kRelaxed);
-  midiTakenPub_.store(midiBytesTaken_, kRelaxed);
-  midiFlushedPub_.store(midiBytesFlushed_, kRelaxed);
+  // Depth first, then taken and flushed with release; status() loads them in
+  // the opposite order with acquire. A reader that sees a block's taken count
+  // therefore sees that block's depth or a later one, never an older one, so
+  // posted - taken - flushed + depth can only overstate the bytes in flight
+  // (MidiInFeeder relies on that: an older depth with a newer taken count would
+  // hide bytes that moved from the host queue into the Machine's ring).
   midiDepthPub_.store(machine_->midiQueueDepth(), kRelaxed);
+  midiFlushedPub_.store(midiBytesFlushed_, std::memory_order_release);
+  midiTakenPub_.store(midiBytesTaken_, std::memory_order_release);
 }
 
 bool RealtimeHost::postMidi(std::span<const uint8_t> bytes, double timeSeconds) {
@@ -366,8 +372,9 @@ HostStatus RealtimeHost::status() const {
   s.illegalOps = illegalOps_.load(kRelaxed);
   s.midiDropped = midiDropped_.load(kRelaxed);
   s.cycles = cycles_.load(kRelaxed);
-  s.midiBytesTaken = midiTakenPub_.load(kRelaxed);
-  s.midiBytesFlushed = midiFlushedPub_.load(kRelaxed);
+  // taken and flushed (acquire) before depth: see publishStatus.
+  s.midiBytesTaken = midiTakenPub_.load(std::memory_order_acquire);
+  s.midiBytesFlushed = midiFlushedPub_.load(std::memory_order_acquire);
   s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
   return s;
 }

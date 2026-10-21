@@ -103,7 +103,7 @@ void AudioEngine::run() {
     if (midiOut_ != nullptr) midiOut_->sendMessageNow(juce::MidiMessage(m.data(), (int)m.size()));
   };
   while (!threadShouldExit()) {
-    feeder_.pump();  // at least every millisecond or so: wait(1) below
+    feeder_.pump();  // once per pass: wait(1) below can sleep ~16 ms on Windows, which is plenty
     bool any = false;
     mirage::MidiOutByte b;
     while (host_.popMidiOut(b)) {

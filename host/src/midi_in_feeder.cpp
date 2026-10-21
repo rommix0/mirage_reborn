@@ -13,8 +13,12 @@ MidiInFeeder::MidiInFeeder(RealtimeHost& host) : host_(host) {}
 
 size_t MidiInFeeder::inFlight() const {
   // posted - (taken + flushed) is what is still in the host queue; the depth is
-  // what the machine holds. The status is up to a block old, which can only
-  // overstate this: taken lags behind.
+  // what the machine holds. The status is up to a block old, and status()
+  // never pairs a taken count with an older depth (see publishStatus), so a
+  // stale or torn read can only overstate: a stale taken count counts bytes as
+  // still queued after they moved on, and a depth from a later block than the
+  // taken count counts bytes both ways. It must never understate, or the
+  // limit could be broken.
   const HostStatus s = host_.status();
   const uint64_t gone = s.midiBytesTaken + s.midiBytesFlushed;
   return size_t(posted_ > gone ? posted_ - gone : 0) + s.midiQueueDepth;
