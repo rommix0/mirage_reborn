@@ -91,6 +91,14 @@ Plan 1, the engine core.
   a CLI import option. App work: *File → Import WAV…* and the import dialog.
   The OS's own sampling path through filter 7 (OS `$9702`) stays unmodelled;
   the converter input stays silent.
+- Also done in Plan 3, not listed above: WD1772 Write Track and *File → New
+  Blank Disk* with an fmt2 format (Tasks 2-3, acceptance 5), `.edm` disks, raw
+  and Giebler, open and save (Task 8, acceptance 6), and the paced MIDI input
+  feeder that stops long SysEx being truncated (Task 9). The checklists for
+  acceptances 2-6 are in `docs/app.md`; the owner has not run them yet.
+  Still open: WD1772 Read Track stays unmodelled, CA3 high in the DOC refresh
+  slots is an assumption, and the other leftovers are under "Known
+  limitations" in `docs/app.md`.
 
 ## Decisions made during Plan 1
 

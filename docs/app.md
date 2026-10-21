@@ -69,8 +69,9 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   writes) or "No disk"; middle, the audio device, its rate and the audio CPU
   load; right, the outcome of the last WAV import for 15 s, then a warning only
   when something is wrong: `illegal ops: N` (the CPU met an undefined opcode)
-  and `MIDI dropped: N` (MIDI bytes lost, see below). The strip refreshes at 10 Hz and reads the audio thread's published
-  status, so "(modified)" can lag a block or two behind the first write.
+  and `MIDI dropped: N` (MIDI bytes lost, see below). The strip refreshes at
+  10 Hz and reads the audio thread's published status, so "(modified)" can lag
+  a block or two behind the first write.
 
 ## Menus and shortcuts
 
@@ -79,7 +80,7 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 | File | Open Disk Image... (a raw image or a Giebler `.edm`) | Ctrl+O |
 | File | New Blank Disk (an unformatted disk named "Untitled (blank)") | Ctrl+N |
 | File | Save Disk Image (in the format the file was read in) | Ctrl+S |
-| File | Save Disk Image As... (a `.edm` name saves Giebler `.edm`, any other a raw image) | Ctrl+Shift+S |
+| File | Save Disk Image As... (a name ending in `.edm` saves Giebler `.edm`, any other a raw image) | Ctrl+Shift+S |
 | File | Eject Disk | Ctrl+E |
 | File | Import WAV... | Ctrl+I |
 | File | Exit | |
@@ -94,13 +95,19 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   file (it starts with "Mirage Disk"), detected by content, never `.hfe`
   (`docs/hardware/fdc.md`, "Disk file formats"). Anything else is refused with
   "*name*: not a Mirage disk image (expected 450,560 bytes or a Giebler .edm
-  file)". The Windows file dialog shows one filter, `*.img;*.edm;*`.
+  file)". The Windows file dialog shows one filter, `*.img;*.edm;*`. A Giebler
+  file leaves out the sectors that are all zero; they open as zeros.
 - **Save** writes the disk to the file it came from, in the format it was read
   in: a Giebler `.edm` stays Giebler, a raw `.edm` stays raw. **Save As** asks
-  for a new file (`.img` by default, `.edm` for a disk opened from a `.edm`
-  file) and writes a Giebler `.edm` for a name ending in `.edm` (any case), a
-  raw image for any other name; later Saves keep that format. A disk with no
-  file name goes straight to Save As.
+  for a new file and writes a Giebler `.edm` for a name ending in `.edm` (any
+  case), a raw image for any other name; later Saves keep that format. A disk
+  with no file name goes straight to Save As.
+- **Save As suggests the disk's own file name**, with `.edm` as the extension
+  for any disk opened from a `.edm` file (raw or Giebler) and `.img` otherwise.
+  So Save As on a raw `.edm` such as `mp1.edm` suggests `mp1.edm` again, and
+  saving under that name writes **Giebler** format (the name ends in `.edm`).
+  Plain Save keeps a raw `.edm` raw; so does Save As with a name that does not
+  end in `.edm`. Save As asks before overwriting an existing file.
 - **New Blank Disk** inserts a disk with every track unformatted and no file
   (the title and strip say "Untitled (blank)", the panel label "Untitled"). The
   emulated OS has to format it: boot the `EnsoniqOS/fmt2` disk, swap the blank
@@ -233,8 +240,8 @@ Queues (all lock-free single-producer, single-consumer):
   all MIDI input goes through it, so a long SysEx (a wavesample dump is
   hundreds of KB, delivered by JUCE in one message) is not truncated by the
   machine's 4096-byte input ring. A mutex serialises `push` (MIDI-input
-  thread), `pump` (the "MIDI out" thread, once per loop pass: `wait(1)` can sleep about
-  15.6 ms at the default Windows timer resolution) and `clear`
+  thread), `pump` (the "MIDI out" thread, once per loop pass: `wait(1)` can
+  sleep about 15.6 ms at the default Windows timer resolution) and `clear`
   (UI thread), so `postMidi` has one producer at a time; none of them runs on
   the audio thread. While nothing is backlogged, a message that fits goes
   straight to `postMidi` with its own timestamp, so playing is unchanged. A
@@ -247,9 +254,10 @@ Queues (all lock-free single-producer, single-consumer):
   650 ms of wire time. The in-flight count can only overstate, never
   understate: `publishStatus` stores the queue depth before the taken and
   flushed counts (release) and `status()` loads them in the opposite order
-  (acquire), so a read never pairs a newer taken count with an older depth. The backlog is capped at 1 MiB: a message that does not fit is
-  dropped whole and counted. Panic clears the backlog first, so no SysEx
-  follows the All Notes Off.
+  (acquire), so a read never pairs a newer taken count with an older depth.
+  The backlog is capped at 1 MiB: a message that does not fit is dropped whole
+  and counted. Panic clears the backlog first, so no SysEx follows the All
+  Notes Off.
 - **Dropped MIDI** (`MIDI dropped` in the strip) counts bytes rejected by a
   full queue, overflowing the machine's input ring or the MIDI-out queue, and
   MIDI discarded while the audio rate is invalid (a device change in progress;
@@ -287,7 +295,7 @@ Queues (all lock-free single-producer, single-consumer):
 | Faithful emulation | The host only presses panel keys, queues MIDI bytes, inserts or ejects disks and writes wave RAM for WAV import | No OS-specific code paths, no OS patching. |
 | Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
 | WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |
-| Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise. The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw so other tools keep reading it. |
+| Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise, and suggests `.edm` for any disk opened from a `.edm` file, so Save As on a raw `.edm` offers the same name and converts it to Giebler. The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw with plain Save so other tools keep reading it. Cost if wrong: a surprise conversion for someone who accepts the suggested name; the format is in the name. |
 | Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
 
 ## Acceptance-1 checklist (by ear, on your machine)
@@ -535,6 +543,12 @@ Times are on the emulated clock.
 4. *File → Open Disk Image...* `SP1-copy.edm`. It boots and plays like `SP1.EDM`.
    *File → Save Disk Image As...* `SP1-copy.img` writes a 450,560-byte raw image
    of the same disk.
+5. Open `MetascapeMetaSounds/mp1.edm` again and play a few notes. *File → Save
+   Disk Image As...* suggests `mp1.edm`, the same name: saving there would write
+   Giebler format, because the name ends in `.edm`. Save it as `mp1-giebler.edm`
+   to see that (it starts with "Mirage Disk" and is not 450,560 bytes), then
+   open it and check it boots as in step 1. Plain *Save Disk Image* on the
+   original `mp1.edm` (after an OS save, say) keeps it a raw 450,560-byte file.
 
 Re-run it after changes to `DiskImage` or `DiskSession`.
 
@@ -550,4 +564,29 @@ Re-run it after changes to `DiskImage` or `DiskSession`.
 - The status strip's "(modified)" can lag by a block or two.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*.edm;*`.
-- No audio input: *Import WAV* replaces sampling (spec 6.7).
+- No audio input: *Import WAV* replaces sampling (spec 6.7). The OS's own
+  sampling path through filter 7 stays unmodelled and the input it reads is
+  silence.
+- WD1772 Read Track is not modelled (it completes with no data and no error);
+  none of the images tested here needs it. Write Track does not time out waiting for a first
+  byte (an unanswered start writes zeros), and only the Mirage's own track
+  layout (ids 0-5, sizes 3, 3, 3, 3, 3, 2) counts as formatted
+  (`docs/hardware/fdc.md`).
+- Formatting runs at the real speed (about 106 s for fmt2). There is no turbo.
+- The DOC's CA3 line is high in the two refresh slots as an assumption: the
+  DOC's pin behaviour there is not documented, and Soundprocess needs it high
+  to play (`docs/hardware/boot-rom.md` 13.7). A CPU-written halt with M0 set
+  starts nothing (MAME routes it through its halt routine).
+- The Import WAV pitch hint is measured on SND-A01's lower sound and moves with
+  the loaded sound's tuning. The import does not edit the OS's wavesample
+  start, end, loop or tuning, and it is lost on a reset unless the OS saves it.
+- The Import WAV dialog closes when *Import* is clicked even if the post to the
+  audio thread fails (an error shows; the selection is lost). A hexadecimal
+  number typed in the Start page box reads as 0.
+- The MIDI feeder's `MIDI dropped` count can include a message that is later
+  delivered: if the host queue refuses a direct post (more than 1024 commands
+  pending in one block gap, for example the clock lagging behind a dump after
+  a Reset), the host counts the bytes as dropped and the message then joins the
+  feeder's backlog and goes out.
+- A save ends only when the OS has not written in between; a disk that the OS
+  keeps writing stays "(modified)".

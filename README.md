@@ -33,6 +33,20 @@ example's note at 16-19 s peaks near 0.28; the file's overall peak of 0.29 is
 the boot calibration tones). Boot timing is in `docs/hardware/boot-rom.md`
 sections 13.5 and 13.6.
 
+## Saving the disk from a headless run
+
+`mirage_cli run ... --save-disk out.img` writes the disk in the drive (a
+450,560-byte raw image) at the end of the run, for example after the OS has
+saved a sound from `--key` presses:
+
+```
+mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --key Param@16 --key K1@17 --key K1@18 --key K1@19 --key Enter@20 --seconds 30 --save-disk edited.img
+```
+
+It exits 1 if there is no disk, a track is unformatted or the file cannot be
+written. `--disk` also reads a Giebler `.edm` file (detected by content); the
+disk file formats are in `docs/hardware/fdc.md`.
+
 ## Importing a WAV into wave RAM
 
 ```
@@ -48,8 +62,10 @@ and the pitch hint.
 ## The standalone app (`app/`)
 
 A JUCE 8 app (replica front panel, menus, audio and MIDI devices, disk open and
-save) around the same engine. The full guide, with the menus, shortcuts,
-threading model, decisions and the acceptance checklist, is in
+save, New Blank Disk, Import WAV) around the same engine. It opens raw
+450,560-byte images and Giebler `.edm` files (by content) and saves in the
+format a disk was read in. The full guide, with the menus, shortcuts, threading
+model, decisions, the acceptance 1-6 checklists and the known limitations, is in
 [`docs/app.md`](docs/app.md).
 
 Building it fetches JUCE (git, tag 8.0.4) on the first configure, and the first
@@ -65,7 +81,9 @@ On start it loads the boot ROM from the saved path, then from
 `MIRAGE_ASSET_ROOT/Ensoniq Mirage EPROM Firmware/mirage.bin`, and otherwise
 asks for it (a 4096-byte file; a ROM with a different SHA-1 is allowed but
 warned about). Settings are kept in `%APPDATA%\MirageEmulator\MirageEmulator.settings`.
-`Mirage.exe --panel-png out.png` renders the window content to a PNG and exits.
+`Mirage.exe --panel-png out.png` renders the front panel to a PNG and exits;
+`Mirage.exe --import-dialog-png in.wav out.png` does the same for the Import WAV
+dialog.
 
 Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
 engine and `mirage_host` contain no JUCE code, so the licence choice for any
