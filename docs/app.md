@@ -200,14 +200,14 @@ JUCE-free:
 |---|---|---|
 | Audio | `RealtimeHost::process()` per device block: drains the queues, runs the machine, publishes status | n/a |
 | UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`), WAV import | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved`; the wave queue: `postWaveWrite` |
-| MIDI input (one device) | `postMidi` with a timestamp | the MIDI queue |
-| "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device | the MIDI-out queue |
+| MIDI input (one device) | `MidiInFeeder::push` with a timestamp | the feeder, which calls `postMidi` (the only caller) |
+| "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device; `MidiInFeeder::pump()` every millisecond or so (never on the audio thread) | the MIDI-out queue; the MIDI queue, through the feeder |
 
 Queues (all lock-free single-producer, single-consumer):
 
 | Queue | Capacity | Notes |
 |---|---|---|
-| MIDI in | 1024 commands of up to 12 bytes | `process()` takes at most 256 per block. A longer message (SysEx) is several commands with the same timestamp, all or nothing. |
+| MIDI in | 1024 commands of up to 12 bytes | `process()` takes at most 256 per block. A longer message (SysEx) is several commands with the same timestamp, all or nothing. The feeder keeps the traffic far below this (see below). |
 | MIDI out | 8192 bytes | Each byte carries the machine's cycle stamp; a full queue drops the byte. |
 | UI commands | 256 | A full queue makes the `post...` call return false and leave its argument untouched. |
 | Returned disks | 64 | Up to 4 more wait inside the host if this fills. |
@@ -229,10 +229,29 @@ Queues (all lock-free single-producer, single-consumer):
 - **MIDI timing:** an event is placed in the block by its timestamp
   (`frames - round((now - t) * rate)`, clamped and non-decreasing). This adds up
   to one block of latency and no jitter.
+- **MIDI input feeder** (`MidiInFeeder`, `host/include/mirage/midi_in_feeder.h`):
+  all MIDI input goes through it, so a long SysEx (a wavesample dump is
+  hundreds of KB, delivered by JUCE in one message) is not truncated by the
+  machine's 4096-byte input ring. A mutex serialises `push` (MIDI-input
+  thread), `pump` (the "MIDI out" thread, about every millisecond) and `clear`
+  (UI thread), so `postMidi` has one producer at a time; none of them runs on
+  the audio thread. While nothing is backlogged, a message that fits goes
+  straight to `postMidi` with its own timestamp, so playing is unchanged. A
+  message that would push the bytes in flight past 2048 (`kMaxInFlight`:
+  posted and not yet delivered to the ACIA, from the status fields
+  `midiBytesTaken`, `midiBytesFlushed` and `midiQueueDepth`), and anything
+  arriving behind a backlog, waits in order; `pump` posts it in chunks as the
+  machine consumes it (a byte per 320 us), each chunk with its message's
+  timestamp. The backlog is capped at 1 MiB: a message that does not fit is
+  dropped whole and counted. Panic clears the backlog first, so no SysEx
+  follows the All Notes Off.
 - **Dropped MIDI** (`MIDI dropped` in the strip) counts bytes rejected by a
   full queue, overflowing the machine's input ring or the MIDI-out queue, and
   MIDI discarded while the audio rate is invalid (a device change in progress;
-  stale notes are not replayed). Panic's flush is deliberate and not counted.
+  stale notes are not replayed), plus the bytes of messages the feeder dropped
+  for a full 1 MiB backlog (the feeder counts messages in `dropped()` and their
+  bytes in `droppedBytes()`; the strip shows bytes, like the rest). Panic's
+  flush is deliberate and not counted.
 - **Disk swap:** inserting while a disk is in ejects the old disk at once and
   inserts the new one 0.5 s of emulated time later, so the OS sees the
   disk-present line drop.
@@ -524,11 +543,6 @@ Re-run it after changes to `DiskImage` or `DiskSession`.
   the MIDI parser, `DiskSession`, the panel layout and the soft clip are).
 - The boot calibration tones are deliberately not muted (see the decisions).
 - The status strip's "(modified)" can lag by a block or two.
-- A SysEx message longer than about 4 KB (for example a wavesample dump from a
-  librarian) is truncated: the emulated MIDI input ring holds 4096 bytes and
-  JUCE delivers a whole SysEx message at once. `RealtimeHost::postMidi` also
-  rejects any single message over 12 KB (1024 queue commands of 12 bytes).
-  Plan 3 adds a paced feeder.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*.edm;*`.
 - No audio input: *Import WAV* replaces sampling (spec 6.7).

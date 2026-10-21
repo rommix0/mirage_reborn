@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-AudioEngine::AudioEngine(mirage::RealtimeHost& host) : juce::Thread("MIDI out"), host_(host) {
+AudioEngine::AudioEngine(mirage::RealtimeHost& host) : juce::Thread("MIDI out"), host_(host), feeder_(host) {
   startThread();
 }
 
@@ -94,7 +94,7 @@ juce::String AudioEngine::midiOutputId() const {
 }
 
 void AudioEngine::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& msg) {
-  host_.postMidi({msg.getRawData(), (size_t)msg.getRawDataSize()}, msg.getTimeStamp());
+  feeder_.push({msg.getRawData(), (size_t)msg.getRawDataSize()}, msg.getTimeStamp());
 }
 
 void AudioEngine::run() {
@@ -103,6 +103,7 @@ void AudioEngine::run() {
     if (midiOut_ != nullptr) midiOut_->sendMessageNow(juce::MidiMessage(m.data(), (int)m.size()));
   };
   while (!threadShouldExit()) {
+    feeder_.pump();  // at least every millisecond or so: wait(1) below
     bool any = false;
     mirage::MidiOutByte b;
     while (host_.popMidiOut(b)) {

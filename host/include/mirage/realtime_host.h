@@ -27,6 +27,14 @@ struct HostStatus {
   bool driveActive = false, diskPresent = false, diskDirty = false;
   uint64_t diskWrites = 0;  // the inserted disk's DiskImage::writeCount(); 0 with no disk
   uint64_t illegalOps = 0, midiDropped = 0, cycles = 0;
+  // MIDI input flow, for MidiInFeeder. midiBytesTaken: cumulative bytes
+  // process() has taken from the MIDI queue (queued into the Machine, or
+  // discarded while the audio rate is invalid); midiBytesFlushed: bytes
+  // postPanic discarded from the queue. A panic flush is in neither
+  // midiDropped nor midiBytesTaken. midiQueueDepth: Machine::midiQueueDepth() at
+  // the end of the block (bytes queued and not yet delivered to the ACIA).
+  uint64_t midiBytesTaken = 0, midiBytesFlushed = 0;
+  size_t midiQueueDepth = 0;
 };
 
 // Why a disk came back from the audio thread (takeReturnedDisk).
@@ -130,7 +138,8 @@ class RealtimeHost {
   // do not replay when the rate recovers.
   void process(float* out, size_t frames, double hostRate, double nowSeconds);
 
-  // MIDI-input thread only (the single producer of the MIDI queue). Messages
+  // MIDI-input thread only (the single producer of the MIDI queue); the app
+  // goes through MidiInFeeder, which paces long messages. Messages
   // longer than kMidiCommandBytes (SysEx) travel as consecutive commands with
   // the same timestamp. A message over 12 KB (kMidiQueueCommands x
   // kMidiCommandBytes) can never fit and is always rejected. All or nothing: if the queue lacks room for the whole
@@ -200,6 +209,7 @@ class RealtimeHost {
   void applyWaves();  // the wave queue, after the UI queue
   void countRingOverflows();  // adds new Machine::midiOverflows() to midiDropped
   size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
+  uint64_t midiBytesTaken_ = 0, midiBytesFlushed_ = 0;  // audio thread; published by publishStatus
   void publishStatus();
 
   std::array<uint8_t, 20> romSha1_{};
@@ -223,6 +233,8 @@ class RealtimeHost {
   std::atomic<bool> driveActive_{false}, diskPresent_{false}, diskDirty_{false};
   std::atomic<uint64_t> diskWrites_{0}, illegalOps_{0}, cycles_{0};
   std::atomic<uint64_t> midiDropped_{0};  // added to by the MIDI-input and audio threads
+  std::atomic<uint64_t> midiTakenPub_{0}, midiFlushedPub_{0};
+  std::atomic<size_t> midiDepthPub_{0};
 };
 
 }  // namespace mirage

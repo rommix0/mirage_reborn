@@ -73,7 +73,9 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
   applyWaves();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
-    midiDropped_.fetch_add(discardMidiInput(), kRelaxed);  // stale by the time audio resumes
+    const size_t stale = discardMidiInput();  // stale by the time audio resumes
+    midiDropped_.fetch_add(stale, kRelaxed);
+    midiBytesTaken_ += stale;
     publishStatus();
     return;
   }
@@ -90,7 +92,8 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
     delta = std::clamp(delta, -1.0, double(frames) + 1.0);
     const long long at = static_cast<long long>(frames) - std::llround(delta);
     prev = std::min(at < static_cast<long long>(prev) ? prev : size_t(at), last);
-    q_->offsets[count++] = prev;
+    q_->offsets[count] = prev;
+    midiBytesTaken_ += q_->events[count++].size;
   }
 
   // Render up to each event, queue it, carry on; due releases and swap
@@ -159,7 +162,7 @@ void RealtimeHost::applyUi() {
         ejectCycle_ = 0;
         break;
       case Type::Panic:
-        discardMidiInput();  // or it would follow the All Notes Off in this block
+        midiBytesFlushed_ += discardMidiInput();  // or it would follow the All Notes Off in this block
         machine_->flushMidi();
         machine_->queueMidi(kPanicBytes);
         break;
@@ -251,6 +254,9 @@ void RealtimeHost::publishStatus() {
   diskDirty_.store(disk && disk->dirty(), std::memory_order_release);
   illegalOps_.store(machine_->illegalOps(), kRelaxed);
   cycles_.store(machine_->cycles(), kRelaxed);
+  midiTakenPub_.store(midiBytesTaken_, kRelaxed);
+  midiFlushedPub_.store(midiBytesFlushed_, kRelaxed);
+  midiDepthPub_.store(machine_->midiQueueDepth(), kRelaxed);
 }
 
 bool RealtimeHost::postMidi(std::span<const uint8_t> bytes, double timeSeconds) {
@@ -360,6 +366,9 @@ HostStatus RealtimeHost::status() const {
   s.illegalOps = illegalOps_.load(kRelaxed);
   s.midiDropped = midiDropped_.load(kRelaxed);
   s.cycles = cycles_.load(kRelaxed);
+  s.midiBytesTaken = midiTakenPub_.load(kRelaxed);
+  s.midiBytesFlushed = midiFlushedPub_.load(kRelaxed);
+  s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
   return s;
 }
 

@@ -22,6 +22,7 @@ add_executable(mirage_tests
   test_realtime.cpp
   test_spsc_queue.cpp
   test_midi_byte_parser.cpp
+  test_midi_in_feeder.cpp
   test_panel_layout.cpp
   test_realtime_host.cpp
   test_disk_session.cpp

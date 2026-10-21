@@ -5,15 +5,17 @@
 #include <memory>
 
 #include "mirage/midi_byte_parser.h"
+#include "mirage/midi_in_feeder.h"
 #include "mirage/realtime_host.h"
 
 // Connects a RealtimeHost to the audio device and the MIDI devices.
 //  - Audio: the device callback renders host.process() into channel 0 and
 //    copies it to the other outputs.
 //  - MIDI in: at most ONE input is enabled at a time, so the callbacks of two
-//    devices never run concurrently (RealtimeHost::postMidi has one producer).
+//    devices never run concurrently. Everything goes through the MidiInFeeder,
+//    the only caller of RealtimeHost::postMidi, which paces long SysEx.
 //  - MIDI out: the "MIDI out" thread drains host.popMidiOut into the chosen
-//    output (or discards the bytes when there is none).
+//    output (or discards the bytes when there is none), and pumps the feeder.
 class AudioEngine : private juce::AudioIODeviceCallback,
                     private juce::MidiInputCallback,
                     private juce::Thread {
@@ -31,6 +33,10 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   void setMidiOutput(const juce::String& identifier);
   juce::String midiInputId() const { return midiInId_; }
   juce::String midiOutputId() const;
+
+  // The MIDI input feeder: UI code calls clear() before postPanic and reads
+  // droppedBytes() for the status strip.
+  mirage::MidiInFeeder& midiFeeder() { return feeder_; }
 
   double cpuLoad() const { return deviceManager_.getCpuUsage(); }  // 0..1
   void setVolume(float gain01) { volume_.store(gain01, std::memory_order_relaxed); }
@@ -52,6 +58,7 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   void run() override;
 
   mirage::RealtimeHost& host_;
+  mirage::MidiInFeeder feeder_;
   juce::AudioDeviceManager deviceManager_;
 
   std::atomic<bool> ready_{false};  // prepare() done and the device running

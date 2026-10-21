@@ -87,7 +87,9 @@ MirageContent::StripText MirageContent::buildText() const {
   if (notice_.isNotEmpty() && juce::Time::getMillisecondCounter() < noticeUntil_)
     problems.add(notice_);
   if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
-  if (s.midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
+  // Bytes: the feeder's whole dropped messages are counted by their size.
+  const auto midiDropped = s.midiDropped + engine_.midiFeeder().droppedBytes();
+  if (midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)midiDropped));
   t.right = problems.joinIntoString("   ");
   if (auto* dev = engine_.devices().getCurrentAudioDevice())
     t.middle = dev->getName() + " @ " + juce::String(juce::roundToInt(dev->getCurrentSampleRate())) +
@@ -343,6 +345,7 @@ bool MainWindow::perform(const InvocationInfo& info) {
       host_.postReset();
       return true;
     case cmdPanic:
+      engine_.midiFeeder().clear();  // first, so that no SysEx follows the All Notes Off
       host_.postPanic();
       return true;
     case cmdAudioSettings:
