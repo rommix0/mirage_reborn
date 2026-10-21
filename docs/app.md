@@ -97,17 +97,22 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   "*name*: not a Mirage disk image (expected 450,560 bytes or a Giebler .edm
   file)". The Windows file dialog shows one filter, `*.img;*.edm;*`. A Giebler
   file leaves out the sectors that are all zero; they open as zeros.
+- **Open does not reset the machine.** It swaps the disk under the running OS, as
+  on the hardware (spec 6.5, "Disk changes and reset"): nothing is read from the
+  new disk until the OS is booted again. The boot ROM loads an OS only after
+  power-on or *Machine → Reset* (Ctrl+R), and when a disk goes into an empty
+  drive at the "nd" prompt. Reset keeps the disk and its unsaved changes.
 - **Save** writes the disk to the file it came from, in the format it was read
   in: a Giebler `.edm` stays Giebler, a raw `.edm` stays raw. **Save As** asks
   for a new file and writes a Giebler `.edm` for a name ending in `.edm` (any
   case), a raw image for any other name; later Saves keep that format. A disk
   with no file name goes straight to Save As.
 - **Save As suggests the disk's own file name**, with `.edm` as the extension
-  for any disk opened from a `.edm` file (raw or Giebler) and `.img` otherwise.
-  So Save As on a raw `.edm` such as `mp1.edm` suggests `mp1.edm` again, and
-  saving under that name writes **Giebler** format (the name ends in `.edm`).
-  Plain Save keeps a raw `.edm` raw; so does Save As with a name that does not
-  end in `.edm`. Save As asks before overwriting an existing file.
+  only when the disk is held in Giebler `.edm` format and `.img` otherwise. So
+  Save As on a raw `.edm` such as `mp1.edm` suggests `mp1.img`, and accepting it
+  writes a raw image; typing a name that ends in `.edm` writes **Giebler**
+  format. Plain Save keeps a raw `.edm` raw. Save As asks before overwriting an
+  existing file.
 - **New Blank Disk** inserts a disk with every track unformatted and no file
   (the title and strip say "Untitled (blank)", the panel label "Untitled"). The
   emulated OS has to format it: boot the `EnsoniqOS/fmt2` disk, swap the blank
@@ -295,8 +300,21 @@ Queues (all lock-free single-producer, single-consumer):
 | Faithful emulation | The host only presses panel keys, queues MIDI bytes, inserts or ejects disks and writes wave RAM for WAV import | No OS-specific code paths, no OS patching. |
 | Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
 | WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |
-| Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise, and suggests `.edm` for any disk opened from a `.edm` file, so Save As on a raw `.edm` offers the same name and converts it to Giebler. The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw with plain Save so other tools keep reading it. Cost if wrong: a surprise conversion for someone who accepts the suggested name; the format is in the name. |
+| Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise, and suggests `.edm` only for a disk held in Giebler format (a raw `.edm` is offered as `.img`, so accepting the suggestion never converts it). The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw with plain Save so other tools keep reading it. Cost if wrong: someone who wants a Giebler copy of a raw `.edm` types the `.edm` name; the format is in the name. |
 | Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
+
+## Booting a disk in the checklists
+
+**To boot a disk: *File → Open Disk Image...*, then *Machine → Reset* (Ctrl+R).**
+Open alone swaps the disk under the running OS, as on the hardware (spec 6.5):
+the display and the sound stay as they are and nothing is read from the new disk
+until the machine boots again. Reset clears RAM, including wave RAM, and boots
+the disk in the drive, unsaved changes and all. Wait about a second after Open
+before Reset, so the swap has finished. From a fresh start with an empty drive,
+Open boots by itself (acceptance 1), so the Reset can be skipped there; it does no
+harm. The checklists below say "Open, then Reset" wherever they need a boot.
+`tests/test_acceptance.cpp` checks this flow (`acceptance 2: Open leaves the
+running OS alone, Open then Reset boots the new disk`).
 
 ## Acceptance-1 checklist (by ear, on your machine)
 
@@ -331,8 +349,9 @@ run shows; the keys are from the OS 3.2 manual (*Selecting and changing a
 parameter*, *Saving a sound on a formatted diskette*), and each key is clicked on
 the panel (or typed with its panel keyboard shortcut).
 
-1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img` and wait for the
-   display to settle on "2." "1" (about 15 s).
+1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img`, then *Machine →
+   Reset* (see *Booting a disk*), and wait for the display to settle on "2." "1"
+   (about 15 s).
 2. Show the value of parameter 36 (Filter Fc) of the lower sound: **Param**, **3**,
    **6** (the display shows "3." "6"), **Value**. The display shows "2" "8." (value
    28; the right-hand dot means a value is shown).
@@ -345,11 +364,14 @@ the panel (or typed with its panel keyboard shortcut).
    emulated floppy, not to your file.
 5. *File → Save Disk Image As...* and give it a new name, for example
    `SND-A01-edited.img`. (The original `SND-A01.img` is untouched.)
-6. *File → Open Disk Image...* the new file. The OS boots from it as in
-   acceptance 1 and settles on "2." "1".
+6. *File → Open Disk Image...* the new file (it is the file already in the drive;
+   Open inserts it again), then *Machine → Reset*. The OS boots from it as in
+   acceptance 1 and settles on "2." "1". (Without the Reset nothing would change:
+   the OS keeps running and the display stays as it was.)
 7. Press **Param**, **3**, **6**, **Value**. The display shows "3" "1." (value 31):
-   the edit came back from the file. Opening `SND-A01.img` again and repeating
-   this step shows "2" "8.".
+   the edit came back from the file, because Reset cleared the OS's RAM. Open
+   `SND-A01.img`, Reset, wait for "2." "1" and repeat this step: it shows "2" "8."
+   (the factory value).
 
 Re-run it after changes to the disk path (FDC write, `DiskSession`) or the file
 dialogs.
@@ -364,8 +386,8 @@ Formatting is emulated at real speed (no turbo): on the emulated clock fmt2 take
 written and every track is read back), so expect a bit under two minutes of
 waiting with the drive LED on.
 
-1. *File → Open Disk Image...* `EnsoniqOS/fmt2`. Wait for the display to show
-   "F" "d" (fmt2 is asking for a blank disk).
+1. *File → Open Disk Image...* `EnsoniqOS/fmt2`, then *Machine → Reset*. Wait for
+   the display to show "F" "d" (fmt2 is asking for a blank disk).
 2. *File → New Blank Disk* (Ctrl+N). The title says "Untitled (blank)". The
    Mirage notices the disk change. (If fmt2 had unsaved changes the app would
    ask first; it has none.)
@@ -377,16 +399,23 @@ waiting with the drive LED on.
 5. Wait for the display to show "F" "c" (the display's lower-case c) after about
    106 s.
 6. *File → Save Disk Image As...* `Formatted.img`. It saves (450,560 bytes).
-7. *File → Open Disk Image...* `Formatted.img`. fmt2 wrote OS 3.2 onto it, so it
-   boots like acceptance 1 (about 15 s) and settles on "2." "1".
-8. Save a sound to it: boot `Factory Library/IMG/SND-A01.img`, wait for "2." "1",
-   *File → Open Disk Image...* `Formatted.img` (the Mirage sees the new disk),
-   press **Param**, **1**, **1**, **1**, **Enter** (save lower sound to place 1;
-   wait for the drive LED to go out), then *File → Save Disk Image As...*
-   `Formatted-with-sound.img`.
-9. Boot `SND-A01.img` again, open `Formatted-with-sound.img`, press **Load
-   Lower**, **1**, **Enter** and play: the sound plays. (The test also changes
-   the lower sound's Filter Fc before saving and sees the new value return.)
+7. *File → Open Disk Image...* `Formatted.img`, then *Machine → Reset*. fmt2 wrote
+   OS 3.2 onto it, so it boots like acceptance 1 (about 15 s) and settles on "2."
+   "1". (Without the Reset fmt2 would still be running.)
+8. Save an edited sound to it. *File → Open Disk Image...* `Factory Library/IMG/
+   SND-A01.img`, *Machine → Reset*, wait for "2." "1". Press **Param**, **3**,
+   **6**, **Value** ("2" "8."), then **Up** three times ("3" "1."). *File → Open
+   Disk Image...* `Formatted.img` and do not Reset (the Mirage sees the new disk;
+   wait about 2 s). Press **Param**, **1**, **1**, **1**, **Enter** (save lower
+   sound to place 1; wait for the drive LED to go out), then *File → Save Disk
+   Image As...* `Formatted-with-sound.img`.
+9. *File → Open Disk Image...* `SND-A01.img`, *Machine → Reset*, wait for "2."
+   "1", and check **Param**, **3**, **6**, **Value** shows "2" "8." again (the
+   factory sound is back in RAM). *File → Open Disk Image...*
+   `Formatted-with-sound.img` (no Reset; wait about 2 s), then press **Load
+   Lower**, **1**, **Enter** (wait for the drive LED to go out). Press **Param**,
+   **3**, **6**, **Value**: it shows "3" "1." The edited sound came back from the
+   formatted disk, not from `SND-A01.img`. Play it.
 
 Re-run it after changes to the FDC (Write Track, Read Address) or to
 `DiskSession`.
@@ -463,9 +492,9 @@ plays its wavesamples from fixed pages of the lower half (keys 41-56 from page
 `$48` on, the others from pages `$00` to `$D8`), so an import that fills the half
 is what those keys play.
 
-1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img` and wait for the
-   display to settle on "2." "1" with the drive LED off (about 15 s). *Import
-   WAV* stays greyed while the LED is on.
+1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img`, then *Machine →
+   Reset*, and wait for the display to settle on "2." "1" with the drive LED off
+   (about 15 s). *Import WAV* stays greyed while the LED is on.
 2. *File → Import WAV...* (Ctrl+I) and pick a WAV of at least 2.3 s, for example
    a sustained note or a voice.
 3. In the dialog leave **Rate** at 29412 Hz (*Default*), **Into** at *Lower sound
@@ -484,8 +513,11 @@ is what those keys play.
    shows "(modified)".
 7. *File → Save Disk Image As...* `SND-A01-import.img` (keep the factory disk
    as it is; *Save* would write the import into `SND-A01.img`).
-8. *File → Open Disk Image...* `SND-A01-import.img`, wait for "2." "1" and play
-   the lower keyboard again: the import plays as in step 5.
+8. *File → Open Disk Image...* `SND-A01-import.img`, then *Machine → Reset* (it
+   clears wave RAM, so the import is gone from RAM), wait for "2." "1" and play
+   the lower keyboard again: the import plays as in step 5, now loaded from the
+   disk. (Without the Reset the import would still be in RAM from step 2 and
+   this step could not fail.)
 
 Re-run it after changes to the WAV reader or converter, the host's wave queue
 or the dialog.
@@ -496,8 +528,9 @@ or the dialog.
 headlessly and plays note 60 (`acceptance 4: each OS image boots and plays`) and
 passes. Times are on the emulated clock (`docs/hardware/boot-rom.md` §13.7).
 
-For each image: *File → Open Disk Image...*, wait for the display to settle with
-the drive LED off, then play a few notes from your MIDI keyboard.
+For each image: *File → Open Disk Image...*, then *Machine → Reset* (otherwise the
+previous image's OS keeps running), wait for the display to settle with the drive
+LED off, then play a few notes from your MIDI keyboard.
 
 | Image | The display settles on | Then |
 |---|---|---|
@@ -529,26 +562,31 @@ and `tests/test_disk_session.cpp` cover the format and Save / Save As; all pass.
 Times are on the emulated clock.
 
 1. Acceptance 1 with `MetascapeMetaSounds/mp1.edm` (a raw 450,560-byte `.edm`)
-   instead of `SND-A01.img`: *File → Open Disk Image...* `mp1.edm`, wait for the
-   display to settle on "2." "1" (about 15 s), then play.
+   instead of `SND-A01.img`: *File → Open Disk Image...* `mp1.edm`, *Machine →
+   Reset*, wait for the display to settle on "2." "1" (about 15 s), then play.
 2. *File → Open Disk Image...* `Soundprocess/TritonSoundprocess/SP1.EDM` (a Giebler
-   file, 389,633 bytes). It carries the Soundprocess OS, so follow the
-   Soundprocess row of the acceptance-4 checklist: the display settles on "0"
-   "1" (about 13 s), then play; **SEQ REC** and two digits select other programs.
-   It should sound like `SoundProcess_Vol1.edm`, the same disk as a raw rip.
+   file, 389,633 bytes), then *Machine → Reset*. It carries the Soundprocess OS,
+   so follow the Soundprocess row of the acceptance-4 checklist: the display
+   settles on "0" "1" (about 13 s), then play; **SEQ REC** and two digits select
+   other programs. It should sound like `SoundProcess_Vol1.edm`, the same disk as
+   a raw rip. (Without the Reset, OS 3.2 from step 1 would still be running.)
 3. With `SP1.EDM` still in the drive, *File → Save Disk Image As...*: the dialog
    suggests `SP1.edm`. Save it as `SP1-copy.edm` (keep the original as it is).
    It is written as a Giebler file: it starts with "Mirage Disk" in a text
    editor and is 389,633 bytes, like `SP1.EDM`, unless the OS wrote to the disk.
-4. *File → Open Disk Image...* `SP1-copy.edm`. It boots and plays like `SP1.EDM`.
-   *File → Save Disk Image As...* `SP1-copy.img` writes a 450,560-byte raw image
-   of the same disk.
-5. Open `MetascapeMetaSounds/mp1.edm` again and play a few notes. *File → Save
-   Disk Image As...* suggests `mp1.edm`, the same name: saving there would write
-   Giebler format, because the name ends in `.edm`. Save it as `mp1-giebler.edm`
-   to see that (it starts with "Mirage Disk" and is not 450,560 bytes), then
-   open it and check it boots as in step 1. Plain *Save Disk Image* on the
-   original `mp1.edm` (after an OS save, say) keeps it a raw 450,560-byte file.
+4. *File → Open Disk Image...* `SP1-copy.edm`, then *Machine → Reset*. It boots to
+   "0" "1" and plays like `SP1.EDM`. *File → Save Disk Image As...*
+   `SP1-copy.img` writes a 450,560-byte raw image of the same disk.
+5. Raw `.edm` stays raw, and nothing is written into your library. In File
+   Explorer copy `MetascapeMetaSounds/mp1.edm` to `mp1-copy.edm` in a scratch
+   folder. *File → Open Disk Image...* `mp1-copy.edm`, *Machine → Reset*, wait for
+   "2." "1" and play a few notes. Save a sound with the OS (**Param**, **1**,
+   **1**, **1**, **Enter**; wait for the drive LED to go out). *File → Save Disk
+   Image* (Ctrl+S): `mp1-copy.edm` stays 450,560 bytes and does not start with
+   "Mirage Disk" in a text editor. *File → Save Disk Image As...* now suggests
+   `mp1-copy.img` (a raw `.edm` is offered as `.img`). Type `mp1-giebler.edm`
+   instead: that file starts with "Mirage Disk" and is not 450,560 bytes. Open
+   it, Reset, and check it boots to "2." "1" as in step 1.
 
 Re-run it after changes to `DiskImage` or `DiskSession`.
 
@@ -588,5 +626,6 @@ Re-run it after changes to `DiskImage` or `DiskSession`.
   pending in one block gap, for example the clock lagging behind a dump after
   a Reset), the host counts the bytes as dropped and the message then joins the
   feeder's backlog and goes out.
-- A save ends only when the OS has not written in between; a disk that the OS
-  keeps writing stays "(modified)".
+- A save always writes the file; "(modified)" clears only if the OS has not
+  written to the disk since the copy was taken, so a disk that the OS keeps
+  writing stays "(modified)".

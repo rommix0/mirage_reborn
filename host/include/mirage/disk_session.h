@@ -62,15 +62,10 @@ class DiskSession {
   // in flight or the host's queue is full. Like open(), does not prompt.
   bool newBlank();
   void eject();
-  // Why saving to `file` (current path when empty) is refused regardless of
-  // timing, as a message for the user; empty when allowed. Today nothing is
-  // refused up front (.edm saves since Plan 3): a partly formatted disk is
-  // refused when the save runs, in poll().
-  std::string saveRefusal(const std::filesystem::path& file = {}) const;
   // Starts a save to `file` (current path when empty, in the current format;
   // otherwise in the format its name picks). Completes in poll().
-  // False (nothing started) when no target is known, saveRefusal() is
-  // non-empty, a save is already in flight, or the host's queue is full.
+  // False (nothing started) when no target is known, a save is already in
+  // flight, or the host's queue is full.
   // The save itself fails, leaving the disk modified and no file (not even a
   // temporary one), when the copy has unformatted tracks.
   bool startSave(const std::filesystem::path& file = {});
@@ -86,6 +81,9 @@ class DiskSession {
   // A disk was inserted (open or newBlank) and not ejected: from a file, or untitled.
   bool hasDisk() const { return !path_.empty() || untitled_; }
   const std::filesystem::path& path() const { return path_; }  // empty: no disk, or untitled
+  // The format a plain Save writes: what open() found, or what the last
+  // successful Save As chose. Raw for an untitled or absent disk.
+  DiskFormat format() const { return format_; }
   // UTF-8: "SND-A01.img", "SND-A01.img (modified)", "Untitled (blank)" or "No disk".
   std::string title() const;
 

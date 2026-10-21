@@ -68,11 +68,9 @@ void DiskSession::eject() {
   }
 }
 
-std::string DiskSession::saveRefusal(const std::filesystem::path&) const { return {}; }
-
 bool DiskSession::startSave(const std::filesystem::path& file) {
   const auto& target = file.empty() ? path_ : file;
-  if (saving_ || target.empty() || !saveRefusal(file).empty()) return false;
+  if (saving_ || target.empty()) return false;
   if (!host_.postCopyDisk(std::make_unique<DiskImage>(DiskImage::blank()))) return false;
   ++copiesOut_;
   saveTarget_ = target;

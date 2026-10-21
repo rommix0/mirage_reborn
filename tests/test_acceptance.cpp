@@ -83,6 +83,64 @@ TEST_CASE("acceptance 2: an edited parameter survives OS save, Save As and reope
   CHECK_FALSE(sameDisplay(reopened, original));
 }
 
+// docs/app.md tells the owner to boot a disk with File > Open then Machine > Reset:
+// Open only swaps the disk under the running OS (spec 6.5), and Reset
+// (Machine::powerOn) keeps the disk and its unsaved changes.
+TEST_CASE("acceptance 2: Open leaves the running OS alone, Open then Reset boots the new disk",
+          "[assets][acceptance]") {
+  REQUIRE_ASSET(assetPath(kImage));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  constexpr uint8_t kTwo = 0xDB, kOne = 0x06;  // "2." "1": the settled display
+
+  auto m = bootedMachineAt(kImage);
+  const DisplayState original = showParameter(*m, kFilterFc);
+  pressKeys(*m, {PanelKey::Up, PanelKey::Up, PanelKey::Up});
+  const DisplayState edited = m->display();
+  REQUIRE(displayedValue(edited) == displayedValue(original) + 3);
+  osSaveLowerSound(*m);
+  REQUIRE(m->disk()->dirty());
+  const auto path = std::filesystem::temp_directory_path() / "mirage_acceptance2_reset.img";
+  m->disk()->saveFile(path);
+
+  // Reset alone: RAM is cleared, the OS boots from the disk in the drive, which still
+  // holds its unsaved changes, so the edited value comes back.
+  m->powerOn();
+  settleBoot(*m);
+  CHECK(m->display().left == kTwo);
+  CHECK(m->display().right == kOne);
+  CHECK(m->disk()->dirty());
+  CHECK(displayedValue(showParameter(*m, kFilterFc)) == displayedValue(edited));
+
+  // Open SND-A01.img as shipped, no Reset: the OS keeps running and reads nothing.
+  m->ejectDisk();
+  runSeconds(*m, 0.5);
+  m->insertDisk(DiskImage::loadFile(assetPath(kImage)));
+  const DisplayState shown = m->display();
+  const uint64_t sectors = m->fdc().sectorsRead();
+  runSeconds(*m, 10.0);
+  CHECK(m->fdc().sectorsRead() == sectors);
+  CHECK(sameDisplay(m->display(), shown));
+  CHECK(displayedValue(showParameter(*m, kFilterFc)) == displayedValue(edited));
+
+  // Then Reset: it boots the shipped disk and shows the shipped value.
+  m->powerOn();
+  settleBoot(*m);
+  CHECK(m->display().left == kTwo);
+  CHECK(m->display().right == kOne);
+  CHECK(displayedValue(showParameter(*m, kFilterFc)) == displayedValue(original));
+
+  // Open the saved copy, then Reset: the edit comes back from the file.
+  m->ejectDisk();
+  runSeconds(*m, 0.5);
+  m->insertDisk(DiskImage::loadFile(path));
+  std::filesystem::remove(path);
+  m->powerOn();
+  settleBoot(*m);
+  CHECK(m->display().left == kTwo);
+  CHECK(m->display().right == kOne);
+  CHECK(displayedValue(showParameter(*m, kFilterFc)) == displayedValue(edited));
+}
+
 // ---- Acceptance 5: format a blank disk with the fmt2 boot disk --------------
 
 namespace {

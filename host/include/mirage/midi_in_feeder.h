@@ -38,8 +38,10 @@ class MidiInFeeder {
   // MIDI-input thread. A message that would take the backlog past kMaxBacklog
   // is dropped whole and counted in dropped().
   void push(std::span<const uint8_t> msg, double timeSeconds);
-  // Any non-audio thread, at least 200 Hz (the app's MIDI-out thread): posts as
-  // much of the backlog as the in-flight budget allows.
+  // Any non-audio thread, about every 16 ms or faster (the app calls it once per
+  // pass of its MIDI-out loop, whose wait(1) can sleep ~16 ms on Windows; a
+  // full 2048-byte backlog is ~655 ms of MIDI, so that is plenty): posts as much
+  // of the backlog as the in-flight budget allows.
   void pump();
   // UI thread, together with RealtimeHost::postPanic: drops the backlog. Call it
   // first, so that nothing is posted behind the panic.

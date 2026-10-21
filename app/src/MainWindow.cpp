@@ -415,13 +415,14 @@ void MainWindow::saveDisk(std::function<void()> then) {
 
 void MainWindow::saveDiskAs(std::function<void()> then) {
   if (session_.saving() || !session_.hasDisk()) return;
-  // The dialog's default extension is taken from the suggested name: .edm for a
-  // disk opened from a .edm file, else .img. A .edm name saves Giebler .edm,
+  // The dialog's default extension is taken from the suggested name: .edm only
+  // when the session's format is Giebler .edm, else .img (a raw .edm would be
+  // converted by accepting its own name). A .edm name saves Giebler .edm,
   // anything else a raw image (DiskSession::startSave).
   const auto& path = session_.path();
   const auto suggested =
       diskFolder().getChildFile(path.empty() ? "Untitled" : text(path.stem()))
-          .withFileExtension(fileName(path).endsWithIgnoreCase(".edm") ? ".edm" : ".img");
+          .withFileExtension(session_.format() == mirage::DiskFormat::GieblerEdm ? ".edm" : ".img");
   chooser_ = std::make_unique<juce::FileChooser>("Save Disk Image As", suggested, "*.img;*.edm");
   juce::Component::SafePointer<MainWindow> safe(this);
   chooser_->launchAsync(juce::FileBrowserComponent::saveMode |
@@ -438,10 +439,6 @@ void MainWindow::saveDiskAs(std::function<void()> then) {
 
 void MainWindow::startSave(const juce::File& file, std::function<void()> then) {
   const auto target = file == juce::File() ? std::filesystem::path() : toPath(file);
-  if (const auto refusal = session_.saveRefusal(target); !refusal.empty()) {
-    showError("Cannot save disk image", fromUtf8(refusal));
-    return;
-  }
   if (!session_.startSave(target)) {
     showError("Cannot save disk image", "The disk could not be saved right now. Try again.");
     return;

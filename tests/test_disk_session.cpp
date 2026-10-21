@@ -365,7 +365,7 @@ TEST_CASE("session saves a Giebler .edm back as Giebler") {
   Rig rig;
   REQUIRE(rig.session.open(file).empty());
   rig.pump();
-  CHECK(rig.session.saveRefusal().empty());
+  CHECK(rig.session.format() == DiskFormat::GieblerEdm);
   rig.osWrite(0xA5);
   REQUIRE(rig.session.startSave());
   REQUIRE(rig.finishSave().ok);
@@ -378,6 +378,7 @@ TEST_CASE("session saves a Giebler .edm back as Giebler") {
   // Save As follows the new name: .img is raw, after which plain Save stays raw.
   REQUIRE(rig.session.startSave(tmp / "copy.img"));
   REQUIRE(rig.finishSave().ok);
+  CHECK(rig.session.format() == DiskFormat::Raw);
   CHECK(readBytes(tmp / "copy.img") == expected);
   rig.osWrite(0x5A);
   REQUIRE(rig.session.startSave());
@@ -394,12 +395,12 @@ TEST_CASE("session Save As picks the format by name: .edm (any case) Giebler, el
   rig.pump();
   for (const char* name : {"x.edm", "y.EdM", "z.img", "noext"}) {
     INFO(name);
-    CHECK(rig.session.saveRefusal(tmp / name).empty());
     REQUIRE(rig.session.startSave(tmp / name));
     REQUIRE(rig.finishSave().ok);
     const auto saved = readBytes(tmp / name);
     const bool edm = name[0] == 'x' || name[0] == 'y';
     CHECK(isGiebler(saved) == edm);
+    CHECK(rig.session.format() == (edm ? DiskFormat::GieblerEdm : DiskFormat::Raw));
     CHECK(DiskImage::fromFileBytes(saved).toBytes() ==
           std::vector<uint8_t>(DiskImage::kImageBytes, 0x11));
     if (!edm) CHECK(saved.size() == size_t(DiskImage::kImageBytes));
@@ -417,8 +418,8 @@ TEST_CASE("session saves a raw .edm back as raw") {
   Rig rig;
   REQUIRE(rig.session.open(edm).empty());
   rig.pump();
+  CHECK(rig.session.format() == DiskFormat::Raw);  // a raw .edm: Save As suggests .img
   rig.osWrite(0xA5);
-  CHECK(rig.session.saveRefusal().empty());
   REQUIRE(rig.session.startSave());
   REQUIRE(rig.finishSave().ok);
   const auto saved = readBytes(edm);
