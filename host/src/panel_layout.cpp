@@ -67,8 +67,11 @@ constexpr PanelGeometry kGeometry = {
     /*driveSlot*/ {140, 250, 280, 20},
     /*driveLed*/ {436, 256, 8, 8},  // centred on (440, 260)
     /*ensoniqBadge*/ {14, 151, 108, 20},  // centred on the pinstripe; the logo's 5.4:1 aspect
-    /*mirageLogo*/ {680, 50, 280, 80},
-    /*mirageSubtitle*/ {680, 136, 280, 12},
+    // Proportions from a photo of a DSK: the wordmark is 4.75:1 with its baseline 0.765 of the
+    // way down, 5 units above the pinstripe; the red stripe and the subtitle follow below.
+    /*mirageLogo*/ {700, 118.9f, 230, 48.4f},
+    /*mirageSubtitle*/ {700, 179, 230, 7},
+    /*redStripe*/ {kColSeq + 30, 170, 976 - (kColSeq + 30), 5},
     /*rowRuleY*/ {(kRow1 + kRow2) / 2 - 6, (kRow2 + kRow3) / 2 - 6},  // above the next row's labels
     /*pinstripeY*/ (kRow3 + kRow4) / 2 - 6,
     /*headingRuleY*/ 204,

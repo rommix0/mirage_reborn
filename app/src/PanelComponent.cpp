@@ -15,6 +15,7 @@ const Colour kWell{0xff0b0b0d};      // the recess around each cap
 const Colour kLegend{0xfff2f2f0};    // labels, headings, rules
 const Colour kBranding{0xffc6c6c4};  // the ensoniq badge and the subtitle
 const Colour kMirageYellow{0xfff2c22e};
+const Colour kStripeRed{0xffd8383a};  // the stripe under the pinstripe
 const Colour kDigitOn{0xffffd030}, kDigitOff{0xff352b08};  // the yellow two-digit readout
 const Colour kLedOn{0xffff3322}, kLedOff{0xff3a0e0b};      // the drive activity LED
 
@@ -64,6 +65,32 @@ std::unique_ptr<juce::Drawable> makeEnsoniqLogo() {
     logo->replaceColour(Colour(0xff231f20), kBranding);     // the "e" (class cls-1)
   }
   return logo;
+}
+
+// The "Mirage" wordmark from the embedded mirage_wordmark.svg, in the logo yellow.
+std::unique_ptr<juce::Drawable> makeMirageWordmark() {
+  auto mark = juce::Drawable::createFromImageData(MirageBranding::mirage_wordmark_svg,
+                                                  size_t(MirageBranding::mirage_wordmark_svgSize));
+  jassert(mark != nullptr);
+  if (mark) mark->replaceColour(juce::Colours::black, kMirageYellow);
+  return mark;
+}
+
+// "DIGITAL SAMPLING KEYBOARD" in the embedded Michroma (a Microgramma-style
+// extended face, as on the panel), widely spaced and scaled to exactly the
+// width of `area`, top-aligned in it.
+juce::Path makeSubtitle(Rectangle<float> area) {
+  const auto face = juce::Typeface::createSystemTypefaceFor(
+      MirageBranding::MichromaRegular_ttf, size_t(MirageBranding::MichromaRegular_ttfSize));
+  jassert(face != nullptr);
+  const auto font = juce::Font(juce::FontOptions(face).withHeight(10.0f)).withExtraKerningFactor(0.38f);
+  juce::Path p = textPath("DIGITAL  SAMPLING  KEYBOARD", font, {0, 0, 1000, 10});
+  const auto b = p.getBounds();
+  const float s = area.getWidth() / b.getWidth();
+  p.applyTransform(juce::AffineTransform::translation(-b.getX(), -b.getY())
+                       .scaled(s)
+                       .translated(area.getX(), area.getY()));
+  return p;
 }
 
 // The drive's faceplate on the lip: the slot and its activity LED.
@@ -223,6 +250,8 @@ PanelComponent::PanelComponent(mirage::RealtimeHost* host, const mirage::HostSta
     : host_(host),
       status_(status),
       ensoniqLogo_(makeEnsoniqLogo()),
+      mirageWordmark_(makeMirageWordmark()),
+      subtitle_(makeSubtitle(toRect(mirage::panelGeometry().mirageSubtitle))),
       sliderLook_(std::make_unique<SliderLook>()) {
   setOpaque(true);
   for (const mirage::PanelButton& b : mirage::panelButtons()) {
@@ -378,15 +407,17 @@ void PanelComponent::paintBranding(juce::Graphics& g) const {
   // ensoniq: the logotype in its box.
   if (ensoniqLogo_)
     ensoniqLogo_->drawWithin(g, toRect(geo.ensoniqBadge), juce::RectanglePlacement::centred, 1.0f);
-  // Mirage in solid yellow, its subtitle in small widely spaced caps.
-  g.setColour(kMirageYellow);
-  g.fillPath(textPath("Mirage",
-                      juce::Font(juce::FontOptions("Arial Black", 100.0f, juce::Font::plain)),
-                      toRect(geo.mirageLogo)));
+  // The red stripe under the pinstripe; "Mirage" in solid yellow over both
+  // rules (its "g" crosses the pinstripe); the subtitle in small widely spaced
+  // caps under the stripe.
+  g.setColour(kStripeRed);
+  g.fillRect(toRect(geo.redStripe));
+  if (mirageWordmark_)
+    mirageWordmark_->drawWithin(g, toRect(geo.mirageLogo), juce::RectanglePlacement::stretchToFit,
+                                1.0f);
   g.setColour(kBranding);
-  g.setFont(panelFont(9.0f).withExtraKerningFactor(0.32f));
-  g.drawText("DIGITAL SAMPLING KEYBOARD", toRect(geo.mirageSubtitle), juce::Justification::centred,
-             false);
+  g.fillPath(subtitle_);
+  g.strokePath(subtitle_, juce::PathStrokeType(0.25f));  // the screened legend is a little heavier
 }
 
 // The two-digit LED behind its dark window, and the inverted-T and L brackets

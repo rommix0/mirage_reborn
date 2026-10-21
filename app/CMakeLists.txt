@@ -33,8 +33,13 @@ target_compile_definitions(MirageApp PRIVATE
   JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MirageApp,JUCE_VERSION>"
   MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
 
-# Panel artwork embedded in the exe (the ensoniq badge).
-juce_add_binary_data(MirageBranding NAMESPACE MirageBranding SOURCES resources/ensoniq_logo.svg)
+# Panel artwork embedded in the exe: the ensoniq badge, the "Mirage" wordmark
+# (Anybody outlines) and the subtitle font (Michroma). Both fonts are SIL OFL
+# 1.1; their licences are in resources/fonts/.
+juce_add_binary_data(MirageBranding NAMESPACE MirageBranding SOURCES
+  resources/ensoniq_logo.svg
+  resources/mirage_wordmark.svg
+  resources/fonts/Michroma-Regular.ttf)
 
 target_link_libraries(MirageApp
   PRIVATE

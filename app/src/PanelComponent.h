@@ -53,7 +53,9 @@ class PanelComponent : public juce::Component, private juce::Timer {
   mirage::HostStatus status_;
   juce::String diskName_;
   std::array<uint8_t, mirage::kPanelKeyCount> holds_{};  // sources holding each key
-  std::unique_ptr<juce::Drawable> ensoniqLogo_;  // the embedded badge artwork
+  std::unique_ptr<juce::Drawable> ensoniqLogo_;    // the embedded badge artwork
+  std::unique_ptr<juce::Drawable> mirageWordmark_;  // the embedded "Mirage" wordmark
+  juce::Path subtitle_;  // "DIGITAL SAMPLING KEYBOARD" in Michroma, in panel units
   std::unique_ptr<SliderLook> sliderLook_;  // declared before volume_, so it outlives it
   juce::Slider volume_;
   std::vector<std::unique_ptr<Button>> buttons_;  // indexed by PanelKey

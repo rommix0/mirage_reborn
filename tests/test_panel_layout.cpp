@@ -126,7 +126,7 @@ TEST_CASE("panel buttons lie inside the panel and don't overlap each other or th
       REQUIRE_FALSE(overlaps(buttons[i].r, buttons[j].r));
   }
   for (const PanelRect& r : {g.display, g.volume, g.driveSlot, g.driveLed, g.ensoniqBadge,
-                             g.mirageLogo, g.mirageSubtitle})
+                             g.mirageLogo, g.mirageSubtitle, g.redStripe})
     REQUIRE(inside(r, g.width, g.height));
   for (const PanelHeading& h : panelHeadings()) {
     REQUIRE(h.centreX > 0);
@@ -184,15 +184,22 @@ TEST_CASE("panel layout follows the DSK-8 front panel", "[panel_layout]") {
   REQUIRE(g.pinstripeY > bottom(rectOf(K::K7)));
   REQUIRE(g.pinstripeY < rectOf(K::Cancel).y);
 
-  // Branding: the ensoniq badge at the far left, on the pinstripe; "Mirage"
-  // and its subtitle right of the control group, above the pinstripe.
+  // Branding: the ensoniq badge at the far left, on the pinstripe. "Mirage"
+  // right of the control group, its "g" descending through the pinstripe; the
+  // red stripe under the pinstripe from right of the SEQ column; the subtitle
+  // under the red stripe, as wide as the wordmark.
   REQUIRE(right(g.ensoniqBadge) < g.volume.x);
   REQUIRE(g.ensoniqBadge.y < g.pinstripeY);
   REQUIRE(bottom(g.ensoniqBadge) > g.pinstripeY);
   REQUIRE(g.mirageLogo.x > right(rectOf(K::LoadUpper)));
-  REQUIRE(g.mirageSubtitle.y >= bottom(g.mirageLogo));
-  REQUIRE(bottom(g.mirageSubtitle) < g.pinstripeY);
-  REQUIRE(centreX(g.mirageSubtitle) == centreX(g.mirageLogo));
+  REQUIRE(g.mirageLogo.y < g.pinstripeY);
+  REQUIRE(bottom(g.mirageLogo) > g.pinstripeY);
+  REQUIRE(g.redStripe.y > g.pinstripeY);
+  REQUIRE(g.redStripe.x > right(rectOf(K::SaveSeq)));
+  REQUIRE(g.mirageSubtitle.y >= bottom(g.redStripe));
+  REQUIRE(bottom(g.mirageSubtitle) < g.lipY);
+  REQUIRE(g.mirageSubtitle.x == g.mirageLogo.x);
+  REQUIRE(g.mirageSubtitle.w == g.mirageLogo.w);
 
   // The lip strip holds the drive slot and, right of it, the drive LED.
   REQUIRE(g.driveSlot.y >= g.lipY);

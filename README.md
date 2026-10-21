@@ -58,3 +58,9 @@ warned about). Settings are kept in `%APPDATA%\MirageEmulator\MirageEmulator.set
 Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
 engine and `mirage_host` contain no JUCE code, so the licence choice for any
 other front end (for example a VST3) stays open.
+
+Panel lettering: the "Mirage" wordmark is drawn from outlines of the Anybody
+font and the "DIGITAL SAMPLING KEYBOARD" legend uses the Michroma font, both
+under the SIL Open Font License 1.1 (licences in `app/resources/fonts/`). They
+stand in for the panel's commercial typefaces and are embedded in the exe.
+`tools/fonts/make_wordmark.py` regenerates the wordmark.

@@ -35,8 +35,10 @@ std::span<const PanelHeading> panelHeadings();
 struct PanelGeometry {
   float width, height;
   PanelRect display, volume, driveSlot, driveLed, ensoniqBadge;
-  PanelRect mirageLogo;      // the yellow "Mirage" word
-  PanelRect mirageSubtitle;  // "DIGITAL SAMPLING KEYBOARD" under it
+  PanelRect mirageLogo;      // the yellow "Mirage" wordmark; its baseline sits just above the
+                             // pinstripe, which the "g" descends through
+  PanelRect mirageSubtitle;  // "DIGITAL SAMPLING KEYBOARD", under the red stripe, as wide as the logo
+  PanelRect redStripe;       // under the pinstripe, from right of the SEQ column across
   float rowRuleY[2];         // white rules under rows 1 and 2 (key 1 to the LOAD column)
   float pinstripeY;          // the rule above row 4, running from the ensoniq badge across
   float headingRuleY;        // the white rule over the section headings
