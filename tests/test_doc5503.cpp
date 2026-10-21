@@ -269,32 +269,49 @@ TEST_CASE("doc swap: at the end the even oscillator halts and the odd one starts
   CHECK(r.halted(3));  // osc 3 then plays its one-shot table
 }
 
-// MAME's rule (es5503.cpp halt_osc): an even oscillator that the DOC halts
-// starts its odd partner when the partner is in swap mode, whatever the even
-// one's own mode. An odd oscillator halting does not start an even swap partner.
-TEST_CASE("doc an even oscillator halting starts its odd swap partner") {
-  SECTION("even one-shot ends its table") {
+// MAME es5503.cpp halt_osc ("Verified on IIgs hardware, and hinted by the
+// Ensoniq data sheet"): an even oscillator that is not in swap mode, with its odd
+// partner in swap mode, retriggers instead of halting. It runs on with its phase
+// kept as in a wrap and interrupts; the partner stays halted.
+TEST_CASE("doc an even oscillator with an odd swap partner retriggers instead of halting") {
+  SECTION("even one-shot at the end of its table loops like free run") {
     Rig r;
     r.enable(2);
-    r.osc(0, 0x20, 0x0200, kOneShot);
+    r.osc(0, 0x10, 0x0300, kOneShot | kIe);  // as the free-run wrap test
     r.osc(1, 0x30, 0x0200, kSwap | kHalt);
-    r.scans(255);
+    for (int i = 0; i < 1000 && !r.doc.irq(); ++i) r.scans(1);
+    CHECK(r.doc.read(kOir) == oirFor(0));
+    CHECK_FALSE(r.halted(0));
     CHECK(r.halted(1));
-    r.scans(1);  // osc 0 halts in slot 0; osc 1 runs in slot 1 of the same scan
-    CHECK(r.halted(0));
-    CHECK_FALSE(r.halted(1));
-    REQUIRE(r.readsFrom(0x30).size() == 1);
-    CHECK(r.readsFrom(0x30)[0] == 0x3001);  // started from the top
+    const auto v = r.readsFrom(0x10);
+    REQUIRE(v.size() == 171);
+    CHECK(v[169] == 0x10FF);
+    CHECK(v[170] == 0x1000);  // acc 0x20100 - 0x20000: the phase is kept
+    r.scans(1);
+    CHECK(lastOf(r.readsFrom(0x10)) == 0x1002);
+    CHECK(r.readsFrom(0x30).empty());
   }
-  SECTION("even free-run reads a zero byte") {
+  SECTION("even free-run on a zero byte keeps running") {
     Rig r;
     r.enable(2);
     r.mem[0x2002] = 0x00;
-    r.osc(0, 0x20, 0x0200, 0x00);
+    r.osc(0, 0x20, 0x0200, kIe);
     r.osc(1, 0x30, 0x0200, kSwap | kHalt);
     r.scans(2);
+    CHECK(r.doc.read(kOir) == oirFor(0));
+    CHECK_FALSE(r.halted(0));
+    CHECK(r.halted(1));
+    r.scans(1);
+    CHECK(lastOf(r.readsFrom(0x20)) == 0x2003);
+  }
+  SECTION("without a swap partner the even one-shot halts") {
+    Rig r;
+    r.enable(2);
+    r.osc(0, 0x10, 0x0300, kOneShot);
+    r.osc(1, 0x30, 0x0200, kOneShot | kHalt);
+    r.scans(200);
     CHECK(r.halted(0));
-    CHECK_FALSE(r.halted(1));
+    CHECK(r.halted(1));
   }
   SECTION("an odd one-shot ending leaves its even swap partner halted") {
     Rig r;

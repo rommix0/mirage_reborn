@@ -29,28 +29,37 @@ namespace mirage {
 //      in mode 10 resets its odd partner's accumulator (sync).
 //   01 one shot and 11 swap: halt (H = 1, A = 0).
 // A wave byte of 0 halts the oscillator in every mode (H = 1; A = 0 when
-// M0 = 1). Whenever the DOC halts oscillator n (end of table or zero byte), the
-// partner n ^ 1 is started (H = 0, A = 0) if n is in swap mode, or if n is even
-// and the partner is in swap mode (MAME's rule, es5503.cpp halt_osc: an even
-// one-shot can hand over to an odd swap oscillator). A halt written by the CPU
-// starts nothing. A completed table and a zero halt each raise an interrupt:
-// queued in the OIR FIFO when IE = 1; with IE = 0 nothing is recorded (setting
-// IE later raises nothing). An oscillator is in the FIFO at most once.
+// M0 = 1). When the DOC halts a swap oscillator n (end of table or zero byte),
+// its partner n ^ 1 is started (H = 0, A = 0). A halt written by the CPU starts
+// nothing.
+// Retrigger (MAME es5503.cpp halt_osc, current master; its comment: "Verified on
+// IIgs hardware, and hinted by the Ensoniq data sheet"): an even oscillator that
+// is not in swap mode, whose odd partner is in swap mode, is not halted at the
+// end of its table or on a zero byte. It clears H again and runs on, its phase
+// kept as in a wrap (a one-shot then loops like free run); the partner is left
+// alone; the interrupt is raised as for a halt.
+// A completed table and a zero halt each raise an interrupt: queued in the OIR
+// FIFO when IE = 1; with IE = 0 nothing is recorded (setting IE later raises
+// nothing). An oscillator is in the FIFO at most once.
 //
 // Sync/AM at the end of the table (checked, Plan 3 Task 7): the datasheet's sync
 // text has the even oscillator wrap to the start of its table and reset its odd
-// partner, so mode 10 wraps here. buchty's H bit note lists sync among the modes
-// that halt "after completion", and MAME halts every mode but free run; the
-// datasheet's description, which only makes sense for a wrapping oscillator, is
-// followed. AM (odd oscillator in mode 10) wraps the same way.
+// partner, so mode 10 wraps here. MAME agrees (halt_osc treats sync/AM as free
+// run and loops them). buchty's H bit note lists sync among the modes that halt
+// "after completion"; the datasheet's description, which only makes sense for a
+// wrapping oscillator, is followed. AM (odd oscillator in mode 10) wraps the
+// same way.
 //
 // CA3 (ca3()): the DOC drives CA3-CA0 with the channel assignment of the
 // oscillator in the current slot. The Mirage wires CA3 to VIA PB5 (MAME
 // enmirage.cpp, "Q Chip sync"), and the Soundprocess OS waits for PB5 = 1 before
 // each DOC register write, then delays by the oscillator group, so PB5 marks a
-// fixed point of every scan. Every oscillator it uses has CA3 = 0, so the line
-// must go high in the two refresh slots: modelled as CA3 = 1 there (the CA lines
-// in refresh are not documented; boot-rom.md 13.7).
+// fixed point of every scan. buchty's page notes that the refresh slots are the
+// ones without a channel strobe (CSTRB missing while E = 1), so the chip does
+// mark them on its pins, which fits a sync locked to the scan. Every oscillator
+// the OS uses has CA3 = 0, so the line must go high in the two refresh slots:
+// modelled as CA3 = 1 there (what the CA lines carry in refresh is not
+// documented; boot-rom.md 13.7).
 //
 // A/D ($E2): a read returns the result of the previous conversion and starts a
 // new one, sampling adcRead() (the analog input) at that moment. A conversion
@@ -93,6 +102,7 @@ class Doc5503 {
 
   void slot();
   void updateOscillator(int n);
+  bool retriggers(int n) const;
   void halt(int n);
   void interrupt(int n);
 

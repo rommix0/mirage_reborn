@@ -719,7 +719,10 @@ clock it calls `ca3_clock`, i.e. the DOC's CA3 channel-address output (as a free
 wave, with the comment "may not be used in the firmware"). A free square wave cannot be what the
 OS expects: its per-group NOP delays only make sense if PB5 marks a fixed point of every DOC
 scan. The OS gives every oscillator CA3 = 0 (control `$02`, `$12` ... `$72` at `$9753`), so the
-line can only go high in the two refresh slots. The model: CA3 is control bit 7 of the
+line can only go high in the two refresh slots. buchty's 5503 page (in `../datasheets/`) notes
+that the refresh slots are the ones in which the channel strobe CSTRB is missing while E = 1,
+so the chip does mark the refresh slots on its pins, which supports a sync locked to the scan.
+The model: CA3 is control bit 7 of the
 oscillator in the current slot and 1 in the refresh slots (`Doc5503::ca3()`), and PB5 reads it
 (`Machine`). What the DOC drives on CA3-CA0 during refresh is not documented; this is the
 assumption that makes the observed OS code work. After the fix each wait lasts about one scan
@@ -736,7 +739,7 @@ boot (OMNI on; notes on channels 1, 2 and 16 all play). The sound packs boot the
 **Each OS image, booted and played** (`bootedSnapshotAt` settle rule; then note 60, velocity
 100, held 1 s; `mirage_cli run --seconds 18 --note 60:100@16:1`). Settle times, displays and
 sector counts are the same before and after the Task 7 changes (PB5, the WD1772 `$D4`/MO rules,
-the DOC swap-partner rule).
+the DOC retrigger rule).
 
 | Image | Settled | Display | Sectors | Note 60 (peak, RMS over the held second) |
 |---|---|---|---|---|

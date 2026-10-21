@@ -89,7 +89,7 @@ std::string imagePath() { return std::string("Factory Library/IMG/") + kImage; }
 
 }  // namespace
 
-TEST_CASE("snapshot: header is the MIRG magic, then version 3") {
+TEST_CASE("snapshot: header is the MIRG magic, then version 4") {
   Machine m(idleRom());
   m.powerOn();
   m.runCycles(1000);
@@ -97,7 +97,7 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 3") {
   REQUIRE(snap.size() > 8);
   CHECK(getU32(snap, 0) == fourcc("MIRG"));
   CHECK(getU32(snap, 4) == Machine::kSnapshotVersion);
-  CHECK(Machine::kSnapshotVersion == 3);
+  CHECK(Machine::kSnapshotVersion == 4);
 }
 
 TEST_CASE("snapshot with an out-of-range credit is rejected and the machine is unchanged") {
@@ -243,7 +243,7 @@ TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes
     CHECK(m.saveState() == before);
     CHECK(m.cycles() == cycles);
   };
-  for (uint32_t version : {0u, 1u, 2u, 4u, 99u, 0xFFFFFFFFu}) {
+  for (uint32_t version : {0u, 1u, 2u, 3u, 5u, 99u, 0xFFFFFFFFu}) {
     INFO("version " << version);
     auto bad = snap;
     setU32(bad, 4, version);

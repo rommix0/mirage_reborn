@@ -138,7 +138,7 @@ void Doc5503::updateOscillator(int n) {
   const uint32_t sum = o.acc + o.fc;
   o.acc = sum & (period - 1);
   if (sum >= period) {
-    if (mode == kModeOneShot || mode == kModeSwap) {
+    if ((mode == kModeOneShot || mode == kModeSwap) && !retriggers(n)) {
       halt(n);
       interrupt(n);
       return;
@@ -152,7 +152,7 @@ void Doc5503::updateOscillator(int n) {
   const uint32_t mask = (256u << size) - 1;
   const uint32_t addr = ((uint32_t(o.pointer) << 8) & ~mask) | ((o.acc >> (9 + res - size)) & mask);
   o.data = waveRead_(((o.sizeReg & kBs) ? 0x10000u : 0u) | addr);
-  if (o.data == 0) {  // a zero byte halts in every mode
+  if (o.data == 0) {  // a zero byte halts in every mode (unless n retriggers)
     halt(n);
     interrupt(n);
     return;
@@ -163,15 +163,24 @@ void Doc5503::updateOscillator(int n) {
   frame_[(o.control >> 4) & (kChannels - 1)] += (int32_t(o.data) - 128) * volume;
 }
 
-// The DOC halts oscillator n: H = 1 (A = 0 when M0 = 1). The partner is
-// started from the top of its table when n is in swap mode, or when n is even
-// and the partner is in swap mode.
+// An even oscillator that is not in swap mode, with its odd partner in swap
+// mode, is retriggered instead of halted: it keeps running with its phase as in
+// a wrap, and the partner is left alone (MAME es5503.cpp halt_osc, "Verified on
+// IIgs hardware, and hinted by the Ensoniq data sheet").
+bool Doc5503::retriggers(int n) const {
+  return (n & 1) == 0 && modeOf(osc_[n].control) != kModeSwap &&
+         modeOf(osc_[n + 1].control) == kModeSwap;
+}
+
+// The DOC halts oscillator n: H = 1 (A = 0 when M0 = 1); in swap mode the
+// partner is started from the top of its table. A retriggering oscillator is
+// not halted (its accumulator is left as it is).
 void Doc5503::halt(int n) {
+  if (retriggers(n)) return;
   Osc& o = osc_[n];
   o.control |= kH;
   if (o.control & kM0) o.acc = 0;
-  if (modeOf(o.control) == kModeSwap ||
-      ((n & 1) == 0 && modeOf(osc_[n + 1].control) == kModeSwap)) {
+  if (modeOf(o.control) == kModeSwap) {
     Osc& p = osc_[n ^ 1];
     p.control &= uint8_t(~kH);
     p.acc = 0;

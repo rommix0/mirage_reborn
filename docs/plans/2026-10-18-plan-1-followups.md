@@ -74,9 +74,14 @@ Plan 1, the engine core.
   swap/AM/sync edge cases, including MAME's even-one-shot-starts-odd-swap
   partner rule, which nothing so far needs. Done in Plan 3 Task 7 (commit
   "feat: other OSes boot and play; WD1772 $D4 and MO, DOC swap partner
-  (acceptance 4)"): `$D4` interrupts at every index pulse, every command sets
-  MO, an even oscillator's halt starts an odd swap partner, sync/AM wrap per
-  the datasheet (doc5503.h). The sweep also found why Soundprocess was silent:
+  (acceptance 4)", fixed in "fix: DOC swap partner per MAME hardware note; doc
+  citations; snapshot v4"): `$D4` interrupts at every index pulse, every
+  command sets MO, sync/AM wrap per the datasheet (doc5503.h). The partner rule
+  as first worded here was not MAME's: current MAME (es5503.cpp halt_osc,
+  "Verified on IIgs hardware, and hinted by the Ensoniq data sheet")
+  retriggers an even non-swap oscillator whose odd partner is in swap mode
+  (H cleared, phase kept as in a wrap, partner left alone), and that is what
+  the model does. Snapshot version 4. The sweep also found why Soundprocess was silent:
   VIA PB5 is the DOC's CA3 line, which the OS polls before every DOC write
   (boot-rom.md 13.7).
 - WAV import (spec §6.7) replaces sampling from audio input (owner decision,

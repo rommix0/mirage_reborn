@@ -33,8 +33,10 @@ class Machine : private Bus {
   static constexpr uint32_t kBootRomSize = 0x1000;
   static constexpr uint32_t kSampleRamSize = 0x20000;
   // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
-  // the layout changes; loadState() rejects any other value.
-  static constexpr uint32_t kSnapshotVersion = 3;
+  // the layout or the meaning of saved state changes; loadState() rejects any
+  // other value. 4: same layout as 3, but a version-3 WD1772 state can hold MO
+  // off after an h=1 command and a sticky $D4 interrupt (Plan 3 Task 7).
+  static constexpr uint32_t kSnapshotVersion = 4;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);

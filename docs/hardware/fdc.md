@@ -14,7 +14,12 @@ section 5. Code: `engine/src/wd1772.cpp`, wired in `Machine` (`$E800-$E803`).
 
 The 1772's own spin-up is unused: every ROM command sets h=1. Status bit 7 (MO) is the chip's
 internal motor line, not the drive motor. Every command turns MO on; h=1 only skips the
-6-revolution wait (`wd1772.txt`: h "disable[s] the motor spin-up sequence"). Until Plan 3 the
+6-revolution wait. `wd1772.txt` (lines 127-132) is ambiguous here: "turn the motor on" sits inside
+the h=0 branch ("Otherwise, if the motor is off ... the chip will turn the motor on and wait 6
+revolutions"), so for h=1 it says only that the spin-up sequence is disabled, not whether MO goes
+on. The Western Digital flowchart sets MO for every command, and so does MAME
+(`wd_fdc_device_base::spinup()`, current master: `status |= S_MON|S_SPIN` for h=1 as well; it is
+called whenever a command starts with MO off). The model follows them. Until Plan 3 the
 model left MO off for h=1 commands, so it read 0 throughout the ROM's boot; it now reads 1 from
 the first command until 9 idle revolutions pass. No boot time moved (Plan 3 Task 7).
 
@@ -89,7 +94,7 @@ window comes from the controller documentation. None of it is a measurement of a
   `$D0` or the next command (status reads do not clear it); `$D4` raises it at **every** index
   pulse until the next Force Interrupt or command, and a status read clears each one. The Western
   Digital data sheets list the I2 condition as "every index pulse" (they are not in the asset
-  tree; MAME's `wd_fdc` behaves the same way);
+  tree; MAME's `wd_fdc` raises INTRQ at each index pulse while the I2 condition is set);
   `wd1772.txt` only says the chip acknowledges "at the next index pulse", which is the first of
   them and does not say it stops there, so the two agree. Until Plan 3 Task 7 the model raised
   one sticky interrupt.
@@ -122,4 +127,4 @@ index pulse parses them as follows:
 Gaps, sync bytes and the exact byte positions are not kept: the track reads back with the fixed
 layout above. A head beyond track 79 writes nothing. No disk: the command waits for rotation, as
 Type II. Eject during the command aborts it with RNF and leaves the track as it was. A snapshot
-holds the bytes loaded so far (machine snapshot version 3).
+holds the bytes loaded so far (machine snapshot version 3 and later).
