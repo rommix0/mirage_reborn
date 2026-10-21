@@ -124,6 +124,10 @@ WavAudio readWavFile(const std::filesystem::path& file) {
   return readWav({bytes.data(), bytes.size()});
 }
 
+int originalPitchKey(double rate) {
+  return int(std::lround(kPitchHintKey + 12.0 * std::log2(rate / kPitchHintRate)));
+}
+
 ImportPlan planImport(const WavAudio& audio, const ImportSettings& s) {
   ImportPlan p;
   const double fileSeconds = audio.rate > 0 ? double(audio.mono.size()) / audio.rate : 0.0;

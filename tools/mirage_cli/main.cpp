@@ -6,6 +6,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <ostream>
@@ -43,6 +44,8 @@ int usage() {
       "  mirage_cli run [--disk <img>] [--rom <bin>] [--seconds S]\n"
       "                 [--key NAME@T[:HOLD]]... [--note N:VEL@T:DUR]...\n"
       "                 [--midi-hex \"90 3C 64\"@T]...\n"
+      "                 [--import \"FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper]\n"
+      "                            [,page=P][,normalize=0|1]\"]...\n"
       "                 [--wav out.wav --rate 48000] [--trace trace.txt [--trace-from T]]\n"
       "                 [--snapshot-out f] [--snapshot-in f] [--save-disk f]\n"
       "      Powers on and runs the machine headless for S emulated seconds\n"
@@ -54,6 +57,14 @@ int usage() {
       "      note-off at T+DUR. --trace writes one line per instruction from\n"
       "      --trace-from (default 0). At the end prints the display segments,\n"
       "      the illegal-opcode count, the FDC sectors read and the E cycles.\n"
+      "      --import converts a WAV file (the Import WAV dialog's conversion) and\n"
+      "      writes it into wave RAM at T: rate R Hz (10101-33333, default 29412),\n"
+      "      the file from S to E seconds (default 0 to the end), the lower or upper\n"
+      "      64 KB half, from 256-byte page P (0-255, default 0), peak-normalised\n"
+      "      unless normalize=0. If the drive is busy at T it prints that the import\n"
+      "      is refused and goes on. A file that cannot be read, or settings the\n"
+      "      import refuses, exit 1 before the run; the file name cannot contain a\n"
+      "      comma.\n"
       "      --wav writes the audio as a 16-bit mono WAV at --rate (default 48000).\n"
       "      --snapshot-out writes the whole machine state (Machine::saveState) at\n"
       "      the end of the run. --snapshot-in loads one after power-on instead of\n"
@@ -173,7 +184,11 @@ int run(int argc, char** argv) {
                  err->message.back() == '\n' ? "" : "\n");
     return err->exitCode;
   }
-  const cli::RunOptions& o = std::get<cli::RunOptions>(parsed);
+  cli::RunOptions& o = std::get<cli::RunOptions>(parsed);
+  if (const std::string problem = cli::prepareImports(o); !problem.empty()) {
+    std::fprintf(stderr, "%s\n", problem.c_str());
+    return 1;
+  }
 
   const std::vector<uint8_t> rom = readAll(o.rom);
   if (rom.size() != Machine::kBootRomSize) {
@@ -216,7 +231,7 @@ int run(int argc, char** argv) {
   std::vector<float> audio;
   cli::runSchedule(
       mm, o, [&trace, &mm](uint16_t pc, const Regs& r) { traceLine(trace, mm, pc, r); },
-      o.wav.empty() ? nullptr : &audio);
+      o.wav.empty() ? nullptr : &audio, &std::cout);
   if (!o.wav.empty()) {
     try {
       writeWav(o.wav, audio, o.rate);

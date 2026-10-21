@@ -287,6 +287,67 @@ waiting with the drive LED on.
 Re-run it after changes to the FDC (Write Track, Read Address) or to
 `DiskSession`.
 
+## WAV import: wave RAM halves and the pitch hint
+
+The import writes converted bytes straight into the 128 KB sample RAM
+(`Machine::writeWaveRam`, wave RAM only; the engine API is shared by the dialog and
+`mirage_cli --import`). Task 6 adds the dialog; the headless route is below.
+
+**Halves.** The dialog's *Lower* half is wave RAM `$00000-$0FFFF` and *Upper* is
+`$10000-$1FFFF`. Measured under OS 3.2 (SND-A01 booted, then `Load Lower` and `Load Upper`
+from the panel over a marker): **Load Lower rewrites exactly `$00000-$0FFFF` and Load
+Upper `$10000-$1FFFF`**, and the keys 36-71 play wave tables below `$10000` while keys
+72-96 play from `$10000` up (DOC size register bit 6 selects the bank). So the lower
+keyboard half is the lower wave RAM half, with the factory split. SND-A01's boot loads
+both halves (sectors 26-91 and 91-155), so neither half is empty after boot; the
+import overwrites what it covers.
+
+**CLI.** `mirage_cli run --disk D --import "FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper][,page=P][,normalize=0|1]"`
+(repeatable) converts FILE and writes it at T seconds of emulated time. The file name cannot
+contain a comma. Defaults: rate 29412 Hz (10101-33333 allowed), start 0, end the end of the file,
+lower half, page 0 (a 256-byte page, 0-255, decimal), normalize 1. It prints
+`import: FILE N bytes at $XXXXX, last page P[, truncated]`, where P is decimal; the OS
+shows page numbers in hexadecimal (a wavesample end of 40 decimal is `28`). If the drive
+motor is on at T (the OS is loading) nothing is written and it prints
+`import: FILE refused, the drive is busy`; the run goes on. A file that cannot be read,
+or settings the import refuses, print the message and exit 1 before the run starts.
+SND-A01 is busy until about 14.6 s, so import at 15 s or later:
+
+```
+mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
+```
+
+**Pitch hint** (Task 6 shows it as "plays at original pitch around C3"):
+
+    key ~= k0 + 12 * log2(rate / r0),   k0 = 47.3,   r0 = 29412 Hz
+
+`wav_import.h` has `kPitchHintKey` (k0), `kPitchHintRate` (r0) and
+`originalPitchKey(rate)`, the rounded MIDI note number (C4 = 60, so 47 = B2, 48 = C3).
+Rates outside the keyboard (keys 36-96, C2-C7) give a key off its ends; at the limits
+10101 Hz gives 29 (F1) and 33333 Hz gives 49 (C#3).
+
+*How it was measured* (`acceptance 3: an imported sine plays at a pitch set by the key`,
+OS 3.2, SND-A01 as booted, velocity 100, wheels at rest): a 2 s 440 Hz sine is imported at
+rate r into the lower half, page 0. For each of keys 41-56 (one wavesample, from page
+`$48` on, tuned a semitone per key) the note is played and its fundamental `f` measured
+from the zero crossings of the output between 31 ms and 125 ms. The sine plays at its
+original 440 Hz when `f = 440`, so each key says the original-pitch key is
+`key - 12 log2(f / 440)`; the mean over the 16 keys is k0, and the keys agree to 0.07
+semitone. At r = 29412 Hz this gives **47.33** (kept as 47.3); at r = 22050 Hz it gives
+42.34, against 42.31 from the formula. Playback is at the fixed DOC scan rate
+(8 MHz / (8 x 34) = 29,411.76 Hz), so one byte per scan plays a rate-29412 sample at
+its recorded speed, and the output frequency is `440 * FC / 511` (FC is the oscillator
+frequency register).
+
+*What the number depends on.* It is that one wavesample's tuning. SND-A01's nine
+wavesamples are each tuned so that the sample plays at its recorded speed (FC about
+`$1FF`) at their own root key: about 36 (keys 36-37), 38.5 (38-40), 47.3 (41-56), 57
+(57), 58.9-60 (58-60), 62 (61-63), 68 (64-71), 74 (72-76), 79 (77-81) and 93 (82-96).
+The musician's manual says a single-wavesample sound set up by the OS plays at key #17
+(MIDI 52, E3) on the lower half and key #46 (MIDI 81, A5) on the upper half, so "around
+B2/E3" is the lower-half range to expect; relative tuning (parameters 67, 68) moves it.
+The hint is a starting point, not a promise for every sound.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot
@@ -303,4 +364,4 @@ Re-run it after changes to the FDC (Write Track, Read Address) or to
   Plan 3 adds a paced feeder.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*`.
-- No audio input and no WAV import yet (Plan 3).
+- No audio input. WAV import has the engine call and `mirage_cli --import`; the dialog is Plan 3 Task 6.

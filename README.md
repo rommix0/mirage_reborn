@@ -33,6 +33,18 @@ example's note at 16-19 s peaks near 0.28; the file's overall peak of 0.29 is
 the boot calibration tones). Boot timing is in `docs/hardware/boot-rom.md`
 sections 13.5 and 13.6.
 
+## Importing a WAV into wave RAM
+
+```
+mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412,half=lower,page=0" --note 48:100@16:2 --seconds 19 --wav out.wav
+```
+
+`--import "FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper][,page=P][,normalize=0|1]"`
+converts the file and writes it into wave RAM at T seconds of emulated time. The drive must be idle (SND-A01 loads
+until about 14.6 s); the OS plays the imported bytes through whatever wavesample start,
+end and tuning its sound already has. See `docs/app.md` ("WAV import") for the halves
+and the pitch hint.
+
 ## The standalone app (`app/`)
 
 A JUCE 8 app (replica front panel, menus, audio and MIDI devices, disk open and

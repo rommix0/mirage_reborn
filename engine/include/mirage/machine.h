@@ -51,6 +51,11 @@ class Machine : private Bus {
   uint64_t cycles() const { return cycles_; }
   uint8_t peek(uint16_t addr);  // CPU view, no I/O side effects (I/O reads $FF)
   uint8_t sampleRam(uint32_t addr) const { return sample_[addr & (kSampleRamSize - 1)]; }
+  // WAV import (spec 6.7): copies bytes into the 128 KB sample RAM at `address`
+  // and touches nothing else (not the OS's RAM, not the DOC). Throws
+  // std::out_of_range if address + size > kSampleRamSize. Never allocates. Call
+  // it on the thread that runs the machine, between runCycles/render calls.
+  void writeWaveRam(uint32_t address, std::span<const uint8_t> bytes);
   Cpu6809& cpu() { return cpu_; }
   // Debug trace: when set, called before each instruction (and before each
   // interrupt entry, with the interrupted PC) with the PC about to execute and

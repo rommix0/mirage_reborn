@@ -490,3 +490,17 @@ TEST_CASE("import convert: resampling keeps pitch and removes what cannot be rep
     CHECK(crossings <= 401);
   }
 }
+
+TEST_CASE("import pitch hint: the key that plays an import at its original pitch") {
+  // 29,412 Hz is the measured reference (docs/app.md): MIDI 47, B2 with C4 = 60.
+  CHECK(originalPitchKey(kPitchHintRate) == 47);
+  CHECK(kPitchHintRate == kDefaultImportRate);
+  // An octave in rate is an octave of keys.
+  CHECK(originalPitchKey(2 * kPitchHintRate) == 59);
+  CHECK(originalPitchKey(kPitchHintRate / 2) == 35);
+  // The Mirage's own rate range (rounded to the nearest key).
+  CHECK(originalPitchKey(kMaxImportRate) == 49);  // 47.3 + 2.14
+  CHECK(originalPitchKey(kMinImportRate) == 29);  // 47.3 - 18.5
+  // 22,050 Hz: 47.3 - 4.99 = 42.3.
+  CHECK(originalPitchKey(22050.0) == 42);
+}

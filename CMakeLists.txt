@@ -60,6 +60,10 @@ mirage_cli_test(cli_run_bad_midi_hex 2 "run|--midi-hex|ZZ@1"
 mirage_cli_test(cli_run_bad_rate 2 "run|--rate|100" "-DERR=^bad value for --rate: 100/$")
 mirage_cli_test(cli_run_snapshot_in_with_disk 2 "run|--disk|d.img|--snapshot-in|x.snap"
                 "-DERR=^--disk cannot be combined with --snapshot-in: the snapshot holds its own disk/$")
+mirage_cli_test(cli_run_import_missing_file 1 "run|--import|no-such-file.wav@1"
+                "-DERR=^no-such-file.wav: The WAV file could not be opened./$")
+mirage_cli_test(cli_run_import_bad_field 2 "run|--import|a.wav@1,half=middle"
+                "-DERR=^bad value for --import: a.wav@1,half=middle/$")
 mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
                 "-DERR=^no-such-rom.bin: cannot read a 4096-byte boot ROM/$")
 # Real runs (skipped without the user's ROM / disk).
@@ -109,3 +113,10 @@ add_test(NAME cli_run_save_disk
                  "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_save_disk.cmake)
 set_tests_properties(cli_run_save_disk PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+# --import: a WAV made by a first run goes into wave RAM at T (tests/cli_import.cmake).
+add_test(NAME cli_run_import
+         COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:mirage_cli> -DDISK=${MIRAGE_TEST_SND_A01}
+                 -DDIR=${CMAKE_CURRENT_BINARY_DIR}/import_e2e
+                 "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_import.cmake)
+set_tests_properties(cli_run_import PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")

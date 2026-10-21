@@ -178,6 +178,12 @@ void Machine::render(float* out, size_t frames, double hostRate) {
   std::fill(out + n, out + frames, lastOut_);
 }
 
+void Machine::writeWaveRam(uint32_t address, std::span<const uint8_t> bytes) {
+  if (address > kSampleRamSize || bytes.size() > kSampleRamSize - address)
+    throw std::out_of_range("wave RAM write past the end of sample RAM");
+  std::copy(bytes.begin(), bytes.end(), sample_.begin() + address);
+}
+
 uint8_t Machine::peek(uint16_t addr) {
   if (addr >= kIoBase && addr < kRomBase) return 0xFF;
   return read(addr);

@@ -44,6 +44,15 @@ inline constexpr double kMinImportRate = 10101.0;
 inline constexpr double kMaxImportRate = 33333.0;
 inline constexpr double kDefaultImportRate = 29412.0;
 
+// The pitch hint: under OS 3.2 with SND-A01 as booted, a sine imported at
+// kPitchHintRate Hz plays at its original pitch around MIDI key kPitchHintKey
+// (C4 = 60; measured in tests/test_acceptance.cpp, method and result in
+// docs/app.md). Another rate r moves it 12 log2(r / kPitchHintRate) semitones.
+inline constexpr double kPitchHintKey = 47.3, kPitchHintRate = 29412.0;
+
+// The MIDI note number nearest to kPitchHintKey + 12 log2(rate / kPitchHintRate).
+int originalPitchKey(double rate);
+
 struct ImportSettings {
   double rate = kDefaultImportRate;  // Hz the converted bytes are meant to play at
   double startSeconds = 0;           // into the file

@@ -1,9 +1,12 @@
 #include "run_options.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <optional>
+#include <ostream>
 #include <string_view>
 #include <utility>
 
@@ -66,6 +69,58 @@ RunArgsError bad(std::string_view opt, std::string_view v) {
   return {2, "bad value for " + std::string(opt) + ": " + std::string(v)};
 }
 
+// "FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper][,page=P][,normalize=0|1]".
+// The file name cannot contain a comma.
+std::optional<RunEvent> parseImport(std::string_view v) {
+  RunEvent e;
+  e.kind = RunEvent::Kind::Import;
+  const size_t comma = v.find(',');
+  std::string_view head = v.substr(0, comma), rest;
+  if (comma != std::string_view::npos) rest = v.substr(comma + 1);
+  std::string_view file, when;
+  if (!splitLast(head, '@', file, when) || file.empty()) return std::nullopt;
+  const auto t = parseSeconds(when);
+  if (!t) return std::nullopt;
+  e.file = file;
+  e.cycle = toCycles(*t);
+  while (comma != std::string_view::npos) {
+    const size_t next = rest.find(',');
+    const std::string_view field = rest.substr(0, next);
+    const size_t eq = field.find('=');
+    if (eq == std::string_view::npos) return std::nullopt;
+    const std::string_view key = field.substr(0, eq), val = field.substr(eq + 1);
+    if (key == "rate") {
+      const auto r = parseSeconds(val);
+      if (!r) return std::nullopt;
+      e.import.rate = *r;
+    } else if (key == "start") {
+      const auto s = parseSeconds(val);
+      if (!s) return std::nullopt;
+      e.import.startSeconds = *s;
+    } else if (key == "end") {
+      const auto s = parseSeconds(val);
+      if (!s) return std::nullopt;
+      e.import.endSeconds = *s;
+    } else if (key == "half") {
+      if (val == "lower") e.import.half = WaveHalf::Lower;
+      else if (val == "upper") e.import.half = WaveHalf::Upper;
+      else return std::nullopt;
+    } else if (key == "page") {
+      const auto p = parseUint(val, 255, 10);
+      if (!p) return std::nullopt;
+      e.import.startPage = int(*p);
+    } else if (key == "normalize") {
+      if (val != "0" && val != "1") return std::nullopt;
+      e.import.normalize = val == "1";
+    } else {
+      return std::nullopt;
+    }
+    if (next == std::string_view::npos) break;
+    rest = rest.substr(next + 1);
+  }
+  return e;
+}
+
 struct Hold {
   uint64_t from, to;
 };
@@ -74,7 +129,8 @@ int rank(RunEvent::Kind k) {
   switch (k) {
     case RunEvent::Kind::TraceOn: return 0;
     case RunEvent::Kind::KeyDown:
-    case RunEvent::Kind::KeyUp: return 1;
+    case RunEvent::Kind::KeyUp:
+    case RunEvent::Kind::Import: return 1;
     case RunEvent::Kind::Midi: return 2;
   }
   return 3;
@@ -105,7 +161,7 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   o.rom = defaultRom;
   double seconds = 10, traceFrom = 0;
   std::map<PanelKey, std::vector<Hold>> holds;
-  std::vector<RunEvent> midi;
+  std::vector<RunEvent> midi, imports;
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view opt = args[i];
@@ -155,6 +211,10 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
       const auto at = parseSeconds(t);
       if (bytes.empty() || !at) return bad(opt, v);
       midi.push_back({toCycles(*at), RunEvent::Kind::Midi, {}, std::move(bytes)});
+    } else if (opt == "--import") {
+      auto e = parseImport(v);
+      if (!e) return bad(opt, v);
+      imports.push_back(std::move(*e));
     } else if (opt == "--wav") {
       if (v.empty()) return bad(opt, v);
       o.wav = v;
@@ -182,6 +242,8 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   o.endCycle = toCycles(seconds);
   if (!o.trace.empty()) o.events.push_back({toCycles(traceFrom), RunEvent::Kind::TraceOn, {}, {}});
   addKeyEvents(holds, o.events);
+  o.events.insert(o.events.end(), std::make_move_iterator(imports.begin()),
+                  std::make_move_iterator(imports.end()));
   o.events.insert(o.events.end(), midi.begin(), midi.end());
   // Stable: MIDI events keep command-line order at equal times, and a key's
   // KeyDown stays before its KeyUp when a hold has zero length.
@@ -192,9 +254,24 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   return o;
 }
 
+std::string prepareImports(RunOptions& o) {
+  for (RunEvent& e : o.events) {
+    if (e.kind != RunEvent::Kind::Import) continue;
+    try {
+      const WavAudio audio = readWavFile(e.file);
+      e.plan = planImport(audio, e.import);
+      if (!e.plan.problem.empty()) return e.file + ": " + e.plan.problem;
+      e.wave = convertForWaveRam(audio, e.import);
+    } catch (const WavError& err) {
+      return e.file + ": " + err.what();
+    }
+  }
+  return {};
+}
+
 void runSchedule(Machine& m, const RunOptions& o,
                  const std::function<void(uint16_t pc, const Regs&)>& trace,
-                 std::vector<float>* audio) {
+                 std::vector<float>* audio, std::ostream* log) {
   // `now` counts requested cycles: runCycles credits its overshoot against the
   // next request, so the slice must not be re-derived from cycles().
   uint64_t now = 0;
@@ -225,6 +302,20 @@ void runSchedule(Machine& m, const RunOptions& o,
       case RunEvent::Kind::KeyDown: m.setKey(e.key, true); break;
       case RunEvent::Kind::KeyUp: m.setKey(e.key, false); break;
       case RunEvent::Kind::Midi: m.queueMidi(e.midi); break;
+      case RunEvent::Kind::Import:
+        if (m.driveActive()) {
+          if (log) *log << "import: " << e.file << " refused, the drive is busy\n";
+          break;
+        }
+        m.writeWaveRam(e.plan.address, e.wave);
+        if (log) {
+          char at[16];
+          std::snprintf(at, sizeof at, "$%05X", unsigned(e.plan.address));
+          *log << "import: " << e.file << ' ' << e.plan.bytes << " bytes at " << at
+               << ", last page " << e.plan.lastPage << (e.plan.truncated ? ", truncated" : "")
+               << '\n';
+        }
+        break;
     }
   }
   advanceTo(o.endCycle);
