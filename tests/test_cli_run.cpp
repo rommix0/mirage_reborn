@@ -180,6 +180,16 @@ TEST_CASE("cli run --snapshot-in and --snapshot-out") {
   }
 }
 
+TEST_CASE("cli run --save-disk") {
+  CHECK(parseOk({}).saveDisk.empty());
+  const auto o = parseOk({"--disk", "d.img", "--save-disk", "out.img"});
+  CHECK(o.disk == "d.img");
+  CHECK(o.saveDisk == "out.img");
+  const auto e = parseFails({"--save-disk", ""});
+  CHECK(e.exitCode == 2);
+  CHECK(e.message == "bad value for --save-disk: ");
+}
+
 TEST_CASE("cli run --wav and --rate") {
   SECTION("defaults: no WAV, 48 kHz") {
     const auto o = parseOk({});

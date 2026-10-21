@@ -98,3 +98,14 @@ add_test(NAME cli_run_snapshot_round_trip
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_snapshot_roundtrip.cmake)
 set_tests_properties(cli_run_snapshot_round_trip PROPERTIES
                      SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+# --save-disk: an unwritable path exits 1 after the run; a real run writes a 450,560-byte image
+# (tests/cli_save_disk.cmake).
+mirage_cli_test(cli_run_save_disk_unwritable 1
+                "run|--disk|${MIRAGE_TEST_SND_A01}|--seconds|0.1|--save-disk|${CMAKE_CURRENT_BINARY_DIR}/no_such_dir/x.img"
+                "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}" "-DERR=^cannot write .*x.img/$")
+add_test(NAME cli_run_save_disk
+         COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:mirage_cli> -DDISK=${MIRAGE_TEST_SND_A01}
+                 -DDIR=${CMAKE_CURRENT_BINARY_DIR}/save_disk_e2e
+                 "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_save_disk.cmake)
+set_tests_properties(cli_run_save_disk PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")

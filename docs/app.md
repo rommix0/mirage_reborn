@@ -205,6 +205,38 @@ lower sound finishes loading at about 12.6 s and the display settles by about
 
 Re-run it after changes to the audio path or the app.
 
+## Acceptance-2 checklist (edit, save in the OS, Save As, reopen)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+panel keys headlessly (the test `acceptance 2: an edited parameter survives OS
+save, Save As and reopen`) and passes. The display strings below are what that
+run shows; the keys are from the OS 3.2 manual (*Selecting and changing a
+parameter*, *Saving a sound on a formatted diskette*), and each key is clicked on
+the panel (or typed with its panel keyboard shortcut).
+
+1. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img` and wait for the
+   display to settle on "2." "1" (about 15 s).
+2. Show the value of parameter 36 (Filter Fc) of the lower sound: **Param**, **3**,
+   **6** (the display shows "3." "6"), **Value**. The display shows "2" "8." (value
+   28; the right-hand dot means a value is shown).
+3. Press **Up** three times. The display shows "3" "1." (value 31).
+4. Save the lower sound to place 1 on the disk with the OS: **Param**, **1**, **1**
+   (display "S" "L", save lower), **1** (display "S" "1"), **Enter**. The display
+   goes blank and the drive LED lights for a few seconds; when the LED goes out
+   the display shows "1." "1" (parameter 11). The disk now has unsaved changes in
+   the app (the title and status strip show "(modified)"): the OS wrote to the
+   emulated floppy, not to your file.
+5. *File → Save Disk Image As...* and give it a new name, for example
+   `SND-A01-edited.img`. (The original `SND-A01.img` is untouched.)
+6. *File → Open Disk Image...* the new file. The OS boots from it as in
+   acceptance 1 and settles on "2." "1".
+7. Press **Param**, **3**, **6**, **Value**. The display shows "3" "1." (value 31):
+   the edit came back from the file. Opening `SND-A01.img` again and repeating
+   this step shows "2" "8.".
+
+Re-run it after changes to the disk path (FDC write, `DiskSession`) or the file
+dialogs.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot

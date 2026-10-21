@@ -165,6 +165,9 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
     } else if (opt == "--snapshot-out") {
       if (v.empty()) return bad(opt, v);
       o.snapshotOut = v;
+    } else if (opt == "--save-disk") {
+      if (v.empty()) return bad(opt, v);
+      o.saveDisk = v;
     } else if (opt == "--snapshot-in") {
       if (v.empty()) return bad(opt, v);
       o.snapshotIn = v;

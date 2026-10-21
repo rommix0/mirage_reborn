@@ -35,6 +35,9 @@ struct RunOptions {
   // to the loaded state. --snapshot-out: written with Machine::saveState() at
   // the end of the run. Empty: not used.
   std::string snapshotIn, snapshotOut;
+  // --save-disk: the inserted disk is written here (DiskImage::saveFile) at the
+  // end of the run. Empty: not used.
+  std::string saveDisk;
   uint64_t endCycle = 0;
   // Sorted by cycle (ties: trace, keys, then MIDI in command-line order), none
   // after endCycle. Holds of the same key that overlap or touch are merged into

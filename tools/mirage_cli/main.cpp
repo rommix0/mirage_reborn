@@ -44,7 +44,7 @@ int usage() {
       "                 [--key NAME@T[:HOLD]]... [--note N:VEL@T:DUR]...\n"
       "                 [--midi-hex \"90 3C 64\"@T]...\n"
       "                 [--wav out.wav --rate 48000] [--trace trace.txt [--trace-from T]]\n"
-      "                 [--snapshot-out f] [--snapshot-in f]\n"
+      "                 [--snapshot-out f] [--snapshot-in f] [--save-disk f]\n"
       "      Powers on and runs the machine headless for S emulated seconds\n"
       "      (default 10); without --disk the drive is empty. --rom defaults to\n"
       "      <asset root>/Ensoniq Mirage EPROM Firmware/mirage.bin. Times T are\n"
@@ -58,7 +58,11 @@ int usage() {
       "      --snapshot-out writes the whole machine state (Machine::saveState) at\n"
       "      the end of the run. --snapshot-in loads one after power-on instead of\n"
       "      booting: --seconds and the event times are then relative to the loaded\n"
-      "      state, and the snapshot carries its own disk (so no --disk).\n",
+      "      state, and the snapshot carries its own disk (so no --disk).\n"
+      "      --save-disk writes the disk in the drive (a 450,560-byte image) at the\n"
+      "      end of the run, e.g. after saving a sound from the panel; it fails\n"
+      "      (exit 1) if there is no disk, a track is unformatted or the file\n"
+      "      cannot be written.\n",
       stderr);
   return 2;
 }
@@ -228,6 +232,17 @@ int run(int argc, char** argv) {
     const double rms = audio.empty() ? 0.0 : std::sqrt(sumSq / double(audio.size()));
     std::printf("wav: %s %zu samples at %d Hz, peak %.4f, rms %.4f\n", o.wav.c_str(),
                 audio.size(), o.rate, peak, rms);
+  }
+
+  if (!o.saveDisk.empty()) {
+    try {
+      if (!m->disk()) throw DiskImageError("no disk in the drive");
+      m->disk()->saveFile(o.saveDisk);
+    } catch (const std::exception&) {
+      std::fprintf(stderr, "cannot write %s\n", o.saveDisk.c_str());
+      return 1;
+    }
+    std::printf("disk: %s %d bytes\n", o.saveDisk.c_str(), DiskImage::kImageBytes);
   }
 
   if (!o.snapshotOut.empty()) {
