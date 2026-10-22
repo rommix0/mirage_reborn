@@ -2,7 +2,7 @@
 
 `Mirage.exe` is a JUCE 8 window around the same engine the CLI uses: a replica
 of the Mirage front panel, a disk drive you load `.img` files into, MIDI in and
-out, and an audio output. The machine is emulated at realistic speed, so a
+out, an audio output and an audio input you can sample from. The machine is emulated at realistic speed, so a
 disk load takes as long as it did on the hardware (no turbo, owner decision of
 2026-10-18).
 
@@ -63,6 +63,8 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   after the emulated output (a linear ramp across each block, so no zipper
   noise) and is saved in the settings. It does not change anything inside the
   machine.
+- **Input slider and meter** (right end of the status strip, not on the panel):
+  see *Audio input and sampling* below.
 - **Title:** `Mirage — SND-A01.img`, `... (modified)` when the disk has unsaved
   changes, `Mirage — No disk` with an empty drive.
 - **Status strip:** left, the disk's file name (`(modified)` when it has unsaved
@@ -71,7 +73,8 @@ It resizes and letterboxes to keep the panel's aspect ratio.
   when something is wrong: `illegal ops: N` (the CPU met an undefined opcode)
   and `MIDI dropped: N` (MIDI bytes lost, see below). The strip refreshes at
   10 Hz and reads the audio thread's published status, so "(modified)" can lag
-  a block or two behind the first write.
+  a block or two behind the first write. The three texts share the strip left
+  of the Input controls; a long one pushes the middle text aside.
 
 ## Menus and shortcuts
 
@@ -88,7 +91,7 @@ It resizes and letterboxes to keep the panel's aspect ratio.
 | MIDI | MIDI input: None / one device (radio list) | |
 | MIDI | MIDI output: None / one device (radio list) | |
 | MIDI | Panic | |
-| Audio | Audio Settings... (output device, rate, buffer size) | |
+| Audio | Audio Settings... (input and output device, active channels, rate, buffer size) | |
 
 - **Open** accepts any file of exactly 450,560 bytes whatever its extension
   (a raw image, including the 450,560-byte `.edm` files) and any Giebler `.edm`
@@ -201,13 +204,99 @@ digits, then **Value** and **Up**/**Down**. The imported
 sample is kept only once you save the sound with the OS (and then the disk
 image with *Save*); a reset loses it.
 
+## Audio input and sampling
+
+The audio input feeds the emulated Mirage's input jack, and the OS samples from
+it with its own routine, as on the hardware (design:
+`docs/specs/2026-10-22-audio-input-sampling-design.md`; the analog model and what
+the OS does: `docs/hardware/filters.md` §3.3). The app never records anything
+itself and writes nothing into wave RAM: it only feeds the jack. *Import WAV*
+stays as it is and is a separate way to get a sound in.
+
+- **Choosing the input:** *Audio → Audio Settings...* now lists an input device
+  and its channels next to the output ones. Tick the input channel your source
+  is plugged into. Channels are listed one by one and at most two inputs can be
+  active, because the Mirage samples **mono**: with two ticked the app feeds the
+  jack their average (so a source on only one of them arrives at half level;
+  tick only that one). No input channel ticked, no input device, or an input
+  that cannot be opened means nothing is plugged into the jack, and the strip's
+  meter says "no input". On Windows the input device is listed separately from
+  the output device (for the "Windows Audio" type); an audio interface's own
+  driver offers both on one device.
+- **First start:** with no saved audio settings the app opens the default input
+  as well as the default output, so a microphone is live at once. If the input
+  cannot be opened (device busy, permission refused) the app opens the output
+  alone and says so. On Windows a refused microphone permission (*Settings →
+  Privacy → Microphone*) can also show up as an input that delivers silence;
+  the jack then reads as a silent source, which changes nothing in the emulation.
+  If an input device is unplugged while the app runs, JUCE reopens the
+  default devices; the jack is unplugged for as long as no input channel is
+  active.
+- **Input slider** (status strip, 0 to 4, default 1, double-click returns to 1,
+  saved in the settings): a gain applied to the input *before* the jack. It
+  stands in for the mixer or preamp knob the Advanced Sampler's Guide recommends
+  (the Mirage has no input level control of its own). The slider is not linear:
+  1 sits in the middle.
+- **Meter** (next to the slider): the peak level of the input *after* the Input
+  gain, on a dB scale from -60 dB (empty) to 0 dB (full), green, yellow above
+  -6 dB, red at 1.0 or more. It is refreshed 10 times a second from the last
+  audio block's peak, with a short decay, so it is a guide to the level, not an
+  exact peak meter. **1.0 on the meter is the full scale of the line path of the
+  emulated jack.** It is the level the Mirage's input sees, and it is the same
+  with the Mirage on mic or line.
+- **Levels** (what to aim for; the numbers come from the engine's model, see
+  `docs/hardware/filters.md` §3.3):
+  - *Mic* (OS parameter 75 off, **the default**): the jack has about 11 times
+    (+21 dB) the gain of line, plus a compressor. A sine of about 0.08 on the
+    meter fills the sample without clipping; it clips from about 0.1 to 0.15. So
+    for a normal audio-interface signal in mic mode, **turn the Input slider
+    down** (about 0.1 to 0.2 for a line-level source) until the loud notes peak
+    around half to two-thirds of the meter (-26 to -20 dB).
+  - *Line* (parameter 75 on): no preamp gain and no compressor, and the
+    emulated input filter (parameter 74 at its default) passes only about 0.54 of
+    it. A source has to reach about **0.7 on the meter** to cross the OS's
+    default threshold (parameter 76 = 24); aim for 0.7 to 0.9 and keep it out of
+    the red.
+  - Too quiet and the OS never starts recording ("n" "S"); too loud and the
+    sample clips (the line path is a hard clip, as the guide warns).
+- **How the OS samples** (OS 3.2; MASOS is the same with parameter 93 at 0;
+  SoundProcess has no sampling):
+  1. **Sample Lower** (the black *Lower* key under SAMPLE; *Upper* is the
+     black key above it): "S" "L" blinks for about 2.5 s.
+  2. **Level detect:** both digits show the same single segment, which follows the
+     level: only the **decimal points** = no level; the **bottom bar** = quiet;
+     the **middle bar** = above the threshold (parameter 76), what you want on
+     the loud parts; the **top bar** = near clipping. (The segments can
+     flicker between two when the level sits between them.)
+  3. **Enter** starts the wait for a sound: the recording begins at the first
+     sample above the threshold. If nothing crosses it within about 1.8 s the
+     display blinks "n" "S", the OS gives up and wave RAM is untouched (the guide
+     says about 6 s; the OS's own loop is 1.8 s at the emulated clock).
+  4. **Recording** lasts about 2.2 s at the default sample time (parameter 73 =
+     34 us, 29.4 kHz) and fills the lower half (65,520 bytes; the last 16 are
+     zero). **The emulator's display is blank during the recording** (the real
+     machine shows the middle bar; here the OS writes the display once and the
+     panel model keeps a segment lit for only 35 ms after a write). Keep the
+     sound going for the whole 2.2 s.
+  5. The end shows a steady "S" "F" (segments `6D 71`), then you play and edit as
+     usual.
+  Parameter 74 (input filter), 75 (mic or line), 76 (threshold) and 77
+  (multisampling) are the OS's: set them on the panel with **Param**, the two
+  digits, **Value**, **Up**/**Down**. The input is not heard while you play (the
+  OS keeps the jack off the voices in normal play); it is connected to the filters
+  at mic gain while the OS boots, until its main loop starts, so keep the source
+  quiet during the boot or set the slider to 0.
+- **Not done in the app:** a WAV player never feeds the jack (WAV files stay an
+  import feature; the CLI's `--audio-in` exists for tests and reproducible
+  listening).
+
 ## Settings
 
 JUCE `ApplicationProperties` with application and folder name `MirageEmulator`,
 so the file is `%APPDATA%\MirageEmulator\MirageEmulator.settings` (XML). It holds
-the ROM path, the last disk folder, the audio device state, the saved MIDI
-input and output, the volume and the window position and size. Delete it to
-reset the app.
+the ROM path, the last disk folder, the audio device state (devices, active input
+and output channels, rate, buffer), the saved MIDI input and output, the volume,
+the input gain and the window position and size. Delete it to reset the app.
 
 ## Threading model
 
@@ -217,8 +306,8 @@ JUCE-free:
 
 | Thread | Does | Talks to the audio thread through |
 |---|---|---|
-| Audio | `RealtimeHost::process()` per device block: drains the queues, runs the machine, publishes status | n/a |
-| UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`), WAV import | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved`; the wave queue: `postWaveWrite` |
+| Audio | `RealtimeHost::process()` per device block: averages the active input channels into one mono buffer, drains the queues, runs the machine with that input, publishes status | n/a |
+| UI (message) | Menus, panel clicks, disk open/save/eject (`DiskSession`), WAV import, the Input slider (`setInputGain`, an atomic) and meter (`status().inputPeak`) | the UI queue: `postKey`, `postInsert`, `postEject`, `postReset`, `postPanic`, `postCopyDisk`, `postMarkSaved`; the wave queue: `postWaveWrite` |
 | MIDI input (one device) | `MidiInFeeder::push` with a timestamp | the feeder, which calls `postMidi` (the only caller) |
 | "MIDI out" | `popMidiOut`, parses the stream, sends to the chosen output device; `MidiInFeeder::pump()` once per loop pass, at least every 16 ms (never on the audio thread) | the MIDI-out queue; the MIDI queue, through the feeder |
 
@@ -240,6 +329,15 @@ Queues (all lock-free single-producer, single-consumer):
   Wave writes (WAV import) travel the same way: a `unique_ptr<WaveWrite>` that
   comes back `Written` or `RefusedDriveBusy` through `takeReturnedWave`, polled
   at 10 Hz with the disk returns. An allocation-counting test enforces this.
+- **Audio input** arrives in the same device callback as the output, so it runs
+  on the audio thread with the rest of `process()`; there is no input thread
+  and no queue. The mono buffer is reserved in `audioDeviceAboutToStart`
+  (the device's block size, at least 64) and the callback never allocates: a block
+  larger than announced is mixed and rendered in pieces of that size, like the
+  output. JUCE passes a null pointer for an input channel that is not active
+  (skipped); with none active, `process` gets `nullptr` and the jack is unplugged.
+  The host copies the input times the gain into its own buffer, so the engine
+  never sees the device's memory.
 - **Wave writes** are applied at the start of a block, after the UI queue and
   before rendering, so the CPU and the DOC see the new bytes for the whole
   block. One that arrives while the drive is active (`driveActive()`, the motor
@@ -308,6 +406,12 @@ Queues (all lock-free single-producer, single-consumer):
 | Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
 | WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |
 | Saving `.edm` | *Save* writes the format the file was read in. *Save As* writes Giebler `.edm` for a `.edm` name and a raw image otherwise, and suggests `.edm` only for a disk held in Giebler format (a raw `.edm` is offered as `.img`, so accepting the suggestion never converts it). The Plan 2 `.edm` save refusal is gone. | Spec 6.6 "Saving an `.edm` writes back in `.edm` format"; a raw `.edm` stays raw with plain Save so other tools keep reading it. Cost if wrong: someone who wants a Giebler copy of a raw `.edm` types the `.edm` name; the format is in the name. |
+| Device input to mono | Average of the active input channels (JUCE null pointers skipped); the settings dialog lists channels one by one, at most two inputs and two outputs | The Mirage samples mono. A stereo pair would average a one-channel source with silence and halve it. Cost: the output channels are also listed singly (the app copies the output to every active channel). |
+| Input units | 1.0 at the jack (the meter's full scale) is the full scale of the emulated line path | Simple; the Input slider sets the real level. With the default OS settings the line path needs about 0.7 and the mic path clips from about 0.1: the slider's job. |
+| Host input gain | 0 to 4, default 1, the strip's Input slider (1 in the middle), saved in the settings, applied before the jack | Stands in for the mixer or preamp knob the guide recommends; the Mirage has none. Default 1 means a line-level interface signal clips the default (mic) path until the slider is lowered; the checklists say so. |
+| Mic gain | `Machine::kMicGain` = 11 (+21 dB), the schematic's resistor ratio (the plan said 10) | filters.md §3.3. A guess within a few dB of the real preamp; retune by ear. |
+| Input opened at the first start | The default input and output; if that fails, the output alone, with a message | A refused permission or a busy input must not cost the sound. Cost: a live microphone is plugged into the jack from the first start (the OS boots it at mic gain), until the user picks no input channel. |
+| Input meter | Post-gain peak of the last block at 10 Hz, dB scale from -60, short decay, "no input" when no channel is active | An aid, not a measurement; the OS's own level-detect display is the reference. |
 | Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
 
 ## Booting a disk in the checklists
@@ -610,6 +714,106 @@ Times are on the emulated clock.
 
 Re-run it after changes to `DiskImage` or `DiskSession`.
 
+## Acceptance-7 checklist (sample live from the audio input)
+
+**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+route headlessly against a synthetic 440 Hz sine on the jack (`acceptance 7: OS 3.2
+samples a sine from the input jack`): the sampled lower half holds the sine at
+the right pitch, it plays on the lower keyboard (an octave apart on keys 52
+and 64), and it survives an OS save and a reopen (`acceptance 7: a sampled sound
+survives an OS save and reopen`). The real input device, the Input slider and the meter can only be
+checked by you. You need a sound source plugged into an audio input of your
+computer: an audio interface with an instrument, a microphone or a line-level
+player is best. Times are on the emulated clock.
+
+1. *Audio → Audio Settings...* Choose your audio interface as the **input** and
+   the output you listen on (the same device if it does both). Under "Active
+   input channels" tick **only** the channel your source is plugged into. Close
+   the dialog. The strip's meter shows an empty bar (not "no input").
+2. Put the Input slider at its default, 1. Keep the source **silent** for the
+   next step (the input reaches the Mirage's filters at mic gain while it boots).
+3. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img`, then *Machine →
+   Reset*, and wait for the display to settle on "2." "1" with the drive LED
+   off (about 15 s).
+4. Play a sustained sound into the input (a held note or a steady tone, as loud
+   as you will play it). **The Input meter moves with it.** With the Mirage on
+   mic (parameter 75 off, the default), lower the Input slider until the loud
+   parts peak about half to two-thirds of the way along the meter (around
+   -26 to -20 dB). For an interface's line-level output that is a slider of
+   about 0.1 to 0.2. If the meter goes red, lower the slider more.
+5. Press **Sample Lower** (the black *Lower* key under SAMPLE). The display
+   blinks "S" "L" for about 2.5 s. Then both digits show one segment. Keep playing
+   and watch it: the decimal points only (no level), the bottom bar (quiet), the
+   **middle bar** (above the threshold: what you want), the top bar (near
+   clipping; fine for the odd peak, too loud if it stays). If you only ever get
+   the dots or the bottom bar, raise the Input slider; if the top bar stays,
+   lower it.
+6. Stop playing. Press **Enter**, then **start the sound** (or have it already
+   ringing). Recording begins at the first loud sample. If nothing is loud
+   enough within about 1.8 s the display blinks "n" "S" and gives up with
+   nothing changed: go back to step 5.
+7. **Keep the sound going for about 2.5 s.** The display is blank while it
+   records (about 2.2 s; the emulator does not show the real machine's lit middle
+   bar). Then the display settles on a steady "S" "F".
+8. Play the **lower keyboard** (MIDI 36-71): it plays what you sampled. Around E3
+   (MIDI 52) it plays at the pitch you sampled, an octave up (E4, MIDI 64) is twice
+   the pitch, and the semitones in between follow it. It is a raw 8-bit
+   sample at 29.4 kHz with no loop: expect some hiss and a short sound that ends.
+   The upper keyboard (72 and up) still plays the factory upper sound.
+9. Save the sound with the OS: **Param**, **1**, **1**, **1**, **Enter** (as in
+   acceptance 2). Wait for the drive LED to go out; the title shows "(modified)".
+10. *File → Save Disk Image As...* into a **scratch folder** you create for this
+    (for example `Mirage scratch` on your Desktop), not a library folder, as
+    `SND-A01-sampled.img`. (Never *Save*: that would write your sample into
+    `SND-A01.img`.)
+11. *File → Open Disk Image...* `SND-A01-sampled.img`, then *Machine → Reset*
+    (it clears wave RAM, so the sample is gone from RAM), wait for "2." "1". Press
+    **Load Lower**, **1**, **Enter** and wait for the drive LED to go out. Play
+    the lower keyboard: **it plays the same sound as in step 8**, now loaded from
+    the disk.
+
+If step 5 or 6 does not behave: *Audio → Audio Settings...* again and check the
+input channel (the meter says "no input" when none is active). Report what the
+display showed at each step.
+
+Re-run it after changes to the input path, the jack model or the app's audio
+device code.
+
+## Acceptance-8 checklist (line against mic)
+
+**Status: not yet run by the owner.** Headlessly (`acceptance 7: the mic input
+is hotter than the line input`) the same full-scale sine swings the sampled bytes
+more through the mic than through line and both come out at the right pitch;
+what it sounds like is for you to judge. Parameter 75 is the OS's **Line/Mic**
+switch: **off (0) is mic, the default**, on (1) is line. Use the same source
+and the same playing for all takes.
+
+1. Do steps 1-3 of acceptance 7 (input chosen, SND-A01 opened, Reset, wait for
+   "2." "1").
+2. **Line take.** Select line: **Param**, **7**, **5**, **Value**, then **Up**
+   (the display shows the value: 0 is mic, 1 is line). Put the Input slider so that the loud
+   parts of your sound reach about 0.7 to 0.9 on the meter (-3 dB, yellow, not
+   red). Sample Lower as in acceptance 7 steps 5-7. Play a few lower-keyboard
+   notes and listen: it is a clean sample at a moderate level, with its natural
+   dynamics.
+3. **Mic take, same settings.** Select mic: **Param**, **7**, **5**, **Value**,
+   **Down** (back to 0). Leave the Input slider where it is and play
+   the **same sound at the same loudness**. Sample Lower again (it overwrites the
+   lower half). Play the same notes. Expect it to be **much louder** (the mic
+   path has about 11 times the gain) and, because the source is far above mic
+   level, harshly clipped and squashed.
+4. **Mic take at the mic's own level.** Lower the Input slider to about a tenth
+   of what it was (the loud parts peaking about 0.08 to 0.1 on the meter) and
+   sample once more. Compared with the line take it is about as loud (the slider
+   took back the mic's extra gain), but not clipped, and its quiet parts sit
+   closer to its loud parts: it is **compressed** (the mic path has a
+   compressor).
+5. Optional: with the mic take still in memory, save it with the OS and *Save
+   As* into your scratch folder as in acceptance 7 steps 9-11.
+
+Say which take was louder, whether the mic take sounded compressed, and whether
+the level guidance in step 4 gave a clean sample.
+
 ## Known limitations
 
 - Acceptance has to be judged by ear by the owner; automated checks cannot
@@ -622,9 +826,18 @@ Re-run it after changes to `DiskImage` or `DiskSession`.
 - The status strip's "(modified)" can lag by a block or two.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*.edm;*`.
-- No audio input: *Import WAV* replaces sampling (spec 6.7). The OS's own
-  sampling path through filter 7 stays unmodelled and the input it reads is
-  silence.
+- **Sampling's analog input stage is a model.** The jack's scale, the mic
+  gain (11), the compressor curve and the polarity are model choices, not
+  measurements (`docs/hardware/filters.md` §3.3). Levels in the checklists come
+  from the model; retune by ear.
+- The MASOS external input-filter cartridge (parameter 93 above 0) is not
+  modelled. The input is mono (the average of the active channels).
+- The emulator's display is blank during the 2.2 s recording (see *Audio input
+  and sampling*); the real machine shows the middle bar.
+- The input meter's value is the last block's peak, 10 times a second. Audio
+  device selection, the Input slider, the meter and sampling from a real input
+  device are not exercised by automated tests (the engine, the host's input path
+  and the OS's sampling run headlessly against a synthetic jack signal).
 - WD1772 Read Track is not modelled (it completes with no data and no error);
   none of the images tested here needs it. Write Track does not time out waiting for a first
   byte (an unanswered start writes zeros), and only the Mirage's own track

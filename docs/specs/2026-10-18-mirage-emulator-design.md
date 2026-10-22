@@ -59,7 +59,8 @@ per-OS tweak.
    Mirage 8-bit samples, at a sample rate and between start and end points
    the user chooses, and writes it into wave RAM, where the OS plays and saves
    it like a sample it recorded itself. *(Owner decision; replaces recording
-   from audio input.)*
+   from audio input.)* Sampling from the computer's audio input through the OS's
+   own routine was added later: see `2026-10-22-audio-input-sampling-design.md`.
 5. **Any OS.** Disks with other OSes (SoundProcess, MASOS, OS 3.2, resmos32)
    boot and work.
 6. **Formatting and blank disks.** *File → New Blank Disk* inserts an
@@ -88,9 +89,9 @@ With a MIDI keyboard:
 - The VST3 plugin. It comes later as a second wrapper around the same engine.
 - macOS/Linux builds. The toolkit allows them later.
 - A circuit-exact model of the CEM3328 filters.
-- **Recording from the computer's audio input.** *(Owner decision.)* WAV
-  import replaces it. The OS's own sampling functions still run, but the
-  converter input reads as silence, as on a Mirage with nothing plugged in.
+- ~~Recording from the computer's audio input.~~ *Reversed by the owner,
+  2026-10-22:* the audio input feeds the emulated input jack and the OS samples
+  from it; see `2026-10-22-audio-input-sampling-design.md`. WAV import stays.
 
 **Never:**
 - **HFE support.** HFE files are low-level flux dumps. The owner has ruled
@@ -152,9 +153,10 @@ With a MIDI keyboard:
 - **Disk files:** chosen through standard open/save file dialogs. Loading
   and saving sounds otherwise behave exactly as the OS does them.
 - **Formats:** `.img` first; `.edm` after `.img` is confirmed; never `.hfe`.
-- **Samples:** loaded from WAV files, not recorded. The user chooses the
-  conversion sample rate and the start and end points, because a real Mirage
-  has limited sample memory. Recording from audio input is left out.
+- **Samples:** loaded from WAV files, or sampled by the OS from the computer's
+  audio input (`2026-10-22-audio-input-sampling-design.md`). For a WAV the user
+  chooses the conversion sample rate and the start and end points, because a
+  real Mirage has limited sample memory.
 - **Source location:** everything lives under `Ensoniq Mirage/emulator/`.
 - **Verification:** by ear. There's no real Mirage to compare against.
 
@@ -200,7 +202,8 @@ The facts below are to be confirmed from the boot ROM and MAME. Items marked
   sample rate = clock / (8 × (enabled oscillators + 2)). The OS sets the
   oscillator count, so the output rate is whatever the running OS chooses.
   Channel-address bits route each oscillator to a voice's filter. The ADC
-  register reads the wheels and the (silent) audio input. Early Mirages had
+  register reads the wheels and the audio input (silent with nothing plugged
+  in; see `2026-10-22-audio-input-sampling-design.md`). Early Mirages had
   an external AD7574 ADC instead; emulate the variant that matches this boot
   ROM.
 - **WD1772 floppy controller:** enough command coverage and timing for every

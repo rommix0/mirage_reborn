@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -27,6 +28,33 @@ juce::String fileName(const std::filesystem::path& p) { return text(p.filename()
 
 }  // namespace
 
+// ---- InputMeter ------------------------------------------------------------
+
+void InputMeter::update(float peak, bool hasInput) {
+  const float next = hasInput ? std::max(peak, shown_ * 0.7f) : 0.0f;
+  if (next == shown_ && hasInput == hasInput_) return;
+  shown_ = next;
+  hasInput_ = hasInput;
+  repaint();
+}
+
+void InputMeter::paint(juce::Graphics& g) {
+  auto r = getLocalBounds().toFloat().reduced(0.0f, 6.0f);
+  g.setColour(juce::Colour(0xff17171b));
+  g.fillRoundedRectangle(r, 2.0f);
+  if (!hasInput_) {
+    g.setColour(juce::Colour(0xff7c7c84));
+    g.setFont(juce::FontOptions(11.0f));
+    g.drawText("no input", getLocalBounds(), juce::Justification::centred);
+    return;
+  }
+  const float db = juce::Decibels::gainToDecibels(shown_, -60.0f);
+  const float fill = juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 60.0f);
+  g.setColour(shown_ >= 1.0f ? juce::Colour(0xffe04848)
+                             : db > -6.0f ? juce::Colour(0xffe0b040) : juce::Colour(0xff58c070));
+  g.fillRoundedRectangle(r.withWidth(r.getWidth() * fill), 2.0f);
+}
+
 // ---- MirageContent ---------------------------------------------------------
 
 MirageContent::MirageContent(mirage::RealtimeHost& host, AudioEngine& engine)
@@ -35,6 +63,21 @@ MirageContent::MirageContent(mirage::RealtimeHost& host, AudioEngine& engine)
   volume.setValue(engine_.volume(), juce::dontSendNotification);
   volume.onValueChange = [this] { engine_.setVolume(float(panel_->volumeSlider().getValue())); };
   addAndMakeVisible(*panel_);
+  // Input: 0 to 4, with 1 (the default) in the middle of the slider.
+  inputLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffc8c8c8));
+  inputLabel_.setFont(juce::FontOptions(14.0f));
+  inputLabel_.setJustificationType(juce::Justification::centredRight);
+  inputSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
+  inputSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 44, 20);
+  inputSlider_.setRange(0.0, 4.0, 0.01);
+  inputSlider_.setSkewFactorFromMidPoint(1.0);
+  inputSlider_.setNumDecimalPlacesToDisplay(2);
+  inputSlider_.setDoubleClickReturnValue(true, 1.0);
+  inputSlider_.setValue(engine_.inputGain(), juce::dontSendNotification);
+  inputSlider_.onValueChange = [this] { engine_.setInputGain(float(inputSlider_.getValue())); };
+  addAndMakeVisible(inputLabel_);
+  addAndMakeVisible(inputSlider_);
+  addAndMakeVisible(inputMeter_);
   const auto& geo = mirage::panelGeometry();
   setSize(juce::roundToInt(geo.width), juce::roundToInt(geo.height) + kStripHeight);
   text_ = buildText();
@@ -54,23 +97,47 @@ void MirageContent::showNotice(const juce::String& text) {
 
 void MirageContent::resized() {
   auto r = getLocalBounds();
-  r.removeFromBottom(kStripHeight);
+  auto strip = r.removeFromBottom(kStripHeight);
   panel_->setBounds(r);
+  // The Input controls sit at the right end of the strip: label, slider with its
+  // value box, meter.
+  auto controls = strip.removeFromRight(kInputControlsWidth).withTrimmedRight(8);
+  inputMeter_.setBounds(controls.removeFromRight(70));
+  controls.removeFromRight(4);
+  inputSlider_.setBounds(controls.removeFromRight(150));
+  inputLabel_.setBounds(controls);
+}
+
+juce::Rectangle<int> MirageContent::stripText() const {
+  return getLocalBounds()
+      .removeFromBottom(kStripHeight)
+      .withTrimmedRight(kInputControlsWidth)
+      .reduced(8, 0);
 }
 
 void MirageContent::paint(juce::Graphics& g) {
-  auto strip = getLocalBounds().removeFromBottom(kStripHeight);
   g.setColour(juce::Colour(0xff2a2a30));
-  g.fillRect(strip);
+  g.fillRect(getLocalBounds().removeFromBottom(kStripHeight));
   g.setColour(juce::Colour(0xffc8c8c8));
-  g.setFont(juce::FontOptions(14.0f));
-  auto inner = strip.reduced(8, 0);
+  const juce::Font font(juce::FontOptions(14.0f));
+  g.setFont(font);
+  const auto inner = stripText();
+  // The middle text is centred when it fits between the other two, else pushed
+  // aside (and cut with "..." if it still does not fit).
+  const int leftW = juce::GlyphArrangement::getStringWidthInt(font, text_.left);
+  const int rightW = juce::GlyphArrangement::getStringWidthInt(font, text_.right);
+  const int midW = juce::GlyphArrangement::getStringWidthInt(font, text_.middle);
+  const int lo = inner.getX() + leftW + 16, hi = inner.getRight() - rightW - 16;
+  const int x = juce::jlimit(lo, std::max(lo, hi - midW), inner.getCentreX() - midW / 2);
   g.drawText(text_.left, inner, juce::Justification::centredLeft);
-  g.drawText(text_.middle, inner, juce::Justification::centred);
+  g.drawText(text_.middle,
+             juce::Rectangle<int>(x, inner.getY(), std::min(midW, std::max(0, hi - x)), inner.getHeight()),
+             juce::Justification::centredLeft);
   g.drawText(text_.right, inner, juce::Justification::centredRight);
 }
 
 void MirageContent::timerCallback() {
+  inputMeter_.update(host_.status().inputPeak, engine_.hasInput());
   auto t = buildText();
   if (t == text_) return;
   text_ = std::move(t);
@@ -311,7 +378,7 @@ void MainWindow::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo
       info.setInfo("Panic", "All Notes Off on every channel", "MIDI", 0);
       break;
     case cmdAudioSettings:
-      info.setInfo("Audio Settings...", "Choose the audio output", "Audio", 0);
+      info.setInfo("Audio Settings...", "Choose the audio input and output", "Audio", 0);
       break;
     default:
       break;
@@ -358,10 +425,12 @@ bool MainWindow::perform(const InvocationInfo& info) {
 
 void MainWindow::showAudioSettings() {
   if (audioSettings_ != nullptr) return audioSettings_->toFront(true);
-  // Outputs only (stereo pairs), no MIDI section: MIDI has its own menu.
-  auto* selector = new juce::AudioDeviceSelectorComponent(engine_.devices(), 0, 0, 0, 2, false,
-                                                          false, true, false);
-  selector->setSize(520, 420);
+  // Up to two input and two output channels, listed one by one (the Mirage
+  // samples mono: pick the single input your source is plugged into), no MIDI
+  // section: MIDI has its own menu.
+  auto* selector = new juce::AudioDeviceSelectorComponent(engine_.devices(), 0, 2, 0, 2, false,
+                                                          false, false, false);
+  selector->setSize(520, 520);
   juce::DialogWindow::LaunchOptions o;
   o.dialogTitle = "Audio Settings";
   o.content.setOwned(selector);

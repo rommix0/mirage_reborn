@@ -14,9 +14,25 @@ AudioEngine::~AudioEngine() {
 }
 
 juce::String AudioEngine::start(const juce::XmlElement* savedState) {
-  auto error = deviceManager_.initialise(0, 2, savedState, true);
+  auto error = deviceManager_.initialise(2, 2, savedState, true);
+  if (error.isNotEmpty()) {
+    // Perhaps only the input failed (permission refused, device busy): keep the sound.
+    if (deviceManager_.initialise(0, 2, nullptr, true).isEmpty())
+      error = "The audio input could not be opened (" + error + "). Running with the output only; " +
+              "choose an input in Audio > Audio Settings.";
+  }
   deviceManager_.addAudioCallback(this);
   return error;
+}
+
+void AudioEngine::setInputGain(float gain) {
+  inputGain_.store(gain, std::memory_order_relaxed);
+  host_.setInputGain(gain);
+}
+
+bool AudioEngine::hasInput() const {
+  auto* dev = deviceManager_.getCurrentAudioDevice();
+  return dev != nullptr && !dev->getActiveInputChannels().isZero();
 }
 
 // Device (re)start; the device manager calls this before the first callback and
@@ -24,6 +40,7 @@ juce::String AudioEngine::start(const juce::XmlElement* savedState) {
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
   rate_ = device->getCurrentSampleRate();
   maxBlock_ = (size_t)std::max(device->getCurrentBufferSizeSamples(), 64);
+  inMono_.assign(maxBlock_, 0.0f);  // the only allocation; the callback never resizes it
   host_.prepare(maxBlock_, rate_);
   lastGain_ = volume_.load(std::memory_order_relaxed);
   ready_.store(true, std::memory_order_release);
@@ -31,7 +48,7 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 
 void AudioEngine::audioDeviceStopped() { ready_.store(false, std::memory_order_release); }
 
-void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*, int, float* const* out,
+void AudioEngine::audioDeviceIOCallbackWithContext(const float* const* in, int numIn, float* const* out,
                                                    int numOut, int numSamples,
                                                    const juce::AudioIODeviceCallbackContext&) {
   if (numOut <= 0 || numSamples <= 0) return;
@@ -43,10 +60,26 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*, int, flo
     return;
   }
   const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+  // Inactive input channels come as null pointers. No active channel: nothing is plugged in.
+  int active = 0;
+  if (in != nullptr)
+    for (int c = 0; c < numIn; ++c)
+      if (in[c] != nullptr) ++active;
+  const float norm = active > 0 ? 1.0f / (float)active : 0.0f;
   // A device may deliver a block larger than it announced; render it in pieces.
   for (int done = 0; done < numSamples;) {
     const int n = (int)std::min<size_t>((size_t)(numSamples - done), maxBlock_);
-    host_.process(ch0 + done, (size_t)n, rate_, now);
+    const float* mono = nullptr;
+    if (active > 0) {  // the Mirage samples mono: the average of the active channels
+      float* m = inMono_.data();
+      std::fill_n(m, n, 0.0f);
+      for (int c = 0; c < numIn; ++c)
+        if (in[c] != nullptr)
+          for (int i = 0; i < n; ++i) m[i] += in[c][done + i];
+      for (int i = 0; i < n; ++i) m[i] *= norm;
+      mono = m;
+    }
+    host_.process(mono, ch0 + done, (size_t)n, rate_, now);
     done += n;
   }
   // Volume: a linear ramp over the block, so a moving slider does not zipper.

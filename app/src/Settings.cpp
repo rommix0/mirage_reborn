@@ -36,6 +36,11 @@ float Settings::volume() const {
 }
 void Settings::setVolume(float g) { file().setValue("volume", (double)g); }
 
+float Settings::inputGain() const {
+  return juce::jlimit(0.0f, 4.0f, (float)file().getDoubleValue("inputGain", 1.0));
+}
+void Settings::setInputGain(float g) { file().setValue("inputGain", (double)g); }
+
 juce::String Settings::windowState() const { return file().getValue("windowState"); }
 void Settings::setWindowState(const juce::String& s) { file().setValue("windowState", s); }
 
