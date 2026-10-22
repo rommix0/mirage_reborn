@@ -555,3 +555,22 @@ TEST_CASE("machine with nothing plugged in renders exactly as before", "[assets]
   CHECK(plain.fdc().sectorsRead() > 0);  // it really booted and loaded the disk
   CHECK((plain.display().left || plain.display().right));
 }
+
+TEST_CASE("resampler: pop() needs exactly reach() + 1 samples buffered") {
+  for (const double inRate : {8000.0, 22050.0, 29411.76, 48000.0, 96000.0, 384000.0}) {
+    StreamResampler r(29411.76);
+    r.setInputRate(inRate);
+    CHECK(r.reach() == StreamResampler::reach(inRate, 29411.76));
+    CHECK(r.reach() >= StreamResampler::kHalfWidth);
+    int pushed = 0;
+    float y;
+    r.push(0.0f);
+    ++pushed;
+    while (!r.pop(y)) {
+      r.push(0.0f);
+      ++pushed;
+    }
+    INFO("input rate " << inRate);
+    CHECK(pushed == r.reach() + 1);
+  }
+}

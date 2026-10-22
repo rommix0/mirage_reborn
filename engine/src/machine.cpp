@@ -42,19 +42,20 @@ inline float jackSample(float x) {
 // furthest, in host samples.
 constexpr double kSlowestScanRate = double(kMasterClockHz) / (8.0 * 34.0);
 
-// Zeros the first plug-in feeds the input resampler so that it never starves:
-// pop() needs the kernel's reach (kHalf input samples, stretched by in/out when
-// the host rate is above the scan rate) pushed beyond the output position, and
-// the position follows emulated time while a block's samples all arrive at its
-// start. Sized for the slowest scan rate, whatever the DOC is doing at the
-// moment (the OS enables its oscillators only after boot starts), so the
-// delay is the same wherever the jack is plugged in; a few samples of margin
-// cover the CPU's instruction overshoot.
+// Host samples the jack pushes ahead of the input resampler's need, per top-up.
+constexpr size_t kJackChunk = 64;
+
+// Zeros a plug-in feeds the input resampler so that it never starves: pop()
+// needs the kernel's reach (StreamResampler::reach) pushed beyond the output
+// position, and the position follows emulated time. Sized for the slowest scan
+// rate, whatever the DOC is doing at the moment (the OS enables its
+// oscillators only after boot starts), so the delay is the same wherever the
+// jack is plugged in. The margin covers the CPU's instruction overshoot (up to
+// kMaxCredit cycles, so a time, not a sample count: 1.5 host samples at 48 kHz,
+// 12.3 at 384 kHz) plus two samples of rounding.
 size_t jackPreroll(double hostRate) {
-  constexpr double kHalfWidth = 32.0, kMinStretch = 0.04, kMargin = 4.0;
-  const double ratio = kSlowestScanRate / hostRate;
-  const double reach = ratio < 1.0 ? std::ceil(kHalfWidth / std::max(ratio, kMinStretch)) : kHalfWidth;
-  return size_t(reach + kMargin);
+  const double margin = std::ceil(double(kMaxCredit) * hostRate / double(kCpuClockHz)) + 2.0;
+  return size_t(double(StreamResampler::reach(hostRate, kSlowestScanRate)) + margin);
 }
 
 }  // namespace
@@ -194,9 +195,24 @@ void Machine::render(float* out, size_t frames, double hostRate) {
   render(nullptr, out, frames, hostRate);
 }
 
+// Pushes the rest of the render block's input (all = true) or enough of it
+// to keep the resampler's lead at its reach plus a small chunk. The lead stays
+// small however long the block is, so the resampler's fixed history ring never
+// overflows and a long render (a CLI slice) behaves as short ones do.
+void Machine::feedJack(bool all) {
+  const int64_t target = int64_t(inputResampler_.reach()) + 1 + int64_t(kJackChunk);
+  while (jackInLeft_ != 0 && (all || inputResampler_.buffered() < target)) {
+    const size_t n = all ? jackInLeft_ : std::min(kJackChunk, jackInLeft_);
+    for (size_t i = 0; i < n; ++i) inputResampler_.push(jackSample(jackIn_[i]));
+    jackIn_ += n;
+    jackInLeft_ -= n;
+  }
+}
+
 float Machine::jackForScan() {
   if (!jackConnected_) return 0.0f;
   inputResampler_.setOutputRate(doc_.sampleRate());
+  feedJack(false);
   float s;
   if (inputResampler_.pop(s)) jack_ = s;  // a shortfall holds the last value
   // The 4052's X half feeds the A/D; its Y half routes the jack to filter 7
@@ -217,17 +233,20 @@ void Machine::render(const float* in, float* out, size_t frames, double hostRate
   }
   resampler_.setOutputRate(hostRate);
   if (in) {
-    // All of the block's samples go in before the CPU runs (in may be out).
     inputResampler_.setOutputRate(doc_.sampleRate());
-    if (!jackConnected_) {  // plugging in: start clean, with the delay already in place
+    // Plugging in, or a new host rate while plugged (the lead in the resampler
+    // is a length in time at the old rate): start clean with the delay in place.
+    if (!jackConnected_ || hostRate != inputResampler_.inputRate()) {
       inputResampler_.reset();
       inputResampler_.setInputRate(hostRate);
       jack_ = 0.0f;
       jackConnected_ = true;
       for (size_t n = jackPreroll(hostRate); n != 0; --n) inputResampler_.push(0.0f);
     }
-    inputResampler_.setInputRate(hostRate);
-    for (size_t i = 0; i < frames; ++i) inputResampler_.push(jackSample(in[i]));
+    // The block's samples go in as the scans need them (jackForScan), and the
+    // rest after the run, before anything is written to out (in may be out).
+    jackIn_ = in;
+    jackInLeft_ = frames;
   } else if (jackConnected_) {  // unplugged
     jackConnected_ = false;
     jack_ = 0.0f;
@@ -239,6 +258,8 @@ void Machine::render(const float* in, float* out, size_t frames, double hostRate
   rendering_ = true;
   runCycles(uint64_t(whole));
   rendering_ = false;
+  feedJack(true);
+  jackIn_ = nullptr;
   // Hand out `frames` samples. The resampler's output count wanders by one
   // around the request; a shortfall repeats the last sample, a surplus waits
   // for the next call.

@@ -10,6 +10,7 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 #include "alloc_counter.h"
@@ -709,7 +710,7 @@ TEST_CASE("jack: mic input adds gain and the compressor") {
   INFO("mic " << mic << " line " << line);
   CHECK(line >= 5);  // 127 x 0.05 = 6
   CHECK(mic > line);
-  CHECK(mic > 50);   // 0.55 through the limiter: 127 x softClip(0.55) = 66
+  CHECK(mic > 50);   // 0.55 through compressedAdcCode: 127 x 0.505 = 64
 
   // A full-scale square never leaves 1..255 and the compressor rails it near the
   // top and bottom.
@@ -818,4 +819,121 @@ TEST_CASE("jack: render with input allocates nothing after prepare") {
   for (int i = 0; i < 20; ++i) r.m.render(in.data(), out.data(), kBlock, 44100.0);    // a rate change
   CHECK(scope.count() == 0);
   CHECK(scope.frees() == 0);
+}
+
+// ---- Long blocks, host-rate changes and runCycles() outside render (Task 2 fix round) ----
+
+namespace {
+
+// The jack test signal as a function of the absolute frame number.
+float jackTestSignal(size_t i) {
+  return 0.3f * std::sin(0.07f * float(i)) + 0.1f * std::sin(0.9f * float(i));
+}
+
+// Runs a rig with mux 1 settled and plugged, then renders one block of `frames`
+// frames with a unit impulse at frame k at `hostRate`; returns the scan index
+// (from the start of that block) of the biggest mix value over this and the
+// next two blocks' worth of time, plus the scan rate.
+struct ImpulseResult {
+  int peak;
+  double scanRate;
+};
+ImpulseResult impulsePeak(double firstRate, double hostRate, size_t frames, size_t k) {
+  JackRig r(1);
+  {
+    const std::vector<float> in(kBlock, 0.0f);
+    std::vector<float> out(kBlock);
+    for (int i = 0; i < 20; ++i) r.m.render(in.data(), out.data(), kBlock, firstRate);
+  }
+  std::vector<float> mix;
+  r.m.onMix = [&mix](float x) { mix.push_back(x); };
+  std::vector<float> in(frames, 0.0f), out(frames);
+  in[k] = 1.0f;
+  r.m.render(in.data(), out.data(), frames, hostRate);
+  std::fill(in.begin(), in.end(), 0.0f);
+  for (int i = 0; i < 3; ++i) r.m.render(in.data(), out.data(), frames, hostRate);
+  return {int(std::max_element(mix.begin(), mix.end()) - mix.begin()), r.m.doc().sampleRate()};
+}
+
+}  // namespace
+
+TEST_CASE("jack: an impulse in a long block lands at the same pinned delay") {
+  // 8192 frames is past what the input resampler's 4096-sample ring can hold at once.
+  for (size_t k : {size_t(100), size_t(5000), size_t(8000)}) {
+    const auto r = impulsePeak(kHostRate, kHostRate, 8192, k);
+    const int expected = int(std::lround(double(k) * r.scanRate / kHostRate)) + 35;
+    INFO("k " << k << " expected " << expected << " got " << r.peak);
+    CHECK(std::abs(r.peak - expected) <= 1);
+  }
+}
+
+TEST_CASE("jack: one 102,400-frame block gives the same scans as 400 blocks of 256") {
+  const auto run = [](size_t block) {
+    JackRig r(0);  // the mic path: the jack is amplified into the audible mix
+    std::vector<float> mix;
+    r.m.onMix = [&mix](float x) { mix.push_back(x); };
+    std::vector<float> in(block), out(block);
+    for (size_t b = 0; b < 102400 / block; ++b) {
+      for (size_t i = 0; i < block; ++i) in[i] = jackTestSignal(b * block + i);
+      r.m.render(in.data(), out.data(), block, kHostRate);
+    }
+    return std::tuple{mix, r.m.cycles(), r.m.filters().output(7), r.m.filters().mix(), r.code()};
+  };
+  const auto small = run(256), big = run(102400);
+  REQUIRE(std::get<0>(small).size() == std::get<0>(big).size());
+  CHECK(std::get<1>(small) == std::get<1>(big));  // the same number of E cycles
+  // The jack signal reaches the filters scan for scan: the mix of every scan is the same bits.
+  CHECK(std::get<0>(small) == std::get<0>(big));
+  CHECK(std::get<2>(small) == std::get<2>(big));
+  CHECK(std::get<3>(small) == std::get<3>(big));
+  CHECK(std::get<4>(small) == std::get<4>(big));
+  double energy = 0;
+  for (float x : std::get<0>(big)) energy += double(x) * x;
+  CHECK(energy > 100.0);  // and it is a real signal
+}
+
+TEST_CASE("jack: a host-rate change while plugged re-plugs, and the delay holds") {
+  // 48 kHz -> 44.1 kHz and 96 kHz (the kernel reach, hence the pre-roll, scales with the rate:
+  // the delay stays 1.2 ms); 22.05 kHz is below the scan rate, where the reach is 32 host samples.
+  struct Case {
+    double rate;
+    int delay;  // DOC scans
+  };
+  for (const Case c : {Case{44100.0, 35}, Case{96000.0, 34}, Case{22050.0, 46}}) {
+    const size_t k = 100;
+    const auto r = impulsePeak(kHostRate, c.rate, kBlock, k);
+    const int expected = int(std::lround(double(k) * r.scanRate / c.rate)) + c.delay;
+    INFO("host rate " << c.rate << " expected " << expected << " got " << r.peak);
+    CHECK(std::abs(r.peak - expected) <= 1);
+  }
+  // Back to the first rate and the same delay as a first plug-in.
+  const auto again = impulsePeak(44100.0, kHostRate, kBlock, 100);
+  CHECK(std::abs(again.peak - (int(std::lround(100.0 * again.scanRate / kHostRate)) + 35)) <= 1);
+}
+
+TEST_CASE("jack: runCycles outside render drains the resampler's lead, then holds the last value") {
+  JackRig r(1);
+  r.run(100, 0.5f);
+  REQUIRE(r.m.jackConnected());
+  r.m.runCycles(kCpuClockHz);  // 1 s with no render: no new input arrives
+  CHECK(r.m.jackConnected());
+  CHECK(r.m.filters().output(7) == Catch::Approx(0.5).margin(0.01));  // held, not decayed to 0
+  CHECK(std::abs(int(r.code()) - lineCode(r.m.filters().mix())) <= 1);
+
+  // A moving signal: after the ~1.2 ms of input the last render left unpopped has gone
+  // through, the jack value (and so filter 7) stops changing.
+  JackRig s(1);
+  std::vector<float> in(kBlock), out(kBlock);
+  for (int b = 0; b < 60; ++b) {
+    for (size_t i = 0; i < kBlock; ++i) in[i] = jackTestSignal(size_t(b) * kBlock + i);
+    s.m.render(in.data(), out.data(), kBlock, kHostRate);
+  }
+  s.m.runCycles(kCpuClockHz / 25);  // 40 ms
+  const float held = s.m.filters().output(7);
+  s.m.runCycles(kCpuClockHz / 25);
+  CHECK(std::fabs(s.m.filters().output(7) - held) < 2e-3f);
+  CHECK(s.m.jackConnected());
+  // The next render carries on from where the run left the scans: nothing is lost or repeated.
+  s.m.render(in.data(), out.data(), kBlock, kHostRate);
+  CHECK(std::isfinite(s.m.filters().output(7)));
 }

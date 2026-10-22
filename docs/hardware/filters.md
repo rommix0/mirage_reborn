@@ -280,25 +280,34 @@ host samples -> sanitise -> inputResampler_ (host rate -> DOC scan rate) -> one 
   finite samples are limited to ±64 (`kMaxJackLevel`) so the filters, and a snapshot of them, stay
   finite.
 - **Timing.** A second `StreamResampler` (input rate = the host rate, output rate = the DOC scan
-  rate, updated at each scan) is fed the block's samples **before** the CPU runs; `doc_.onFrame`
-  pops one sample per scan, before `filters_.process`. A shortfall holds the last value. `in` may
-  alias `out`. Pops continue (on whatever was pushed) during `runCycles()` calls made outside
-  `render()`.
+  rate, updated at each scan) is fed the block's samples as the scans need them (`feedJack`, called
+  from `jackForScan`: the lead is kept at the kernel reach plus 64 samples, so the resampler's
+  4096-sample ring can never overflow however long the block, e.g. a CLI slice of 100,000+
+  frames; the rest of the block is pushed after the run, before `out` is written, so `in` may alias
+  `out`); `doc_.onFrame` pops one sample per scan, before `filters_.process`. A shortfall holds the
+  last value. A 102,400-frame block gives the same mix, bit for bit, at every scan as 400 blocks of
+  256 (the host-side output, which hands out `frames` samples per call, is not the same at
+  block boundaries). `runCycles()` outside `render()` keeps popping what the last render left
+  buffered (about the last 1.2 ms of its input; nothing new is pushed), then holds the last value.
 - **Group delay: 35 DOC scans = 1.19 ms at 48 kHz** (57 host samples). The resampler's output
   position follows emulated time while a block's samples all arrive at its start, so it needs its
   kernel reach (32 scans of input: 53 host samples at 48 kHz, 32 at host rates below the scan
-  rate) already pushed beyond the position or it starves. The first plug-in therefore pre-rolls
-  zeros: the reach for the slowest DOC scan rate (29,411.76 Hz, 32 oscillators) plus a 4-sample
-  margin for the CPU's instruction overshoot. The delay is then the same from the first sample on
+  rate; `StreamResampler::reach`) already pushed beyond the position or it starves. A plug-in
+  therefore pre-rolls zeros: the reach for the slowest DOC scan rate (29,411.76 Hz, 32
+  oscillators) plus a margin for the CPU's instruction overshoot (up to 64 cycles, so
+  `ceil(64 x hostRate / 2 MHz) + 2` host samples: 4 at 48 kHz, 15 at 384 kHz). The delay is then the same from the first sample on
   and independent of what the DOC is doing when the jack is plugged in (the OS enables its
   oscillators a moment after boot starts: a pre-roll sized from the instantaneous scan rate
   measured 33 scans, not 35). **Measured and pinned** (`jack: an impulse lands at the scan for its
   frame plus the resampler's group delay`; filter 7 open, mux 1, 48 kHz, 256-frame blocks): an
   impulse at frame k of a block peaks in the mix 35, 36 and 35 scans after the scan nearest
   `k x 29411.76 / 48000` for k = 40, 100 and 200 (the test allows 35 ± 1 for the scan phase at the
-  block start). Filter 7 (open, 13 kHz, four poles) adds under one scan.
+  block start). Filter 7 (open, 13 kHz, four poles) adds under one scan. At other host rates the
+  pre-roll is the same reach in time: 35 scans at 44.1 kHz, 34 at 96 kHz (tested); below the scan
+  rate the kernel reaches 32 host samples, so the delay grows (46 scans at 22.05 kHz, tested).
 - **Plugging.** The flag follows the last `render`: with a buffer the jack is plugged (the first
-  such call after unplugging resets the input resampler and pre-rolls), with `nullptr` (or the old
+  such call after unplugging, or a call at a different host rate while plugged, resets the input
+  resampler and pre-rolls: the lead is a length in time at the old rate), with `nullptr` (or the old
   `render(out, ...)`) it is unplugged (held value 0, resampler reset). A `render` skipped for an
   unusable host rate changes nothing. `powerOn()` unplugs; the next `render` with input plugs in
   again. While unplugged, `adcRead` mux 1 reads `$80` and nothing is added to filter 7.

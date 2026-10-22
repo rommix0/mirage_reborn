@@ -166,13 +166,20 @@ class Machine : private Bus {
   // as `out` (it is read before anything is written). NaN and infinity read as
   // 0 and finite samples are limited to +-kMaxJackLevel. The block is resampled
   // (a second StreamResampler, hostRate in, DOC scan rate out) and one sample
-  // is taken per DOC scan, in emulated time: a sample for frame k of a block
-  // reaches the scan nearest k / hostRate after the block starts, plus a fixed
+  // is taken per DOC scan, in emulated time. The block is fed to the resampler
+  // as the scans need it, so a block of any length behaves like short ones
+  // (100,000 frames give the same scan-by-scan jack signal as 256-frame
+  // blocks). A sample for frame k of a block reaches the scan nearest
+  // k / hostRate after the block starts, plus a fixed
   // delay of about 1.2 ms (35 scans at 48 kHz: the resampler's kernel reaches
   // 32 scans, 53 host samples, ahead, and the first plug-in pre-rolls that
-  // many zeros plus 4 of margin, so the delay is the same from the first
-  // sample on and whenever the jack is plugged in). A shortfall (a scan rate
+  // many zeros plus a margin of 64 cycles' worth of samples, so the delay is the same from the first
+  // sample on and whenever the jack is plugged in; a render at a different
+  // host rate while plugged re-plugs the same way). A shortfall (a scan rate
   // that has dropped since, or more scans than samples) holds the last value.
+  // runCycles() outside render() keeps taking one sample per scan from what
+  // the last render left in the resampler (the last 1.2 ms or so of its input),
+  // then holds the last value; nothing new arrives until the next render.
   // The jack feeds filter 7 only while the A/D mux (VIA PB3:PB2) is 0 (times
   // kMicGain) or 1; mux 1 then reads the whole voice mix as a line level.
   // Real time: after prepare(), render with input allocates nothing.
@@ -243,6 +250,9 @@ class Machine : private Bus {
   void loadAudio(StateReader&);  // commits only on success
   void saveJack(StateWriter&) const;
   void loadJack(StateReader&);  // commits only on success
+  // Pushes the pending render input into inputResampler_: all of it, or enough
+  // to keep the resampler's lead at its kernel reach plus a small chunk.
+  void feedJack(bool all);
   // doc_.onFrame: the jack's sample for this scan, as filter 7's external input.
   float jackForScan();
 
@@ -284,6 +294,10 @@ class Machine : private Bus {
   StreamResampler inputResampler_{29411.76};
   float jack_ = 0.0f;           // the latest sample taken from it (held on a shortfall)
   bool jackConnected_ = false;  // the last render had an input buffer
+  // Inside render() with input: the part of the block not yet pushed (not saved;
+  // render() pushes all of it before it returns).
+  const float* jackIn_ = nullptr;
+  size_t jackInLeft_ = 0;
 };
 
 }  // namespace mirage

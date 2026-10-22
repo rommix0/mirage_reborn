@@ -9,11 +9,11 @@ namespace mirage {
 
 namespace {
 
-constexpr int kHalf = 32;        // kernel half-width in input samples (64 taps)
+constexpr int kHalf = StreamResampler::kHalfWidth;  // kernel half-width in input samples (64 taps)
 constexpr int kPhases = 256;     // table entries per input sample
 constexpr double kCutoff = 0.94;  // kernel cutoff as a fraction of the input Nyquist
 constexpr double kBeta = 9.0;     // Kaiser window shape (about 90 dB stop band)
-constexpr double kMinStretch = 0.04;  // lowest out/in ratio the kernel is stretched to
+constexpr double kMinStretch = StreamResampler::kMinStretchRatio;
 constexpr int kMaxTaps = int(kHalf / kMinStretch) + 1;
 constexpr double kMinHz = 1.0, kMaxHz = 1e7;
 constexpr size_t kMaxChanges = 64;
@@ -62,6 +62,11 @@ StreamResampler::StreamResampler(double outRate)
   changes_.reserve(kMaxChanges + 1);  // setInputRate never allocates afterwards
 }
 
+int StreamResampler::reach(double inHz, double outHz) {
+  const double ratio = clampRate(outHz) / clampRate(inHz);
+  return ratio < 1.0 ? int(std::ceil(kHalf / std::max(ratio, kMinStretch))) : kHalf;
+}
+
 void StreamResampler::setOutputRate(double hz) { outRate_ = clampRate(hz); }
 
 void StreamResampler::setInputRate(double hz) {
@@ -102,7 +107,7 @@ bool StreamResampler::pop(float& out) {
   const double ratio = outRate_ / inRate_;
   const bool stretch = ratio < 1.0;  // input faster than output: band-limit to the output
   const double fc = stretch ? std::max(ratio, kMinStretch) : 1.0;
-  const int taps = stretch ? int(std::ceil(kHalf / fc)) : kHalf;  // reach on each side
+  const int taps = reach();  // on each side; the same arithmetic as fc above
   if (posInt_ + taps > int64_t(count_) - 1) return false;
 
   const float* g = kernel().g.data();
