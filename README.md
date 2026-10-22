@@ -62,7 +62,7 @@ and the pitch hint.
 ## Sampling from the audio input jack
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
+mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
 ```
 
 `--audio-in "FILE@T[,gain=G][,loop=0|1]"` plays a WAV file into the emulated input
@@ -75,7 +75,7 @@ sine, and the OS samples it into the lower half (Sample Lower, then Enter once t
 level-detect display is up, 2.55 s later); the note at 23 s plays it back (key 52 is
 about 440 Hz). The input is for tests and listening: the app has no WAV player on the
 jack. The mic input (parameter 75 off, the default) is 11 times hotter than line and
-clips a full-scale sine; try a gain of 0.08 on it. How the OS samples is in
+clips a full-scale sine, so the example above uses `gain=0.08`. How the OS samples is in
 `docs/hardware/filters.md` section 3.3.
 
 ## The standalone app (`app/`)

@@ -256,14 +256,19 @@ stays as it is and is a separate way to get a sound in.
 - **Levels** (what to aim for; the numbers come from the engine's model, see
   `docs/hardware/filters.md` §3.3):
   - *Mic* (OS parameter 75 off, **the default**): the jack has about 11 times
-    (+21 dB) the gain of line, plus a compressor. A sine of about 0.08 on the
-    meter fills the sample without clipping; it clips from about 0.1 to 0.15, and
-    the OS needs about 0.05 to start recording. So for a normal audio-interface
-    signal in mic mode, **turn the Input slider down** (a source peaking around
-    half of full scale wants about 0.1) until the loud notes peak at about 0.05
-    to 0.08 on the meter (-26 to -22 dB, about a third of the way along the
-    bar), with the OS's level-detect display showing the middle bar.
-  - *Line* (parameter 75 on): no preamp gain and no compressor, and the
+    (+21 dB) the gain of line, and the loud peaks are softly squashed on their
+    way into the A/D (a soft saturation, not a true compressor: at the levels
+    below it is within about 0.6 dB of linear, so you will not hear it working).
+    A sine of about 0.08 on the meter fills the sample without clipping; it
+    clips from about 0.1 to 0.15, and the OS needs about 0.065 to start
+    recording. So for a normal audio-interface signal in mic mode, **turn the
+    Input slider down** (a source peaking around half of full scale wants about
+    0.15) until the loud notes peak at about 0.065 to 0.08 on the meter (-24 to
+    -22 dB, a little over halfway along the bar), with the OS's level-detect
+    display showing the middle bar. At matched levels mic and line sound nearly
+    the same; sampling the same source at the same Input level, mic is much
+    louder and, when hot, rounded and squashed.
+  - *Line* (parameter 75 on): no preamp gain and no saturation, and the
     emulated input filter (parameter 74 at its default) passes only about 0.54 of
     it. A source has to reach about **0.7 on the meter** to cross the OS's
     default threshold (parameter 76 = 24); aim for 0.7 to 0.9 and keep it out of
@@ -297,6 +302,14 @@ stays as it is and is a separate way to get a sound in.
   OS keeps the jack off the voices in normal play); it is connected to the filters
   at mic gain while the OS boots, until its main loop starts, so keep the source
   quiet during the boot or set the slider to 0.
+
+  **You do hear the input while the OS samples.** From *Sample Lower* until the
+  end of the recording the jack drives filter 8, which is part of the Mirage's
+  output mix (as on the schematic), so the input comes out of the Mirage's
+  output. On mic it is about 11 times louder than on line (a line-level source
+  on mic comes out near full scale). **Turn the volume down or use headphones,
+  especially with a microphone: the sound from the speakers can feed back into
+  it.**
 - **Not done in the app:** a WAV player never feeds the jack (WAV files stay an
   import feature; the CLI's `--audio-in` exists for tests and reproducible
   listening).
@@ -753,20 +766,25 @@ player is best. Times are on the emulated clock.
 4. Play a sustained sound into the input (a held note or a steady tone, as loud
    as you will play it). **The Input meter moves with it.** With the Mirage on
    mic (parameter 75 off, the default), lower the Input slider until the loud
-   parts peak at about 0.05 to 0.08 on the meter (-26 to -22 dB, about a third
-   of the way along the bar). For an interface output peaking around half of full
-   scale that is a slider of about 0.1. If the meter goes red, lower the slider
+   parts peak at about 0.065 to 0.08 on the meter (-24 to -22 dB, a little over
+   halfway along the bar). For an interface output peaking around half of full
+   scale that is a slider of about 0.15. If the meter goes red, lower the slider
    more; if step 5 then shows no middle bar, raise it a little.
 5. Press **Sample Lower** (the black *Lower* key under SAMPLE). The display
-   blinks "S" "L" for about 2.5 s. Then both digits show one segment. Keep playing
+   blinks "S" "L" for about 2.5 s. From now until the recording ends you hear
+   the input through the Mirage's output, much louder on mic: turn the volume
+   down or use headphones (a microphone can feed back). Then both digits show
+   one segment. Keep playing
    and watch it: the decimal points only (no level), the bottom bar (quiet), the
    **middle bar** (above the threshold: what you want), the top bar (near
    clipping; fine for the odd peak, too loud if it stays). If you only ever get
    the dots or the bottom bar, raise the Input slider; if the top bar stays,
    lower it.
 6. Stop playing. Press **Enter**, then **start the sound** (or have it already
-   ringing). Recording begins at the first loud sample. If nothing is loud
-   enough within about 1.8 s the display blinks "n" "S" and gives up with
+   ringing). The display goes blank right after **Enter** while the OS waits
+   for the threshold, and stays blank during the recording (step 7). Recording
+   begins at the first loud sample. If nothing is loud enough within about 1.8 s
+   the display blinks "n" "S" and gives up with
    nothing changed: go back to step 5.
 7. **Keep the sound going for about 2.5 s.** The display is blank while it
    records (about 2.2 s; the emulator does not show the real machine's lit middle
@@ -804,34 +822,40 @@ device code.
 is hotter than the line input`) the same full-scale sine swings the sampled bytes
 more through the mic than through line and both come out at the right pitch;
 what it sounds like is for you to judge. Parameter 75 is the OS's **Line/Mic**
-switch: **off (0) is mic, the default**, on (1) is line. Use the same source
-and the same playing for all takes.
+switch: **off is mic, the default**, on is line. Use the same source
+and the same playing for all takes. While the OS samples you hear the input
+through the Mirage's output (much louder on mic): keep the volume down or use
+headphones.
 
 1. Do steps 1-3 of acceptance 7 (input chosen, SND-A01 opened, Reset, wait for
    "2." "1").
-2. **Line take.** Select line: **Param**, **7**, **5**, **Value**, then **Up**
-   (the display shows the value: 0 is mic, 1 is line). Put the Input slider so that the loud
-   parts of your sound reach about 0.7 to 0.9 on the meter (-3 dB, yellow, not
+2. **Line take.** Select line: **Param**, **7**, **5**, **Value**
+   (the display shows "o F.": off = mic, the default), then **Up** (it shows "o n.":
+   on = line). Put the Input slider so that the loud parts of your sound reach about 0.7 to 0.9 on the meter (-3 dB, yellow, not
    red). Sample Lower as in acceptance 7 steps 5-7. Play a few lower-keyboard
    notes and listen: it is a clean sample at a moderate level, with its natural
    dynamics.
 3. **Mic take, same settings.** Select mic: **Param**, **7**, **5**, **Value**,
-   **Down** (back to 0). Leave the Input slider where it is and play
-   the **same sound at the same loudness**. Sample Lower again (it overwrites the
+   **Down** (the display shows "o F." again: off = mic). Leave the Input slider
+   where it is and play the **same sound at the same loudness**. Sample Lower again (it overwrites the
    lower half). Play the same notes. Expect it to be **much louder** (the mic
-   path has about 11 times the gain) and, because the source is far above mic
-   level, harshly clipped and squashed.
+   path has about 11 times the gain), and because the source is far above mic
+   level it is rounded and squashed (hard saturation). The input you hear in
+   the Mirage's output while it samples is also much louder than in the line
+   take: mind the volume.
 4. **Mic take at the mic's own level.** Lower the Input slider to about a tenth
-   of what it was (the loud parts peaking at about 0.05 to 0.08 on the meter) and
+   of what it was (the loud parts peaking at about 0.065 to 0.08 on the meter) and
    sample once more. Compared with the line take it is about as loud (the slider
-   took back the mic's extra gain), but not clipped, and its quiet parts sit
-   closer to its loud parts: it is **compressed** (the mic path has a
-   compressor).
+   took back the mic's extra gain) and not squashed. Expect mic and line to sound
+   nearly the same at matched levels: the mic path is 11 times the gain plus a
+   soft saturation of hot peaks (a static soft limiter, with no attack or
+   release), which at this level is within about 0.6 dB of linear.
 5. Optional: with the mic take still in memory, save it with the OS and *Save
    As* into your scratch folder as in acceptance 7 steps 9-11.
 
-Say which take was louder, whether the mic take sounded compressed, and whether
-the level guidance in step 4 gave a clean sample.
+Say which take was louder, whether the mic take at the same Input level sounded
+rounded or squashed, and whether the level guidance in step 4 gave a clean
+sample.
 
 ## Known limitations
 
@@ -846,9 +870,11 @@ the level guidance in step 4 gave a clean sample.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*.edm;*`.
 - **Sampling's analog input stage is a model.** The jack's scale, the mic
-  gain (11), the compressor curve and the polarity are model choices, not
+  gain (11), the soft-clip curve and the polarity are model choices, not
   measurements (`docs/hardware/filters.md` §3.3). Levels in the checklists come
   from the model; retune by ear.
+- The mic compressor is a static soft limiter (no attack/release); the NE570's
+  dynamics are not modelled.
 - The MASOS external input-filter cartridge (parameter 93 above 0) is not
   modelled. The input is mono (the average of the active channels).
 - The emulator's display is blank during the 2.2 s recording (see *Audio input

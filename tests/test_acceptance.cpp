@@ -665,7 +665,7 @@ TEST_CASE("acceptance 7: OS 3.2 samples a sine from the input jack", "[assets][a
   // It plays: a note on the lower keyboard has a level, and an octave up is twice the
   // pitch. Keys 46-66 of the sampled sound run a semitone apart on one wavesample (the
   // OS splits the keyboard into wavesamples; keys 44-45 and 66-67 straddle two), and key
-  // 52 plays the 440 Hz sine back at 440 Hz (measured: 441.0 Hz).
+  // 52 plays the 440 Hz sine back at 440 Hz (measured: 441.5 Hz).
   auto low = machineFrom(s.state);
   auto high = machineFrom(s.state);
   const Played a = playNote(*low, 52), b = playNote(*high, 64);
