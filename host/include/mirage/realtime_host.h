@@ -37,6 +37,11 @@ struct HostStatus {
   // depth, so (posted - taken - flushed + depth) can only overstate.
   uint64_t midiBytesTaken = 0, midiBytesFlushed = 0;
   size_t midiQueueDepth = 0;
+  // Audio input level: the largest |sample| of the last block after the input
+  // gain (a plain multiply, so it can exceed 1.0). NaN and infinite samples
+  // count as 0 (as at the jack), so the peak is always finite. 0 when the last
+  // block had no input (or its rate was unusable).
+  float inputPeak = 0.0f;
 };
 
 // Why a disk came back from the audio thread (takeReturnedDisk).
@@ -121,6 +126,8 @@ class RealtimeHost {
   // with process() or render(): call it before the first block and whenever
   // the device's block size or rate changes (JUCE calls audioDeviceAboutToStart
   // before the callbacks start, and again after stopping them).
+  // It also reserves the buffer that holds the gain-applied input (maxFrames
+  // samples).
   void prepare(size_t maxFrames, double hostRate);
   // Renders `frames` mono samples at hostRate:
   //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved),
@@ -138,7 +145,28 @@ class RealtimeHost {
   // advances nothing. MIDI commands waiting meanwhile are discarded and counted
   // in midiDropped (stale input, as MidiMessageCollector drops it), so old notes
   // do not replay when the rate recovers.
-  void process(float* out, size_t frames, double hostRate, double nowSeconds);
+  void process(float* out, size_t frames, double hostRate, double nowSeconds) {
+    process(nullptr, out, frames, hostRate, nowSeconds);
+  }
+  // The same with the device's audio input: `in` holds `frames` mono samples at
+  // hostRate (the app averages the active input channels first), or is null
+  // when nothing is plugged in (no input device, or the device went away):
+  // the jack is then disconnected and goes silent. `in` may be the same buffer
+  // as `out`. Each block's input is copied, times the input gain
+  // (setInputGain), into a buffer reserved by prepare(), with NaN and infinite
+  // samples made 0, and rendered from there (Machine::render(in, out, ...)); the
+  // segments split at MIDI offsets take their slice of it. A block longer than
+  // the prepared size is rendered in chunks of that size, with or without input,
+  // so nothing allocates (the sound is the same apart from the engine's
+  // start-up transient, which depends on the block length). If prepare() was
+  // never called the buffer grows on the audio thread, as Machine's does. A
+  // rate change between blocks re-plugs the jack (Machine::render). An unusable
+  // hostRate reads no input and leaves the jack as it was.
+  void process(const float* in, float* out, size_t frames, double hostRate, double nowSeconds);
+  // Any thread. Linear gain applied to the input before the jack, clamped to
+  // 0..4 (default 1); NaN is ignored. Takes effect from the next segment
+  // the audio thread renders.
+  void setInputGain(float gain);
 
   // One producer at a time (MidiInFeeder serialises its callers; the app goes
   // through it, and it paces long messages). Messages
@@ -213,6 +241,9 @@ class RealtimeHost {
   size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
   uint64_t midiBytesTaken_ = 0, midiBytesFlushed_ = 0;  // audio thread; published by publishStatus
   void publishStatus();
+  // Renders in[0..n) -> out[0..n) (in null: nothing plugged in) through the gain
+  // buffer in chunks, and raises blockPeak_.
+  void renderSegment(const float* in, float* out, size_t n, double hostRate);
 
   std::array<uint8_t, 20> romSha1_{};
   // q_ is declared before machine_ so machine_ is destroyed first: the
@@ -229,6 +260,9 @@ class RealtimeHost {
   std::array<ReturnedDisk, kStalledSlots> stalled_{};  // returns waiting for queue room
   size_t stalledCount_ = 0;
   uint64_t ringOverflowsSeen_ = 0;  // Machine::midiOverflows() already counted
+  size_t maxFrames_ = 0;            // prepare()'s block size; 0 = never prepared
+  std::vector<float> inputBuf_;     // the gain-applied input; sized by prepare()
+  float blockPeak_ = 0.0f;          // this block's input peak so far
 
   // Published status (relaxed: each is a separate value; see HostStatus).
   std::atomic<uint16_t> display_{0};  // left | right << 8
@@ -237,6 +271,7 @@ class RealtimeHost {
   std::atomic<uint64_t> midiDropped_{0};  // added to by the MIDI-input and audio threads
   std::atomic<uint64_t> midiTakenPub_{0}, midiFlushedPub_{0};
   std::atomic<size_t> midiDepthPub_{0};
+  std::atomic<float> inputGain_{1.0f}, inputPeakPub_{0.0f};
 };
 
 }  // namespace mirage
