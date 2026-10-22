@@ -10,8 +10,9 @@
 #include "mirage/realtime_host.h"
 
 // Connects a RealtimeHost to the audio device and the MIDI devices.
-//  - Audio: the device callback renders host.process() into channel 0 and
-//    copies it to the other outputs. The active input channels are averaged
+//  - Audio: the device callback renders host.process() into the first active
+//    output channel (into a scratch buffer when there is none, so the machine keeps
+//    running) and copies it to the other outputs. The active input channels are averaged
 //    into one mono buffer (reserved in audioDeviceAboutToStart) and fed to the
 //    emulated input jack; with no active input channel the jack is unplugged
 //    (process(nullptr, ...)).
@@ -27,10 +28,9 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   explicit AudioEngine(mirage::RealtimeHost& host);
   ~AudioEngine() override;
 
-  // Opens the audio device (the saved state, or the default device with 2 inputs
-  // and 2 outputs) and starts the callback. If that fails, tries again with
-  // outputs only (an input that cannot be opened must not cost the sound).
-  // Returns an error message, empty on success.
+  // Opens the audio device (the saved state, or the default output with no input
+  // channel: nothing is plugged into the jack until the user picks an input in Audio
+  // Settings) and starts the callback. Returns an error message, empty on success.
   juce::String start(const juce::XmlElement* savedState);
 
   juce::AudioDeviceManager& devices() { return deviceManager_; }
@@ -52,9 +52,11 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   float inputGain() const { return inputGain_.load(std::memory_order_relaxed); }
   // Message thread: the open device has at least one active input channel.
   bool hasInput() const;
-  std::unique_ptr<juce::XmlElement> saveAudioState() const {
-    return deviceManager_.createStateXml();
-  }
+  // The state to save at quit. If start() had to fall back (the saved devices could not be
+  // opened) it is the saved state itself, so the user's choice survives a launch with the
+  // interface unplugged; acceptCurrentAudioState() ends that (the user is choosing devices).
+  std::unique_ptr<juce::XmlElement> saveAudioState() const;
+  void acceptCurrentAudioState() { keptState_.reset(); }  // message thread
 
  private:
   // AudioIODeviceCallback
@@ -73,11 +75,15 @@ class AudioEngine : private juce::AudioIODeviceCallback,
   juce::AudioDeviceManager deviceManager_;
 
   std::atomic<bool> ready_{false};  // prepare() done and the device running
+  bool openedAsSaved(const juce::XmlElement& saved, const juce::String& error) const;
+  std::unique_ptr<juce::XmlElement> keptState_;  // message thread: see saveAudioState()
+
   std::atomic<float> volume_{1.0f};
   std::atomic<float> inputGain_{1.0f};
   float lastGain_ = 1.0f;  // audio thread: gain at the end of the previous block
   size_t maxBlock_ = 0;    // set in audioDeviceAboutToStart, read by the callback
   std::vector<float> inMono_;  // maxBlock_ samples; sized in audioDeviceAboutToStart only
+  std::vector<float> scratchOut_;  // the same, where the machine renders with no active output channel
   double rate_ = 0.0;
 
   juce::String midiInId_;  // message thread

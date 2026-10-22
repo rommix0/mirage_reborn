@@ -425,6 +425,9 @@ bool MainWindow::perform(const InvocationInfo& info) {
 
 void MainWindow::showAudioSettings() {
   if (audioSettings_ != nullptr) return audioSettings_->toFront(true);
+  // From here the devices are the user's choice, to be saved as they stand (see
+  // AudioEngine::saveAudioState).
+  engine_.acceptCurrentAudioState();
   // Up to two input and two output channels, listed one by one (the Mirage
   // samples mono: pick the single input your source is plugged into), no MIDI
   // section: MIDI has its own menu.

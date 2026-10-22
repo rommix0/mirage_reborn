@@ -214,8 +214,10 @@ itself and writes nothing into wave RAM: it only feeds the jack. *Import WAV*
 stays as it is and is a separate way to get a sound in.
 
 - **Choosing the input:** *Audio → Audio Settings...* now lists an input device
-  and its channels next to the output ones. Tick the input channel your source
-  is plugged into. Channels are listed one by one and at most two inputs can be
+  and its channels next to the output ones. Two steps: pick the **input device**
+  in the second device list (it starts at none), then tick the input channel your
+  source is plugged into under "Active input channels" (no channel is ticked
+  when you pick a device). Channels are listed one by one and at most two inputs can be
   active, because the Mirage samples **mono**: with two ticked the app feeds the
   jack their average (so a source on only one of them arrives at half level;
   tick only that one). No input channel ticked, no input device, or an input
@@ -223,15 +225,22 @@ stays as it is and is a separate way to get a sound in.
   meter says "no input". On Windows the input device is listed separately from
   the output device (for the "Windows Audio" type); an audio interface's own
   driver offers both on one device.
-- **First start:** with no saved audio settings the app opens the default input
-  as well as the default output, so a microphone is live at once. If the input
-  cannot be opened (device busy, permission refused) the app opens the output
-  alone and says so. On Windows a refused microphone permission (*Settings →
-  Privacy → Microphone*) can also show up as an input that delivers silence;
-  the jack then reads as a silent source, which changes nothing in the emulation.
-  If an input device is unplugged while the app runs, JUCE reopens the
-  default devices; the jack is unplugged for as long as no input channel is
-  active.
+- **First start:** with no saved audio settings the app opens the default
+  output and **no input**: nothing is plugged into the jack, no microphone is
+  opened (so no Windows microphone prompt or indicator) and the meter says "no
+  input", until you choose an input in Audio Settings (spec 6.5). The choice is
+  saved with the other audio settings and comes back at the next start.
+  A saved input that cannot be opened at start (the interface is unplugged, the
+  microphone permission is refused) falls back to the default output with no
+  input, and **the saved choice is kept**: it is written back at quit unchanged,
+  until you open *Audio Settings...* (from then on the devices as they stand are
+  yours). On Windows a refused microphone permission (*Settings → Privacy →
+  Microphone*) can also show up as an input that delivers silence; the jack then
+  reads as a silent source, which changes nothing in the emulation. If an
+  input device is unplugged while the app runs, JUCE reopens the default
+  devices; the jack is unplugged for as long as no input channel is active.
+  With no output channel active at all (an input-only device) the machine still
+  runs; there is just nothing to hear.
 - **Input slider** (status strip, 0 to 4, default 1, double-click returns to 1,
   saved in the settings): a gain applied to the input *before* the jack. It
   stands in for the mixer or preamp knob the Advanced Sampler's Guide recommends
@@ -248,10 +257,12 @@ stays as it is and is a separate way to get a sound in.
   `docs/hardware/filters.md` §3.3):
   - *Mic* (OS parameter 75 off, **the default**): the jack has about 11 times
     (+21 dB) the gain of line, plus a compressor. A sine of about 0.08 on the
-    meter fills the sample without clipping; it clips from about 0.1 to 0.15. So
-    for a normal audio-interface signal in mic mode, **turn the Input slider
-    down** (about 0.1 to 0.2 for a line-level source) until the loud notes peak
-    around half to two-thirds of the meter (-26 to -20 dB).
+    meter fills the sample without clipping; it clips from about 0.1 to 0.15, and
+    the OS needs about 0.05 to start recording. So for a normal audio-interface
+    signal in mic mode, **turn the Input slider down** (a source peaking around
+    half of full scale wants about 0.1) until the loud notes peak at about 0.05
+    to 0.08 on the meter (-26 to -22 dB, about a third of the way along the
+    bar), with the OS's level-detect display showing the middle bar.
   - *Line* (parameter 75 on): no preamp gain and no compressor, and the
     emulated input filter (parameter 74 at its default) passes only about 0.54 of
     it. A source has to reach about **0.7 on the meter** to cross the OS's
@@ -410,7 +421,9 @@ Queues (all lock-free single-producer, single-consumer):
 | Input units | 1.0 at the jack (the meter's full scale) is the full scale of the emulated line path | Simple; the Input slider sets the real level. With the default OS settings the line path needs about 0.7 and the mic path clips from about 0.1: the slider's job. |
 | Host input gain | 0 to 4, default 1, the strip's Input slider (1 in the middle), saved in the settings, applied before the jack | Stands in for the mixer or preamp knob the guide recommends; the Mirage has none. Default 1 means a line-level interface signal clips the default (mic) path until the slider is lowered; the checklists say so. |
 | Mic gain | `Machine::kMicGain` = 11 (+21 dB), the schematic's resistor ratio (the plan said 10) | filters.md §3.3. A guess within a few dB of the real preamp; retune by ear. |
-| Input opened at the first start | The default input and output; if that fails, the output alone, with a message | A refused permission or a busy input must not cost the sound. Cost: a live microphone is plugged into the jack from the first start (the OS boots it at mic gain), until the user picks no input channel. |
+| Input at the first start | None: the default output only, no input channel active until the user picks an input in Audio Settings (device, then channel). A saved state with an input keeps it. | Spec 6.5: no input device chosen means nothing plugged into the jack. No microphone is opened without being asked (no permission prompt, boot calibration untouched). Cost: one more step before the first sampling session. |
+| A saved device that cannot be opened | JUCE falls back to the default output with no input; the app keeps the saved audio state and writes it back at quit, until the user opens Audio Settings | The saved interface choice survives a launch with the interface unplugged. Cost: opening the dialog while on the fallback makes the fallback the saved choice. |
+| Output with no active channel | The callback renders into a scratch buffer reserved with the input buffer | An input-only device must not freeze the machine. |
 | Input meter | Post-gain peak of the last block at 10 Hz, dB scale from -60, short decay, "no input" when no channel is active | An aid, not a measurement; the OS's own level-detect display is the reference. |
 | Import while the drive is busy | The UI disables Import while the drive LED is on; the audio thread also refuses a write that arrives while `driveActive()` and hands it back | No race between the UI check and the write. |
 
@@ -726,10 +739,12 @@ checked by you. You need a sound source plugged into an audio input of your
 computer: an audio interface with an instrument, a microphone or a line-level
 player is best. Times are on the emulated clock.
 
-1. *Audio → Audio Settings...* Choose your audio interface as the **input** and
-   the output you listen on (the same device if it does both). Under "Active
-   input channels" tick **only** the channel your source is plugged into. Close
-   the dialog. The strip's meter shows an empty bar (not "no input").
+1. *Audio → Audio Settings...* The strip's meter says "no input": the app starts
+   with no input chosen. Choose the output you listen on, then pick your audio
+   interface in the **input device** list (the second device list). The
+   "Active input channels" list appears with nothing ticked: tick **only** the
+   channel your source is plugged into. Close the dialog. The strip's meter now
+   shows an empty bar (not "no input"). The choice is saved for the next start.
 2. Put the Input slider at its default, 1. Keep the source **silent** for the
    next step (the input reaches the Mirage's filters at mic gain while it boots).
 3. *File → Open Disk Image...* `Factory Library/IMG/SND-A01.img`, then *Machine →
@@ -738,9 +753,10 @@ player is best. Times are on the emulated clock.
 4. Play a sustained sound into the input (a held note or a steady tone, as loud
    as you will play it). **The Input meter moves with it.** With the Mirage on
    mic (parameter 75 off, the default), lower the Input slider until the loud
-   parts peak about half to two-thirds of the way along the meter (around
-   -26 to -20 dB). For an interface's line-level output that is a slider of
-   about 0.1 to 0.2. If the meter goes red, lower the slider more.
+   parts peak at about 0.05 to 0.08 on the meter (-26 to -22 dB, about a third
+   of the way along the bar). For an interface output peaking around half of full
+   scale that is a slider of about 0.1. If the meter goes red, lower the slider
+   more; if step 5 then shows no middle bar, raise it a little.
 5. Press **Sample Lower** (the black *Lower* key under SAMPLE). The display
    blinks "S" "L" for about 2.5 s. Then both digits show one segment. Keep playing
    and watch it: the decimal points only (no level), the bottom bar (quiet), the
@@ -755,9 +771,12 @@ player is best. Times are on the emulated clock.
 7. **Keep the sound going for about 2.5 s.** The display is blank while it
    records (about 2.2 s; the emulator does not show the real machine's lit middle
    bar). Then the display settles on a steady "S" "F".
-8. Play the **lower keyboard** (MIDI 36-71): it plays what you sampled. Around E3
-   (MIDI 52) it plays at the pitch you sampled, an octave up (E4, MIDI 64) is twice
-   the pitch, and the semitones in between follow it. It is a raw 8-bit
+8. Play the **lower keyboard** (MIDI 36-71): it plays what you sampled. The
+   headless test sampled a 440 Hz sine and found it played back at about 441.5 Hz
+   on **E3** (MIDI note 52, with middle C = C4 = 60 as in the rest of this guide)
+   and at 882.5 Hz an octave up on **E4** (MIDI 64): so E3 plays your sound near
+   the pitch you sampled, E4 is twice that, and the semitones in between follow
+   (the keys around E3, MIDI 46-66, are one wavesample). It is a raw 8-bit
    sample at 29.4 kHz with no loop: expect some hiss and a short sound that ends.
    The upper keyboard (72 and up) still plays the factory upper sound.
 9. Save the sound with the OS: **Param**, **1**, **1**, **1**, **Enter** (as in
@@ -803,7 +822,7 @@ and the same playing for all takes.
    path has about 11 times the gain) and, because the source is far above mic
    level, harshly clipped and squashed.
 4. **Mic take at the mic's own level.** Lower the Input slider to about a tenth
-   of what it was (the loud parts peaking about 0.08 to 0.1 on the meter) and
+   of what it was (the loud parts peaking at about 0.05 to 0.08 on the meter) and
    sample once more. Compared with the line take it is about as loud (the slider
    took back the mic's extra gain), but not clipped, and its quiet parts sit
    closer to its loud parts: it is **compressed** (the mic path has a
