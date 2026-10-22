@@ -21,7 +21,20 @@ namespace mirage {
 // samples beyond the output position have been pushed.
 class StreamResampler {
  public:
+  // Kernel half-width in input samples at unity ratio, and the lowest
+  // out/in ratio the kernel is stretched to.
+  static constexpr int kHalfWidth = 32;
+  static constexpr double kMinStretchRatio = 0.04;
+
   explicit StreamResampler(double outRate);
+  // How many input samples pop() needs on each side of the output position for
+  // these rates: kHalfWidth, stretched by in/out when the input is faster.
+  // pop() returns false until reach() + 1 samples are buffered().
+  static int reach(double inHz, double outHz);
+  int reach() const { return reach(inRate_, outRate_); }
+  // Input samples pushed beyond the output position (negative once the
+  // position has passed everything pushed).
+  int64_t buffered() const { return int64_t(count_) - posInt_; }
 
   void setInputRate(double hz);   // from the next push() on
   void setOutputRate(double hz);  // from the next pop() on

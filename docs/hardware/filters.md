@@ -18,7 +18,9 @@ Anything not read directly from code or a data sheet is marked **inferred** or *
 DOC channel n (sum of (byte-128)*volume / 32768) --+-- VoiceFilter n (cutoff CV n, resonance CV n) --+
   + filter input noise (1e-4)                                                                      |
                                               sum of the 8 filter outputs = the voice mix  <-------+
-voice mix (+ audio input, always silent) --> compressor --> A/D mux input 0
+voice mix --> compressor --> A/D mux input 0 (mic)
+voice mix ------------------> A/D mux input 1 (line)
+audio input jack (host samples, section 3.3) --> + channel 7's filter input, mux 0 or 1 only
 ```
 
 - **One CEM3328 per DOC channel** (8 channels = the 8 voices, CA & 7). The DOC volume register
@@ -89,18 +91,35 @@ and the calibration rewrites them on every pass of its wait loop).
 
 ### 3.1 The mux (VIA PB3:PB2)
 
-| PB3:PB2 | Input | Model |
-|---|---|---|
-| 0 | compressed input: audio in mixed with the voice output | `compressedAdcCode(voice mix)`: `128 + 127 * clip(mix)`, clip = the tanh approximation of section 6, clamped to 1..255. `$80` = 0 V. Audio in is silent in Plan 1. |
-| 1 | line input | `$80` (nothing connected) |
-| 2 | pitch wheel | `kPitchWheelRest` = `$80` |
-| 3 | mod wheel | `kModWheelRest` = `$00` |
+The mux is U45, a CD4052 (dual 4-to-1), AN1 = PB3, AN0 = PB2. Its X half picks the A/D input;
+its Y half picks what the audio input jack feeds into filter 8 (voice channel 7, section 3.3).
+
+**Naming.** The schematic counts filters from 1, the code from 0: **filter 8 = VCF8 = zero-based
+filter index 7 = DOC channel 7** (`FilterBank` index 7; `$E417`/`$E41F` for its CVs). This document
+says "filter 8" for the part and "channel 7" or "filter 7" for the index (the engine API,
+`setExternalInput`, `output(7)`); they are the same filter.
+Schematic *Main Board DSK-8, Analog Section* (1984 rev. N and 1985 rev. G sheets, "Table 1"):
+
+| PB3:PB2 | COM X (to the A/D) | COM Y (to VCF8 `IN+`) | Model (Plan 4) |
+|---|---|---|---|
+| 0 | **compressor**: the voice mix (summer U56 output) through the NE570 U48 | **MIC**: the jack at full level | `compressedAdcCode(voice mix)`: `128 + 127 * clip(mix)`, clip = the tanh approximation of section 6, clamped to 1..255. `$80` = 0 V. The jack, times `Machine::kMicGain` = 11, is added to filter 7's input, so the mix includes it; with no jack signal the code is exactly what it was before the jack existed. |
+| 1 | **line**: the same voice mix, not compressed | **LINE**: the jack through R51 200K (about 1/11 of the mic level) | Jack connected: `128 + 127 * clamp(mix, -1, 1)` rounded, clamped to 1..255 (the whole mix, hard clipped, no compressor), with the jack, times 1, added to filter 7's input. Nothing connected: `kLineInputIdle` = `$80`. |
+| 2 | pitch wheel | GND (jack disconnected) | `kPitchWheelRest` = `$80`; the jack is not routed (filter 7 sees no jack signal) |
+| 3 | mod wheel | GND (jack disconnected) | `kModWheelRest` = `$00`; the jack is not routed |
+
+So "line" and "compressed" are both the **whole voice mix** (all 8 filters summed), differing only
+by the compressor; the jack reaches the A/D only through filter 8, and only while the mux is 0 or 1.
+
+In the engine the jack side is `Machine::jackForScan` (once per DOC scan) and the A/D side is
+`adcRead`: at each scan the mux is read from the VIA's PB3:PB2, and filter 7's external input is
+`jack x kMicGain` (mux 0), `jack` (1) or 0 (2, 3).
 
 Evidence for the numbering: ROM `$F578` sets ORB = `$10` (mux 0) for the calibration; OS `$B935`
 sets `$18` (mux 2) for the pitch-wheel centre; OS `$9039-$9058` clears PB2 and sets PB3 (mux 2)
 for the pitch wheel and then ORs in `$0C` (mux 3), whose result is shifted to 0-127 like a mod
-wheel (`$90A9-$90AC`). The scale of the compressed input (gain 1, so a self-oscillating filter
-at about 0.48 swings `$4B-$B9`) is a **model choice**.
+wheel (`$90A9-$90AC`). The schematic's Table 1 agrees (AN1 AN0 = 1 0 is the pitch wheel). The
+scale of the compressed input (gain 1, so a self-oscillating filter at about 0.48 swings
+`$4B-$B9`) is a **model choice**.
 
 ### 3.2 Conversion protocol
 
@@ -125,13 +144,197 @@ dummy read discards the previous channel's value, as the OS intends. "26 cycles"
 DOC input clocks (**model choice**); 26 µs (26 oscillator slots) is ruled out because the
 calibration loop reads every 25 µs and could then never complete a conversion.
 
-### 3.3 Sampling (not used in Plan 1)
+### 3.3 Sampling from the audio input (Plan 4)
 
-OS `$9702-$974D` (sampling) selects mux 1 (`$14`) or, when `<$19` = 0, mux 0 (`$10`), and sets
-channel 7's filter: cutoff = `<$18` + `[$B283]` + `$5B`, resonance `[$96FF]`. `$B283` is filter
-7's calibration offset (`$B068 + 7 * $4D`, section 4). **Inferred:** while sampling, the input
-runs through voice 8's filter as the anti-alias filter. Not modelled: recording from audio input
-is out of scope (spec §3), and WAV import (spec §6.7) bypasses this path.
+Sources: the OS 3.2 disassembly (`resmos32.bin`, `--org 0x8000`; direct page `$80`, so `<$17`
+is `$8017`), the analog schematic (section 3.1), and a headless run of SND-A01 with a scratch
+probe that traced PCs and mux writes, logged every `$ECE2` conversion and, for the trigger,
+substituted a 440 Hz sine for the A/D input while the mux selected the path under test.
+
+**The analog path (schematic, confirmed).** Jack J11 → R53 10K → C72 3.3 µF (AC coupling) →
+node clamped by CR9/CR10 to the ±5 V rails → U45 `Y0` (mic) directly, and → R51 200K → `Y1`
+(line). `COM Y` → filter 8's (U53, VCF8) `IN+`, with R52 10K to ground. VCF1-7 have `IN+`
+grounded; every VCF takes its DOC channel on `IN` (VCF8: AF8, DOC channel 7). All 8 outputs
+→ summer U56 → output buffer **and** → `X1` (line, R93 7.5K) **and** → NE570 compressor U48 →
+`X0` (R61 6.8K). `COM X` → inverting level shifter (U56, R79 18K) → input sample-and-hold
+(U44 4016, C105) → DOC A/D pin. Consequences:
+
+- The sampled signal passes through **filter 8 = voice channel 7's VCF** (the one the OS sets
+  up), summed with whatever DOC channel 7 plays. The A/D reads the **whole voice mix**, not
+  filter 8 alone.
+- Mic vs line gain from the resistors (4052 on-resistance and the CEM3328 `IN+` load
+  neglected): mic `R52/(R53+R52)` = 0.5, line `R52/(R53+R51+R52)` = 0.045, ratio **11
+  (+21 dB)**. The guide says mic is "about 20 times more sensitive", so its figure probably
+  includes the compressor's make-up gain (**inferred**). Absolute levels (jack volts to A/D
+  codes) are not on the sheet.
+- The jack is fed to filter 8 only while PB3:PB2 is 0 or 1. **OS 3.2 mux timeline** (probe,
+  SND-A01): `$F0F9` mux 0 at power-on; `$B937` mux 2 and `$905A` mux 3 at 5.17 s; `$F54B`
+  (ROM `$F541`) mux 0 at 5.18 s, held through the lower-sound load; from the main loop
+  (12.56 s) `$9042`/`$905A` alternate 2 and 3 every pass, for good. In 5 s of idle play every
+  conversion was mux 2 or 3 (990 each). So in normal play the jack is disconnected; it reaches
+  filter 8 at mic gain only during boot until the main loop starts, and for one main-loop pass
+  after a sampling run (`$9F6F` → `$F541` writes ORB `$30`).
+- **OS 3.2 selects mux 1 only at `$9704`**, inside the sampling set-up. Every other ORB write
+  either picks 0/2/3 or preserves PB3:PB2 (`$9858`, `$9887`, `$98A3`, the disk code
+  `$A509-$A7C0`, ROM `$F4C6/$F4D6`). Mux 1 is never read outside a sampling run.
+
+**Parameters (confirmed, probe: `showParameter`, Up/Down, RAM).** SND-A01 defaults:
+
+| Param | Byte | Stored | Default | Use |
+|---|---|---|---|---|
+| 73 Sample Time | `<$17` | the value, µs | 34 (`$22`) | VIA T1 latch = 2·(p73 − 1) → period 2·p73 E cycles = p73 µs; 34 → 29.41 kHz |
+| 74 Input Filter | `<$18` | 2 × value | 80 (`$A0`) | filter 8 cutoff CV = `<$18` + `[$B283]` + `$5B`, `$FF` if it carries; 80 → `$FB` |
+| 75 Line/Mic | `<$19` | 0 = off (**mic**), 1 = on (line) | off | `<$19` = 0 → mux 0, else mux 1 |
+| 76 Threshold | `<$1A` | 2 × value | 24 (`$30` = 48) | trigger when \|code − `$80`\| ≥ `<$1A` |
+| 77 Multisampling | `<$1B` | 0 = off | off | off: the 8 wavesamples of the half are reset first |
+
+p74 moves the CV in steps of 2, i.e. a semitone with the section 5 mapping (24 steps per
+octave), as the guide says ("adjustable in semitone steps"): independent support for that model
+choice. The resonance CV comes from `$96FF` = `$18`, a constant in the OS image (nothing writes
+it). `$B283` is filter 8's calibration offset (`$B068 + 7 * $4D`, section 4).
+
+**Key sequence and what happens (OS 3.2, addresses and probe times):**
+
+1. **Sample Lower** (key code `$13`; Sample Upper is `$12`): `$949B-$94B7` sets `<$A4` = 0
+   (lower; upper sets 1), the display blinks "SL" (`6D 38`) for a 1000-tick countdown
+   (`<$34`, `$94C1-$94D0`), **2.53 s**.
+2. `$9F60`: interrupts masked (`ORCC #$50`) for the whole run; ROM `$F1BB` halts **all 32 DOC
+   oscillators** (control `$63` = halt, IE off; pointers `$10`) and drains the IRQ FIFO; ROM
+   `$F541` disables VIA interrupts, resets the ACIA, ORB `$30`. DOC channel sums measured 0 for
+   the whole run: channel 7 plays nothing, only the jack drives filter 8.
+3. `$9700-$9741`: ORB `$14` (mux 1, motor off); `$AE17` clears all 16 CVs; filter 8 cutoff and
+   resonance as above (`$9742`); 8 ms settle (`$F0A7`, Y = 1000); mux 0 if p75 = off (`$9722`);
+   `$9858` remembers the two bank values (`<$9B` = mux bits + quarter 0 or 2, `<$9C` = +1);
+   VIA T1 latch = 2·(p73 − 1), ACR `$4C` (T1 free-running, **no PB7 output**, so no MIDI clock),
+   IER `$C0` (T1 IRQ enabled, masked in the CPU).
+4. **Level-detect mode** from **+2.55 s** after the key: loop `$94D8-$94FA`. Each pass
+   (about 1.8 ms) `$974E` refreshes filter 8's CVs, does one discarded `$ECE2` read and 20
+   counted reads (`$977B`: B = \|code − `$80`\|), then lights one segment on **both** digits
+   (port A = code, PA3 = PA4 = 0): **top bar** `01` if ≥ 3 reads were ≥ `$7F` (clip), else
+   **middle bar** `40` if ≥ 3 reached the threshold, else **bottom bar** `08` if ≥ 3 were ≥ 8
+   (−24 dB), else **the decimal points** `80` (no level). Probe: silent → `80 80`; sine
+   amplitude 20 → `08 08`; 60 → `48 48`; 127 → `41 41` (passes alternate, persistence merges
+   them). Then port A = `$1F` (column 7) and PA7:PA6: **Enter** (row 1) → record; **Cancel**
+   (row 2) → leave (`<$93` = 2).
+5. **Enter**: `$9795` (entered within one pass). If p77 = off, `$97B3-$97CF` resets the 8
+   wavesamples (start `$00`, end `$FF`, ...). `$986C` takes the current wavesample's start/end
+   pages (`$0F,X`); for the defaults: quarter 0 from `$0000`, then quarter 1 up to `$7FF0`.
+   The end page is patched into the loop's `CMPX` (`$9847`). **Wave RAM is not touched before
+   the trigger** (probe: 0 bytes changed 0.5 s after Enter).
+6. **Waiting for the threshold** `$9802-$9817`: an unpaced loop of `$977B` reads (one per 56 E
+   cycles, 18,080 reads in 0.51 s) until one read has \|code − `$80`\| ≥ `<$1A`. p76 = 0 triggers
+   on the first read. Y starts at 1 (`LDY #$0001`, `$9807`) and each pass does `LEAY +1,Y` first, so it
+   takes the values 2..65,535 (the `BNE` at `$980D` falls through at 0): **65,534 polls**, no trigger in
+   **1.84 s** (65,534 x 56 E cycles) → return 1 → "nS" (`54 6D`)
+   blinks (`$9512`), back to normal play. (The guide says "about six seconds"; the loop at 2 MHz
+   gives 1.84 s.) The display is not driven here, so it goes blank.
+7. **Recording** `$9819-$9851`: port A = 6 (`$981B`: middle bar on both digits, driven
+   **statically** for the whole recording, as the guide says, "the middle bar should go on ...
+   and stay on for about two seconds"). Then per sample: `SYNC` (masked T1 IRQ), `LDB $E204`
+   (clears T1's flag), `LDB $ECE2`, 0 → 1 (0 is the DOC's end marker), `STB ,X+`. **One `$ECE2`
+   read per T1 period**: probe, 65,520 reads all exactly **68 E cycles** apart at p73 = 34. At
+   `$8000` the bank switches (`$9837`: ORB = `<$9C`, mux bits kept), X = 0. The triggering read is
+   not stored; each stored byte is the conversion the previous read started (section 3.2).
+8. **End** `$984B`: 16 zero bytes (`$FFF0-$FFFF` of the half), `$9941` (wavesample
+   bookkeeping), return 0 → `$9F6F`: ORB `$30` (mux 0), T2/IER restored, ACR `$CC`, T1 latch 0
+   (MIDI clock back), interrupts on; the display becomes steady `6D 71` ("SF" in the probe's
+   decoding). Probe, trigger at once: recording **2.228 s** (65,520 × 34 µs), end at Enter +
+   2.738 s, display `6D 71` from +2.76 s.
+
+**Where it writes (lower, p77 off):** wave RAM `$00000-$0FFEF` (65,520 bytes, quarters 0 and 1
+through the `$0000-$7FFF` window), `$0FFF0-$0FFFF` = 0. Upper (`<$A4` = 1, from the code, not
+run): PB1 set, `$10000-$1FFEF`. The probe's capture contains no 0 byte below `$FFF0`.
+
+**What the model needs (Plan 4 Task 2).** The decision table's model is **supported** where it
+says the jack enters voice channel 7's filter (so p74 and the calibration offset apply), mux 1 is
+line with no compressor, and mux 0 is mic: more gain plus the compressor, with mux 0 still reading
+`compressedAdcCode(mix)`. Two details **contradict** it, and the schematic wins:
+
+- **Mux 1 reads the uncompressed voice mix** (all 8 filters), not filter 8 alone. While the OS
+  samples, all 32 oscillators are halted, so the mix is filter 8's output plus the other filters'
+  input noise: in practice the same number (**inferred**: the probe measured the DOC channel
+  sums at 0, not the filters' outputs, and the other filters' noise is the model's 1e-4, section 1). Corrected: mux 1 = `128 + 127·clamp(mix, −1, 1)`
+  rounded, clamped to 1..255. With nothing connected and the voices halted that is `$80`, as the
+  current constant gives.
+- **The jack feeds filter 8 only while the mux selects 0 or 1** (`COM Y` is grounded for 2 and
+  3): jack × `kMicGain` for mux 0, jack × 1 for mux 1, nothing for mux 2/3. Since the OS keeps the
+  mux at 2/3 in normal play, a connected jack is not heard while playing; with a silent jack
+  nothing changes anywhere.
+
+**Ruled (controller, Plan 4 Task 2):** `kMicGain` = **11** (+20.8 dB), the schematic's resistor
+ratio, not the plan's 10: the guide's "about 20 times" most likely includes the compressor's
+make-up gain (**inferred**), and the compressor is modelled separately. Still **model choices**,
+not on the sheet: the jack's scale (±1.0 = line full scale), its polarity (the summer and the
+level shifter both invert; the jack is not inverted here) and the compressor's curve. The two
+contradictions above are what the engine implements.
+
+**The jack model (`Machine::render(in, out, frames, hostRate)`, Task 2).**
+
+```
+host samples -> sanitise -> inputResampler_ (host rate -> DOC scan rate) -> one sample per DOC scan
+   -> x kMicGain (mux 0) / x 1 (mux 1) / 0 (mux 2, 3) -> FilterBank::setExternalInput -> filter 7 input
+```
+
+- **Units.** ±1.0 at the jack is the full scale of the line path: a held DC of 0.5 settles to a
+  mix of 0.5 and reads `128 + round(127 x 0.5)` = `$C0` on mux 1. NaN and ±infinity read as 0;
+  finite samples are limited to ±64 (`kMaxJackLevel`) so the filters, and a snapshot of them, stay
+  finite.
+- **Timing.** A second `StreamResampler` (input rate = the host rate, output rate = the DOC scan
+  rate, updated at each scan) is fed the block's samples as the scans need them (`feedJack`, called
+  from `jackForScan`: the lead is kept at the kernel reach plus 64 samples, so the resampler's
+  4096-sample ring can never overflow however long the block, e.g. a CLI slice of 100,000+
+  frames; the rest of the block is pushed after the run, before `out` is written, so `in` may alias
+  `out`); `doc_.onFrame` pops one sample per scan, before `filters_.process`. A shortfall holds the
+  last value. A 102,400-frame block gives the same mix, bit for bit, at every scan as 400 blocks of
+  256 (the host-side output, which hands out `frames` samples per call, is not the same at
+  block boundaries). `runCycles()` outside `render()` keeps popping what the last render left
+  buffered (about the last 1.2 ms of its input; nothing new is pushed), then holds the last value.
+- **Group delay: 35 DOC scans = 1.19 ms at 48 kHz** (57 host samples). The resampler's output
+  position follows emulated time while a block's samples all arrive at its start, so it needs its
+  kernel reach (32 scans of input: 53 host samples at 48 kHz, 32 at host rates below the scan
+  rate; `StreamResampler::reach`) already pushed beyond the position or it starves. A plug-in
+  therefore pre-rolls zeros: the reach for the slowest DOC scan rate (29,411.76 Hz, 32
+  oscillators) plus a margin for the CPU's instruction overshoot (up to 64 cycles, so
+  `ceil(64 x hostRate / 2 MHz) + 2` host samples: 4 at 48 kHz, 15 at 384 kHz). The delay is then the same from the first sample on
+  and independent of what the DOC is doing when the jack is plugged in (the OS enables its
+  oscillators a moment after boot starts: a pre-roll sized from the instantaneous scan rate
+  measured 33 scans, not 35). **Measured and pinned** (`jack: an impulse lands at the scan for its
+  frame plus the resampler's group delay`; filter 7 open, mux 1, 48 kHz, 256-frame blocks): an
+  impulse at frame k of a block peaks in the mix 35, 36 and 35 scans after the scan nearest
+  `k x 29411.76 / 48000` for k = 40, 100 and 200 (the test allows 35 ± 1 for the scan phase at the
+  block start). Filter 7 (open, 13 kHz, four poles) adds under one scan. At other host rates the
+  pre-roll is the same reach in time: 35 scans at 44.1 kHz, 34 at 96 kHz (tested); below the scan
+  rate the kernel reaches 32 host samples, so the delay grows (46 scans at 22.05 kHz, tested).
+- **Plugging.** The flag follows the last `render`: with a buffer the jack is plugged (the first
+  such call after unplugging, or a call at a different host rate while plugged, resets the input
+  resampler and pre-rolls: the lead is a length in time at the old rate), with `nullptr` (or the old
+  `render(out, ...)`) it is unplugged (held value 0, resampler reset). A `render` skipped for an
+  unusable host rate changes nothing. `powerOn()` unplugs; the next `render` with input plugs in
+  again. While unplugged, `adcRead` mux 1 reads `$80` and nothing is added to filter 7.
+- **A silent jack changes nothing, exactly.** `FilterBank` adds the external input only when it is
+  not ±0.0 (`x + 0.0f` is already `x` except for `-0.0f`; never adding makes it exact), and mux 0
+  with a zero jack is `0 x 11` = 0. The test `machine with nothing plugged in renders exactly as
+  before` boots SND-A01 for 20 s from power-on in 256-frame blocks with `render(out)`,
+  `render(nullptr, out)` and `render(zeros, out)`: bit-identical audio and displays in every
+  block, and the same sample RAM and `cycles()` at the end. (A connected jack on mux 1 does read
+  differently from an unplugged one, but OS 3.2 selects mux 1 only while sampling.)
+- **Saved state (snapshot version 5).** `FilterBank` also saves the last output of every filter and
+  the held external input; a `JACK` section (after the audio path) saves the plugged flag, the held
+  value and the input resampler. Version 4 snapshots are refused.
+- **Real time.** The input resampler is built, with its rate-change list reserved, with the
+  `Machine`; `render` with input never allocates after `prepare()` (a plug-in, an unplug and a host
+  rate change are all inside the audited loop).
+
+**Not modelled, noted for the display:** port A = 6 drives the middle bars statically, but the
+panel model only lights a segment for 35 ms after a port A write (`Panel::portAWritten`), so in
+the emulator the display goes blank during the recording instead of showing "- -".
+
+**MASOS** (RAM after boot, `$96C2-$9718`, loop `$9852`): same mux bits (`$14`; `$10` if `<$19` = 0),
+filter 8 (`$E41F`, offset `$B2CD`), the same T1 pacing and threshold loop. Additions: with param
+93 ≠ 0 (`<$2B`) it reads the external Input Sampling Filter cartridge at `$DC00` instead of
+`$ECE2`, and below 28 µs it jumps to unrolled loops (`JMP [B,X]`, `$9836`).
+**Soundprocess:** no sampling routine: it never selects mux 1, never sets up T1 or the ACR, and reads
+`$ECE2` only for the wheels (mux 2/3, `$97D2-$9844`) and the calibration (mux 0, `$9250`).
 
 ## 4. The boot calibration (ROM `$F571`)
 
@@ -216,8 +419,9 @@ before Task 11, 1.38-1.45 s after (8 filters × 29.4 kHz, plus the A/D path).
 
 - Per-chip spread of cutoff and resonance (calibration would return different offsets).
 - S/H droop and CV feedthrough.
-- The audio input (out of scope, spec §3) and the input compressor's real curve; the routing of the sampling input
-  through voice 8's filter (section 3.3).
+- The input compressor's real curve, and the jack's absolute level (jack volts to A/D codes), polarity
+  and real mic gain (section 3.3). The audio input itself and its routing through voice 8's filter
+  are modelled (section 3.3, Plan 4).
 - Whether reading `$E400-$E41F` strobes anything (SP clears CVs with `CLR`, which reads first;
   the model ignores reads).
 

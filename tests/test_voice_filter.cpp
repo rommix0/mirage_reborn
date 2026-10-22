@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <numbers>
 #include <vector>
 
@@ -421,4 +422,92 @@ TEST_CASE("bank: reset clears CVs, DAC and the signal") {
   CHECK(b.resonanceCv(0) == 0);
   CHECK(b.dac() == 0);
   CHECK(b.mix() == 0.0f);
+}
+
+// ---- The external input (the audio jack, Plan 4) ----------------------------------
+
+TEST_CASE("bank: the external input enters channel 7 only, and is held until changed") {
+  FilterBank b;
+  load(b, 0x17, 0xFF);  // channel 7 cutoff fully open, resonance 0
+  const std::array<float, 8> silence{};
+  float mix = 0;
+  b.setExternalInput(0.5f);
+  for (int i = 0; i < 2000; ++i) b.process(silence, kDocRate, mix);  // held across scans
+  CHECK(b.output(7) == Catch::Approx(0.5).margin(0.01));
+  for (int ch = 0; ch < 7; ++ch) CHECK(std::fabs(b.output(ch)) < 0.01);
+  CHECK(mix == Catch::Approx(0.5).margin(0.01));
+  b.setExternalInput(0.0f);
+  for (int i = 0; i < 2000; ++i) b.process(silence, kDocRate, mix);
+  CHECK(std::fabs(b.output(7)) < 0.01);
+}
+
+TEST_CASE("bank: output(ch) is the last filter output and the mix is their sum") {
+  FilterBank b;
+  for (uint8_t ch = 0; ch < 8; ++ch) load(b, uint8_t(0x10 | ch), 0xB0);
+  std::array<float, 8> in{};
+  float mix = 0;
+  for (int i = 0; i < 500; ++i) {
+    for (size_t ch = 0; ch < 8; ++ch) in[ch] = ((i / (3 + int(ch))) % 2 ? 0.2f : -0.2f);
+    b.process(in, kDocRate, mix);
+  }
+  float sum = 0;
+  for (int ch = 0; ch < 8; ++ch) sum += b.output(ch);  // the bank adds them in channel order
+  CHECK(sum == mix);
+  CHECK(b.output(2) != 0.0f);
+  b.reset();
+  for (int ch = 0; ch < 8; ++ch) CHECK(b.output(ch) == 0.0f);
+}
+
+TEST_CASE("bank: an external input of +0.0 or -0.0 changes no bit of the output") {
+  FilterBank a, z, nz;
+  for (FilterBank* b : {&a, &z, &nz})
+    for (uint8_t ch = 0; ch < 8; ++ch) {
+      load(*b, uint8_t(0x10 | ch), uint8_t(0x60 + 11 * ch));
+      load(*b, uint8_t(0x08 | ch), 0x90);
+    }
+  std::array<float, 8> in{};
+  float ma = 0, mz = 0, mn = 0;
+  for (int i = 0; i < 4000; ++i) {
+    for (size_t ch = 0; ch < 8; ++ch)
+      in[ch] = (i / (5 + int(ch))) % 2 ? 0.3f : -0.3f;
+    if (i % 97 == 0) in[7] = -0.0f;  // a voice input of -0.0 must stay -0.0 too
+    z.setExternalInput(0.0f);
+    nz.setExternalInput(-0.0f);
+    a.process(in, kDocRate, ma);
+    z.process(in, kDocRate, mz);
+    nz.process(in, kDocRate, mn);
+    REQUIRE(std::memcmp(&ma, &mz, sizeof ma) == 0);
+    REQUIRE(std::memcmp(&ma, &mn, sizeof ma) == 0);
+    for (int ch = 0; ch < 8; ++ch) {
+      const float oa = a.output(ch), oz = z.output(ch), on = nz.output(ch);
+      REQUIRE(std::memcmp(&oa, &oz, sizeof oa) == 0);
+      REQUIRE(std::memcmp(&oa, &on, sizeof oa) == 0);
+    }
+  }
+}
+
+TEST_CASE("bank: save/load keeps the external input and the outputs") {
+  FilterBank a;
+  load(a, 0x17, 0xC0);
+  const std::array<float, 8> silence{};
+  float ma = 0, mb = 0;
+  a.setExternalInput(0.4f);
+  for (int i = 0; i < 300; ++i) a.process(silence, kDocRate, ma);
+  StateWriter w;
+  a.save(w);
+  const auto blob = w.take();
+  FilterBank b;
+  StateReader r(blob);
+  b.load(r);
+  CHECK(r.atEnd());
+  for (int ch = 0; ch < 8; ++ch) CHECK(b.output(ch) == a.output(ch));
+  for (int i = 0; i < 300; ++i) {  // the held input carries on in the restored bank
+    a.process(silence, kDocRate, ma);
+    b.process(silence, kDocRate, mb);
+    REQUIRE(ma == mb);
+  }
+  StateWriter wa, wb;
+  a.save(wa);
+  b.save(wb);
+  CHECK(wa.take() == wb.take());
 }

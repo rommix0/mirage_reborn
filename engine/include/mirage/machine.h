@@ -35,8 +35,10 @@ class Machine : private Bus {
   // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
   // the layout or the meaning of saved state changes; loadState() rejects any
   // other value. 4: same layout as 3, but a version-3 WD1772 state can hold MO
-  // off after an h=1 command and a sticky $D4 interrupt (Plan 3 Task 7).
-  static constexpr uint32_t kSnapshotVersion = 4;
+  // off after an h=1 command and a sticky $D4 interrupt (Plan 3 Task 7). 5: the
+  // filter bank also saves its outputs and the external input, and a "JACK"
+  // section follows the audio path (the audio input jack, Plan 4 Task 2).
+  static constexpr uint32_t kSnapshotVersion = 5;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);
@@ -156,6 +158,42 @@ class Machine : private Bus {
   // reserved capacity.
   void prepare(size_t maxFrames, double hostRate);
   void render(float* out, size_t frames, double hostRate);
+
+  // The rear-panel audio input jack (filters.md 3.1, 3.3). The same call as
+  // above with the host's input: `in` holds `frames` mono samples at hostRate
+  // (+-1.0 = full scale of the line path); nullptr means nothing is plugged in
+  // and is exactly render(out, frames, hostRate). `in` may be the same buffer
+  // as `out` (it is read before anything is written). NaN and infinity read as
+  // 0 and finite samples are limited to +-kMaxJackLevel. The block is resampled
+  // (a second StreamResampler, hostRate in, DOC scan rate out) and one sample
+  // is taken per DOC scan, in emulated time. The block is fed to the resampler
+  // as the scans need it, so a block of any length behaves like short ones
+  // (100,000 frames give the same scan-by-scan jack signal as 256-frame
+  // blocks). A sample for frame k of a block reaches the scan nearest
+  // k / hostRate after the block starts, plus a fixed
+  // delay of about 1.2 ms (35 scans at 48 kHz: the resampler's kernel reaches
+  // 32 scans, 53 host samples, ahead, and the first plug-in pre-rolls that
+  // many zeros plus a margin of 64 cycles' worth of samples, so the delay is the same from the first
+  // sample on and whenever the jack is plugged in; a render at a different
+  // host rate while plugged re-plugs the same way). A shortfall (a scan rate
+  // that has dropped since, or more scans than samples) holds the last value.
+  // runCycles() outside render() keeps taking one sample per scan from what
+  // the last render left in the resampler (the last 1.2 ms or so of its input),
+  // then holds the last value; nothing new arrives until the next render.
+  // The jack feeds filter 7 only while the A/D mux (VIA PB3:PB2) is 0 (times
+  // kMicGain) or 1; mux 1 then reads the whole voice mix as a line level.
+  // Real time: after prepare(), render with input allocates nothing.
+  // A render that is skipped for an unusable hostRate changes nothing,
+  // including the jack. powerOn() unplugs it; the next render with input
+  // plugs it in again.
+  void render(const float* in, float* out, size_t frames, double hostRate);
+  // The +20.8 dB gain of the mic preamp (schematic resistor ratio 11), applied
+  // to the jack signal while the mux selects the compressed path (0).
+  static constexpr float kMicGain = 11.0f;
+  static constexpr float kMaxJackLevel = 64.0f;
+  // True after a render with an input buffer, false after one without (saved
+  // state; it also decides what A/D mux 1 reads).
+  bool jackConnected() const { return jackConnected_; }
   // Output scale of render(), before the soft clip.
   static constexpr float kOutputGain = 0.5f;
   // Linear to +-0.75, then 0.75 + 0.25 tanh((|x| - 0.75) / 0.25): odd,
@@ -171,7 +209,8 @@ class Machine : private Bus {
   // part: the machine core (bank, cycle count and credit, main/expansion/sample
   // RAM), CPU (registers, wait state, interrupt lines), VIA, DOC (oscillators,
   // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
-  // DC blocker, fractional cycles, pending samples), WD1772 (registers and any
+  // DC blocker, fractional cycles, pending samples), the audio input jack (flag,
+  // held value, input resampler), WD1772 (registers and any
   // command in flight, with a Write Track's bytes so far), the inserted disk
   // with its dirty flag (or "no disk"),
   // ACIA (with the transmit holding register and shifter), the MIDI input queue with its next-delivery cycle, and the panel
@@ -209,6 +248,13 @@ class Machine : private Bus {
   void pushMix(float mix);
   void saveAudio(StateWriter&) const;
   void loadAudio(StateReader&);  // commits only on success
+  void saveJack(StateWriter&) const;
+  void loadJack(StateReader&);  // commits only on success
+  // Pushes the pending render input into inputResampler_: all of it, or enough
+  // to keep the resampler's lead at its kernel reach plus a small chunk.
+  void feedJack(bool all);
+  // doc_.onFrame: the jack's sample for this scan, as filter 7's external input.
+  float jackForScan();
 
   std::array<uint8_t, kBootRomSize> rom_{};
   std::array<uint8_t, 20> romSha1_{};
@@ -241,6 +287,17 @@ class Machine : private Bus {
   std::vector<float> pending_;        // resampled samples not yet handed out
   float lastOut_ = 0.0f;              // last sample handed out (held on an underrun)
   bool rendering_ = false;            // inside render(): pushMix feeds pending_
+
+  // Audio input jack (saved). inputResampler_ takes host samples (input rate =
+  // the host rate) and gives one sample per DOC scan (output rate = the scan
+  // rate, set at each scan).
+  StreamResampler inputResampler_{29411.76};
+  float jack_ = 0.0f;           // the latest sample taken from it (held on a shortfall)
+  bool jackConnected_ = false;  // the last render had an input buffer
+  // Inside render() with input: the part of the block not yet pushed (not saved;
+  // render() pushes all of it before it returns).
+  const float* jackIn_ = nullptr;
+  size_t jackInLeft_ = 0;
 };
 
 }  // namespace mirage

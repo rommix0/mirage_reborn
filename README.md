@@ -59,6 +59,25 @@ until about 14.6 s); the OS plays the imported bytes through whatever wavesample
 end and tuning its sound already has. See `docs/app.md` ("WAV import") for the halves
 and the pitch hint.
 
+## Sampling from the audio input jack
+
+```
+mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
+```
+
+`--audio-in "FILE@T[,gain=G][,loop=0|1]"` plays a WAV file into the emulated input
+jack from T seconds of emulated time, at its own rate (the CLI resamples it to `--rate`),
+times gain G (default 1) and repeating with `loop=1`. Repeat it to change the input
+later; a later entry replaces the earlier from its T. Without `--wav` the run is still
+rendered (the output is discarded) so the input is placed exactly. At the end it prints
+`audio-in: FILE N frames played` per entry. The example boots SND-A01, feeds a 440 Hz
+sine, and the OS samples it into the lower half (Sample Lower, then Enter once the
+level-detect display is up, 2.55 s later); the note at 23 s plays it back (key 52 is
+about 440 Hz). The input is for tests and listening: the app has no WAV player on the
+jack. The mic input (parameter 75 off, the default) is 11 times hotter than line and
+clips a full-scale sine, so the example above uses `gain=0.08`. How the OS samples is in
+`docs/hardware/filters.md` section 3.3.
+
 ## The standalone app (`app/`)
 
 A JUCE 8 app (replica front panel, menus, audio and MIDI devices, disk open and

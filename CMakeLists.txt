@@ -64,6 +64,10 @@ mirage_cli_test(cli_run_import_missing_file 1 "run|--import|no-such-file.wav@1"
                 "-DERR=^no-such-file.wav: The WAV file could not be opened./$")
 mirage_cli_test(cli_run_import_bad_field 2 "run|--import|a.wav@1,half=middle"
                 "-DERR=^bad value for --import: a.wav@1,half=middle/$")
+mirage_cli_test(cli_run_audio_in_missing_file 1 "run|--audio-in|no-such-file.wav@1"
+                "-DERR=^no-such-file.wav: The WAV file could not be opened./$")
+mirage_cli_test(cli_run_audio_in_bad_field 2 "run|--audio-in|a.wav@1,gain=loud"
+                "-DERR=^bad value for --audio-in: a.wav@1,gain=loud/$")
 mirage_cli_test(cli_run_missing_rom 1 "run|--rom|no-such-rom.bin|--seconds|1"
                 "-DERR=^no-such-rom.bin: cannot read a 4096-byte boot ROM/$")
 # Real runs (skipped without the user's ROM / disk).
@@ -120,3 +124,11 @@ add_test(NAME cli_run_import
                  "-DNEEDS=${MIRAGE_TEST_ROM}|${MIRAGE_TEST_SND_A01}"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_import.cmake)
 set_tests_properties(cli_run_import PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+# --audio-in: a WAV made by a first run is played into the jack; the run prints the frames fed
+# (tests/cli_audio_in.cmake).
+add_test(NAME cli_run_audio_in
+         COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:mirage_cli>
+                 -DDIR=${CMAKE_CURRENT_BINARY_DIR}/audio_in_e2e
+                 "-DNEEDS=${MIRAGE_TEST_ROM}"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_audio_in.cmake)
+set_tests_properties(cli_run_audio_in PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")

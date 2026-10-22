@@ -1,10 +1,10 @@
-// Acceptance 2-6, headless. 2: edit a parameter from the panel, save with the
+// Acceptance 2-7, headless. 2: edit a parameter from the panel, save with the
 // OS, write the disk to a file and boot a fresh machine from it. 3: import a WAV
 // into wave RAM, play it across the keyboard, save the sound with the OS and
 // reopen the image. 4: other OS images boot and play. 5: format a blank disk with
 // fmt2, boot it, save a sound to it and load it back. 6: .edm disks, raw and
-// Giebler, boot and play. The panel keys are the ones in docs/app.md (OS 3.2,
-// musician's manual).
+// Giebler, boot and play. 7: the OS samples a sine from the input jack. The panel
+// keys are the ones in docs/app.md (OS 3.2, musician's manual).
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -12,7 +12,9 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "asset_paths.h"
@@ -300,15 +302,16 @@ struct Played {
   double hz = 0;
 };
 
-// Note-on at velocity 100; the peak over 0.25 s and the fundamental (zero
-// crossings of the mean-removed signal from 31 ms to 125 ms, after the attack).
-Played playNote(Machine& m, int note) {
+// Note-on at velocity 100; the peak over 0.25 s (from frame peakFrom on) and the
+// fundamental (zero crossings of the mean-removed signal from 31 ms to 125 ms, after
+// the attack).
+Played playNote(Machine& m, int note, size_t peakFrom = 0) {
   const uint8_t on[] = {0x90, uint8_t(note), 100};
   m.queueMidi(on);
   std::vector<float> v(kPlayRate / 4);
   m.render(v.data(), v.size(), kPlayRate);
   Played p;
-  for (float x : v) p.peak = std::max(p.peak, std::fabs(x));
+  for (size_t i = peakFrom; i < v.size(); ++i) p.peak = std::max(p.peak, std::fabs(v[i]));
   const size_t from = 1500, to = 6000;
   double mean = 0;
   for (size_t i = from; i < to; ++i) mean += v[i];
@@ -493,4 +496,282 @@ TEST_CASE("acceptance 6: a Giebler .EDM boots its OS", "[assets][acceptance]") {
   CHECK(bootedSnapshotAt(kGiebler).seconds == bootedSnapshotAt(kImg).seconds);
   CHECK(sameDisplay(edm->display(), img->display()));
   CHECK(edm->fdc().sectorsRead() == img->fdc().sectorsRead());
+}
+
+// ---- Acceptance 7: sampling from the audio input jack -------------------------
+
+namespace {
+// Removes the file when it goes out of scope, so a failed REQUIRE leaks nothing.
+struct RemoveOnExit {
+  std::filesystem::path path;
+  ~RemoveOnExit() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+};
+
+// A sine at the jack, fed in 512-frame render blocks so emulated time advances
+// with the input (Machine::render, not runCycles). Phase continues across calls.
+struct Jack {
+  double hz = 440.0;
+  float amp = 0.5f;
+  uint64_t n = 0;
+  std::vector<float> buf = std::vector<float>(512);
+
+  // Renders `seconds` (whole blocks of 512 frames, at least one) with the sine at the jack.
+  void run(Machine& m, double seconds) {
+    const size_t blocks = std::max<size_t>(1, size_t(seconds * kPlayRate / 512.0 + 0.5));
+    for (size_t b = 0; b < blocks; ++b) {
+      for (float& x : buf)
+        x = float(amp * std::sin(2.0 * 3.14159265358979 * hz * double(n++) / kPlayRate));
+      m.render(buf.data(), buf.data(), buf.size(), kPlayRate);
+    }
+  }
+  void press(Machine& m, PanelKey k, double holdS = 0.15, double gapS = 0.25) {
+    m.setKey(k, true);
+    run(m, holdS);
+    m.setKey(k, false);
+    run(m, gapS);
+  }
+};
+
+std::vector<uint8_t> lowerHalf(const Machine& m) {
+  std::vector<uint8_t> v(0x10000);
+  for (uint32_t i = 0; i < v.size(); ++i) v[i] = m.sampleRam(i);
+  return v;
+}
+
+// The OS's display codes (segment bits) at the end of a sampling run ("SF"-style
+// 6D 71, filters.md 3.3) and when no sound crossed the threshold ("nS", 54 6D).
+constexpr uint8_t kSegDoneL = 0x6D, kSegDoneR = 0x71, kSegNsL = 0x54, kSegNsR = 0x6D;
+constexpr uint32_t kSampled = 0x0FFF0;  // sampling writes $00000-$0FFEF, then 16 zeros
+constexpr double kSampleTimeUs = 34.0;  // parameter 73's default; the sampling period
+constexpr double kSampleRate = 1.0e6 / kSampleTimeUs;
+
+// What the keys do after the jack is plugged in: Sample Lower, wait for level-detect
+// (2.55 s after the press, filters.md 3.3), then Enter. Returns at once after Enter;
+// the caller keeps feeding the jack until the run is over.
+void startSampleLower(Machine& m, Jack& j) {
+  j.run(m, 0.1);
+  j.press(m, PanelKey::SampleLower, 0.15, 2.5);
+  j.press(m, PanelKey::Enter, 0.15, 0.0);
+}
+
+// Everything a sampling run left behind.
+struct SampledSine {
+  bool done = false;          // the display reached the end-of-run code
+  double secondsAfterEnter = 0;
+  std::vector<uint8_t> state;  // the machine afterwards, unplugged
+  std::vector<uint8_t> lower;  // wave RAM $00000-$0FFFF
+};
+
+// Boots SND-A01, optionally selects line input (parameter 75 on), plugs a sine of
+// frequency 440 Hz and amplitude `amp` into the jack and samples the lower half with
+// the OS. Cached per (line, amp): a run is about 6 emulated seconds.
+const SampledSine& sampledSine(bool line, float amp) {
+  static std::map<std::pair<bool, float>, SampledSine> cache;
+  const auto key = std::make_pair(line, amp);
+  if (const auto it = cache.find(key); it != cache.end()) return it->second;
+
+  auto m = bootedMachineAt(kSndA01);
+  if (line) {  // Param 7 5 Value, Up: line (the value 1)
+    showParameter(*m, 75);
+    pressKeys(*m, {PanelKey::Up});
+  }
+  Jack j;
+  j.amp = amp;
+  startSampleLower(*m, j);
+  SampledSine out;
+  for (size_t t = 0; t < 600 && !out.done; ++t) {  // up to 6.4 s
+    j.run(*m, 0.01);
+    const DisplayState d = m->display();
+    out.done = d.left == kSegDoneL && d.right == kSegDoneR;
+  }
+  out.secondsAfterEnter = double(j.n) / kPlayRate;
+  // Unplug: sampling is over, and runCycles would hold the jack's last value. Then render
+  // half a second with nothing plugged in. The unplug leaves the output stage mid-sine:
+  // filter 7 rings for a few ms, and the host-side DC blocker (5 Hz, 32 ms time constant)
+  // holds the state of the sampling mix, which runCycles() does not update, so a note
+  // started at once opens with a decaying burst (peak 0.10 against 0.064; measured to be
+  // in the DC-blocked output only, the raw mix of the note is the same). Half a second
+  // of render settles both; the sampled data and the OS are not touched by it.
+  std::vector<float> idle(kPlayRate / 2);
+  m->render(idle.data(), idle.size(), kPlayRate);
+  out.state = m->saveState();
+  out.lower = lowerHalf(*m);
+  return cache[key] = std::move(out);
+}
+
+std::unique_ptr<Machine> machineFrom(const std::vector<uint8_t>& state) {
+  auto m = std::make_unique<Machine>(bootRomBytes());
+  m->loadState(state);
+  return m;
+}
+
+struct RamStats {
+  int lo = 255, hi = 0;     // smallest and largest byte over the sampled range
+  int longestClip = 0;      // the longest run of $01 or $FF
+  size_t crossings = 0;     // rising crossings of $80
+  double period = 0;        // mean distance between them, in bytes
+};
+RamStats analyse(const std::vector<uint8_t>& ram) {
+  RamStats s;
+  int run = 0;
+  double first = 0, last = 0;
+  for (uint32_t i = 0; i < kSampled; ++i) {
+    s.lo = std::min<int>(s.lo, ram[i]);
+    s.hi = std::max<int>(s.hi, ram[i]);
+    run = (ram[i] == 0x01 || ram[i] == 0xFF) ? run + 1 : 0;
+    s.longestClip = std::max(s.longestClip, run);
+    if (i > 0 && ram[i - 1] < 0x80 && ram[i] >= 0x80) {
+      if (s.crossings++ == 0) first = i;
+      last = i;
+    }
+  }
+  if (s.crossings >= 2) s.period = (last - first) / double(s.crossings - 1);
+  return s;
+}
+}  // namespace
+
+// The sine's level: mic (the default) has 11 times the gain of line and a compressor,
+// and a full-scale sine clips it, so the main test uses a small one. 0.08 at the jack
+// swings the sampled bytes about 70 either side of $80 (measured).
+constexpr float kMicAmp = 0.08f;
+
+TEST_CASE("acceptance 7: OS 3.2 samples a sine from the input jack", "[assets][acceptance]") {
+  REQUIRE_ASSET(assetPath(kSndA01));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+
+  // The sample time is parameter 73, 34 us by default.
+  {
+    auto m = bootedMachineAt(kSndA01);
+    REQUIRE(displayedValue(showParameter(*m, 73)) == int(kSampleTimeUs));
+  }
+
+  const SampledSine& s = sampledSine(false, kMicAmp);
+  REQUIRE(s.done);
+  INFO("sampling ended " << s.secondsAfterEnter << " s of rendering after the first key");
+
+  // The lower half holds a sine of the right pitch: rate / 440 bytes per cycle.
+  const RamStats st = analyse(s.lower);
+  INFO("bytes " << st.lo << ".." << st.hi << ", longest clip run " << st.longestClip
+                << ", crossings " << st.crossings << ", period " << st.period);
+  CHECK(st.crossings > 900);
+  CHECK(st.period == Catch::Approx(kSampleRate / kSineHz).epsilon(0.02));
+  CHECK(st.hi - st.lo > 100);  // a real signal, not a trickle
+  CHECK(st.longestClip <= 3);  // within the 8-bit range, not clipped
+  for (uint32_t i = kSampled; i < 0x10000; ++i) CHECK(s.lower[i] == 0);
+
+  // It plays: a note on the lower keyboard has a level, and an octave up is twice the
+  // pitch. Keys 46-66 of the sampled sound run a semitone apart on one wavesample (the
+  // OS splits the keyboard into wavesamples; keys 44-45 and 66-67 straddle two), and key
+  // 52 plays the 440 Hz sine back at 440 Hz (measured: 441.5 Hz).
+  auto low = machineFrom(s.state);
+  auto high = machineFrom(s.state);
+  const Played a = playNote(*low, 52), b = playNote(*high, 64);
+  INFO("key 52: " << a.hz << " Hz, peak " << a.peak << "; key 64: " << b.hz << " Hz, peak "
+                  << b.peak);
+  CHECK(a.peak > 0.05f);
+  CHECK(b.peak > 0.05f);
+  REQUIRE(a.hz > 0);
+  REQUIRE(b.hz > 0);
+  CHECK(b.hz / a.hz == Catch::Approx(2.0).epsilon(0.03));
+  CHECK(a.hz == Catch::Approx(kSineHz).epsilon(0.03));
+}
+
+// Mic (parameter 75 off, the default) has 11 times the gain of line (on) and a
+// compressor. The same full-scale sine gives the larger swing in wave RAM through the
+// mic; through line it is still a clean sine at the right pitch.
+TEST_CASE("acceptance 7: the mic input is hotter than the line input", "[assets][acceptance]") {
+  REQUIRE_ASSET(assetPath(kSndA01));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  // Line is 11 times quieter, and filter 7 passes about 0.54 of it: 1.0 crosses the OS's
+  // default threshold, 0.5 does not (the OS gives up with "nS").
+  const SampledSine& mic = sampledSine(false, 1.0f);
+  const SampledSine& line = sampledSine(true, 1.0f);
+  REQUIRE(mic.done);
+  REQUIRE(line.done);
+  const RamStats m = analyse(mic.lower), l = analyse(line.lower);
+  INFO("mic bytes " << m.lo << ".." << m.hi << " (clip run " << m.longestClip << "); line bytes "
+                    << l.lo << ".." << l.hi << " (clip run " << l.longestClip << ")");
+  CHECK((m.hi - m.lo) > (l.hi - l.lo));
+  CHECK((l.hi - l.lo) > 100);
+  CHECK(l.longestClip <= 3);
+  CHECK(l.period == Catch::Approx(kSampleRate / kSineHz).epsilon(0.02));
+  CHECK(m.period == Catch::Approx(kSampleRate / kSineHz).epsilon(0.02));
+}
+
+// Nothing crosses the threshold (parameter 76, 24 by default): the jack is plugged in but
+// silent. After Enter the OS waits about 1.8 s for a level, gives up and shows "nS", and
+// wave RAM is untouched.
+TEST_CASE("acceptance 7: a silent jack never crosses the threshold", "[assets][acceptance]") {
+  REQUIRE_ASSET(assetPath(kSndA01));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  auto m = bootedMachineAt(kSndA01);
+  Jack j;
+  j.amp = 0.0f;
+  j.run(*m, 0.1);
+  j.press(*m, PanelKey::SampleLower, 0.15, 2.5);
+  REQUIRE(m->jackConnected());
+  const auto level = m->display();  // level-detect, no level: 80 80
+  CHECK(level.left == 0x80);
+  CHECK(level.right == 0x80);
+
+  std::vector<uint8_t> before(Machine::kSampleRamSize);
+  for (uint32_t i = 0; i < before.size(); ++i) before[i] = m->sampleRam(i);
+  j.press(*m, PanelKey::Enter, 0.15, 0.0);
+  bool nS = false, sampled = false;
+  for (size_t t = 0; t < 470; ++t) {  // 5 s
+    j.run(*m, 0.01);
+    const DisplayState d = m->display();
+    nS = nS || (d.left == kSegNsL && d.right == kSegNsR);
+    sampled = sampled || (d.left == kSegDoneL && d.right == kSegDoneR);
+  }
+  CHECK(nS);
+  CHECK_FALSE(sampled);
+  size_t changed = 0;
+  for (uint32_t i = 0; i < before.size(); ++i) changed += m->sampleRam(i) != before[i];
+  CHECK(changed == 0);
+}
+
+// As acceptance 3: the OS saves the sampled lower sound, the image is written out and a
+// fresh machine boots from it; the same note has the same level and pitch.
+TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[assets][acceptance]") {
+  REQUIRE_ASSET(assetPath(kSndA01));
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  const SampledSine& s = sampledSine(false, kMicAmp);
+  REQUIRE(s.done);
+  auto m = machineFrom(s.state);
+  // The level is the peak from 10 ms on. A note's first milliseconds depend on when the
+  // OS happens to handle the note-on against its own timer ticks, which a machine that
+  // booted at another moment does not share (acceptance 3's two machines happen to line
+  // up bit for bit; these two do not). Measured on this sampled sound, note-on offset by
+  // 0-12 ms in 1 ms steps: peak of the first 10 ms 0.064-0.074, peak after it 0.0638-0.0644
+  // (the stock SND-A01 piano shows the same: 0.253-0.280 after 10 ms). The data is also
+  // checked directly: the reopened wave RAM is the sampled wave RAM, byte for byte.
+  constexpr size_t kAfterStart = 480;  // 10 ms at kPlayRate
+  const Played before = playNote(*m, 52, kAfterStart);
+  INFO("before saving: " << before.hz << " Hz, peak " << before.peak);
+  REQUIRE(before.peak > 0.05f);
+  REQUIRE(before.hz > 0);
+  const uint8_t off[] = {0x80, 52, 0};
+  m->queueMidi(off);
+  runSeconds(*m, 1.0);
+
+  osSaveLowerSound(*m);
+  REQUIRE(m->disk() != nullptr);
+  REQUIRE(m->disk()->dirty());
+  const auto path = std::filesystem::temp_directory_path() / "mirage_acceptance7.img";
+  const RemoveOnExit cleanup{path};
+  m->disk()->saveFile(path);
+  Machine fresh(bootRomBytes());
+  fresh.insertDisk(DiskImage::loadFile(path));
+  fresh.powerOn();
+  settleBoot(fresh);
+
+  CHECK(lowerHalf(fresh) == s.lower);
+  const Played after = playNote(fresh, 52, kAfterStart);
+  INFO("after reopening: " << after.hz << " Hz, peak " << after.peak);
+  CHECK(after.peak == Catch::Approx(before.peak).epsilon(0.10));
+  CHECK(after.hz == Catch::Approx(before.hz).epsilon(0.03));
 }

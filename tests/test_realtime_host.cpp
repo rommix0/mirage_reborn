@@ -1,5 +1,6 @@
 // RealtimeHost (host/include/mirage/realtime_host.h): the audio thread owns the
 // Machine; the UI and MIDI threads post through lock-free queues.
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
@@ -291,7 +292,8 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
   auto busyWrite = waveWrite(0x10000, std::vector<uint8_t>(4096, 0x55));
   auto idleWrite = waveWrite(0x00100, std::vector<uint8_t>(4096, 0x66));
   WaveWrite *rawBusy = busyWrite.get(), *rawIdle = idleWrite.get();
-  std::vector<float> buf(kMax);
+  std::vector<float> buf(kMax), inBuf(kMax);  // inBuf: the audio input (a tone; unplugged now and then)
+  for (size_t k = 0; k < kMax; ++k) inBuf[k] = 0.3f * float(std::sin(0.05 * double(k)));
   const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
   std::vector<uint8_t> sysex(20, 0x01);  // non-commercial ID: the OS ignores it
   sysex.front() = 0xF0;
@@ -323,6 +325,7 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
         break;
       case 80: REQUIRE(host.postEject()); break;
       case 85: REQUIRE(host.postPanic()); break;
+      case 50: host.setInputGain(2.5f); break;
       case 90:
         sectorsRead = host.machineForTest().fdc().sectorsRead();  // powerOn() zeroes it
         REQUIRE(host.postReset());
@@ -335,7 +338,7 @@ TEST_CASE("host process allocates nothing after prepare", "[assets]") {
     }
     {
       AllocationScope scope;
-      host.process(buf.data(), kMax, rate, now);
+      host.process(i % 9 == 8 ? nullptr : inBuf.data(), buf.data(), kMax, rate, now);
       allocations += scope.count();
       frees += scope.frees();
     }
@@ -861,4 +864,246 @@ TEST_CASE("host destructor frees wave writes still in its queues") {
   };
   const size_t bare = destructorFrees(false);
   CHECK(destructorFrees(true) >= bare + 2 * 2);
+}
+
+// ---- Audio input through the host (Plan 4 Task 4) ----
+
+namespace {
+
+constexpr double kRate = 48000.0;
+constexpr size_t kBlk = 256;
+
+// A host running mirage_test::adcLoopRom(mux), prepared for maxFrames at 48 kHz.
+struct InputRig {
+  explicit InputRig(uint8_t mux = 1, size_t maxFrames = kBlk) : host(mirage_test::adcLoopRom(mux)) {
+    host.prepare(maxFrames, kRate);
+  }
+  // `blocks` blocks of a constant `level` through process() (in == nullptr when !plugged).
+  void run(int blocks, float level, bool plugged = true, double rate = kRate) {
+    const std::vector<float> in(kBlk, level);
+    std::vector<float> out(kBlk);
+    for (int i = 0; i < blocks; ++i)
+      host.process(plugged ? in.data() : nullptr, out.data(), kBlk, rate, 0.0);
+  }
+  float filter7() { return host.machineForTest().filters().output(7); }
+  bool jack() { return host.machineForTest().jackConnected(); }
+  RealtimeHost host;
+};
+
+}  // namespace
+
+TEST_CASE("host input reaches the machine as Machine::render does directly") {
+  InputRig r;
+  Machine direct(mirage_test::adcLoopRom(1));
+  direct.powerOn();
+  direct.prepare(kBlk, kRate);
+  std::vector<float> in(kBlk), outHost(kBlk), outDirect(kBlk);
+  for (int b = 0; b < 120; ++b) {
+    for (size_t i = 0; i < kBlk; ++i)
+      in[i] = (b % 2 ? 0.5f : 0.25f) + 0.1f * float(std::sin(0.05 * double(i)));
+    r.host.process(in.data(), outHost.data(), kBlk, kRate, 0.0);
+    direct.render(in.data(), outDirect.data(), kBlk, kRate);
+    REQUIRE(outHost == outDirect);
+  }
+  CHECK(r.jack());
+  CHECK(r.filter7() == direct.filters().output(7));
+  CHECK(std::fabs(r.filter7()) > 0.2f);  // and the input really moved it
+  CHECK(r.host.machineForTest().saveState() == direct.saveState());
+}
+
+TEST_CASE("host in == nullptr after input blocks unplugs the jack and it goes silent") {
+  InputRig r;
+  r.run(100, 0.5f);
+  CHECK(r.jack());
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+  r.run(100, 0.0f, false);
+  CHECK_FALSE(r.jack());
+  CHECK(std::fabs(r.filter7()) < 0.01f);
+  CHECK(r.host.machineForTest().peek(0x8000) == 0x80);  // mux 1 with nothing plugged in
+  CHECK(r.host.status().inputPeak == 0.0f);
+  r.run(100, 0.5f);  // a device that comes back is plugged in again
+  CHECK(r.jack());
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+}
+
+TEST_CASE("host input gain 0 is silence at the jack, which stays connected") {
+  InputRig r;
+  r.host.setInputGain(0.0f);
+  r.run(100, 0.5f);
+  CHECK(r.jack());
+  CHECK(std::fabs(r.filter7()) < 0.01f);
+  CHECK(r.host.status().inputPeak == 0.0f);
+  r.host.setInputGain(1.0f);
+  r.run(100, 0.5f);
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+}
+
+TEST_CASE("host input gain scales the signal at the jack and is clamped to 0..4") {
+  InputRig r;
+  r.host.setInputGain(0.5f);
+  r.run(100, 0.5f);
+  CHECK(r.filter7() == Catch::Approx(0.25).margin(0.01));
+  r.host.setInputGain(100.0f);  // clamped to 4: 0.1 x 4
+  r.run(100, 0.1f);
+  CHECK(r.filter7() == Catch::Approx(0.4).margin(0.01));
+  CHECK(r.host.status().inputPeak == Catch::Approx(0.4f));
+  r.host.setInputGain(-3.0f);  // clamped to 0
+  r.run(100, 0.5f);
+  CHECK(std::fabs(r.filter7()) < 0.01f);
+  r.host.setInputGain(2.0f);
+  r.host.setInputGain(std::numeric_limits<float>::quiet_NaN());  // ignored
+  r.run(100, 0.1f);
+  CHECK(r.filter7() == Catch::Approx(0.2).margin(0.01));
+}
+
+TEST_CASE("host inputPeak is the block's largest |sample| after the gain; NaN cannot poison it") {
+  InputRig r;
+  CHECK(r.host.status().inputPeak == 0.0f);
+  std::vector<float> in(kBlk, 0.1f), out(kBlk);
+  in[10] = -0.6f;
+  in[20] = 0.3f;
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == Catch::Approx(0.6f));
+  r.host.setInputGain(2.0f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == Catch::Approx(1.2f));  // not clipped: the gain is a plain multiply
+  // The next block reports its own peak, not a decaying or held one.
+  std::fill(in.begin(), in.end(), 0.05f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == Catch::Approx(0.1f));
+  // NaN and infinity read as 0 (as at the jack), also with gain 0 (inf x 0 is NaN).
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  in[0] = nan;
+  in[1] = inf;
+  in[2] = -inf;
+  in[3] = 0.25f;
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == Catch::Approx(0.5f));
+  r.host.setInputGain(0.0f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == 0.0f);
+  r.host.setInputGain(4.0f);  // a finite sample that overflows to infinity after the gain
+  std::fill(in.begin(), in.end(), 3.0e38f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == 0.0f);
+  for (float s : out) REQUIRE(std::isfinite(s));
+  // No input, and an unusable rate: 0.
+  r.host.setInputGain(1.0f);
+  std::fill(in.begin(), in.end(), 0.4f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == Catch::Approx(0.4f));
+  r.host.process(in.data(), out.data(), kBlk, 0.0, 0.0);
+  CHECK(r.host.status().inputPeak == 0.0f);
+  r.host.process(in.data(), out.data(), kBlk, kRate, 0.0);
+  r.host.process(nullptr, out.data(), kBlk, kRate, 0.0);
+  CHECK(r.host.status().inputPeak == 0.0f);
+}
+
+TEST_CASE("host a rate change between input blocks keeps the jack alive and finite") {
+  InputRig r;
+  r.run(60, 0.5f);
+  REQUIRE(r.filter7() == Catch::Approx(0.5).margin(0.01));
+  r.run(60, 0.5f, true, 44100.0);  // the device restarted at another rate: re-plugged
+  CHECK(r.jack());
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+  r.run(60, 0.5f, true, 96000.0);
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+  // An unusable rate in the middle changes nothing at the jack, and the input is not read.
+  std::vector<float> in(kBlk, 0.5f), out(kBlk, 1.0f);
+  r.host.process(in.data(), out.data(), kBlk, std::numeric_limits<double>::quiet_NaN(), 0.0);
+  for (float s : out) CHECK(s == 0.0f);
+  CHECK(r.jack());
+  r.run(60, 0.5f);
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+  // Input gone, then back at yet another rate.
+  r.run(30, 0.0f, false);
+  CHECK_FALSE(r.jack());
+  r.run(60, 0.5f, true, 32000.0);
+  CHECK(r.jack());
+  CHECK(r.filter7() == Catch::Approx(0.5).margin(0.01));
+}
+
+TEST_CASE("host a block larger than the prepared size is processed in chunks, same as one render") {
+  InputRig r(1, 64);  // prepared for 64, blocks of 256
+  Machine direct(mirage_test::adcLoopRom(1));
+  direct.powerOn();
+  direct.prepare(kBlk, kRate);
+  std::vector<float> in(kBlk), outHost(kBlk), outDirect(kBlk);
+  for (int b = 0; b < 60; ++b) {
+    for (size_t i = 0; i < kBlk; ++i) in[i] = 0.4f * float(std::sin(0.03 * double(b * 256 + int(i))));
+    {
+      AllocationScope scope;
+      r.host.process(in.data(), outHost.data(), kBlk, kRate, 0.0);
+      CHECK(scope.count() == 0);
+      CHECK(scope.frees() == 0);
+    }
+    direct.render(in.data(), outDirect.data(), kBlk, kRate);
+    // The engine's first output block depends on the block length (the output
+    // resampler is still priming); from then on chunking changes nothing.
+    if (b > 0) REQUIRE(outHost == outDirect);
+  }
+  CHECK(r.host.machineForTest().saveState() == direct.saveState());
+  CHECK(r.host.status().inputPeak > 0.3f);  // the peak spans all the chunks
+}
+
+TEST_CASE("host input stays aligned across segments split at a MIDI event") {
+  InputRig r(1);
+  Machine direct(mirage_test::adcLoopRom(1));
+  direct.powerOn();
+  direct.prepare(kBlk, kRate);
+  std::vector<float> in(kBlk), outHost(kBlk), outDirect(kBlk);
+  for (size_t i = 0; i < kBlk; ++i) in[i] = 0.3f * float(std::sin(0.07 * double(i)));
+  const uint8_t on[] = {0x90, 60, 100};
+  constexpr size_t kAt = 100;
+  for (int b = 0; b < 30; ++b) {
+    const double now = 10.0 + b;
+    // The event lands (now - t) * rate = 156 frames before the end: at frame 100.
+    REQUIRE(r.host.postMidi(on, now - double(kBlk - kAt) / kRate));
+    r.host.process(in.data(), outHost.data(), kBlk, kRate, now);
+    direct.render(in.data(), outDirect.data(), kAt, kRate);
+    direct.queueMidi(on);
+    direct.render(in.data() + kAt, outDirect.data() + kAt, kBlk - kAt, kRate);
+    REQUIRE(outHost == outDirect);
+  }
+  CHECK(r.host.machineForTest().saveState() == direct.saveState());
+}
+
+TEST_CASE("host input may alias the output buffer") {
+  InputRig r;
+  Machine direct(mirage_test::adcLoopRom(1));
+  direct.powerOn();
+  direct.prepare(kBlk, kRate);
+  std::vector<float> in(kBlk, 0.3f), buf(kBlk), outDirect(kBlk);
+  for (int b = 0; b < 20; ++b) {
+    buf = in;
+    r.host.process(buf.data(), buf.data(), kBlk, kRate, 0.0);
+    direct.render(in.data(), outDirect.data(), kBlk, kRate);
+    REQUIRE(buf == outDirect);
+  }
+}
+
+TEST_CASE("host process with input allocates nothing after prepare") {
+  InputRig r(1, 64);
+  std::vector<float> in(256, 0.3f), out(256);
+  size_t allocations = 0, frees = 0;
+  for (int i = 0; i < 40; ++i) {
+    if (i == 10) r.host.setInputGain(2.0f);
+    const double rate = i < 20 ? 48000.0 : 44100.0;
+    AllocationScope scope;
+    r.host.process(i % 7 == 6 ? nullptr : in.data(), out.data(), i % 3 == 0 ? 64 : 256, rate, 0.0);
+    allocations += scope.count();
+    frees += scope.frees();
+  }
+  CHECK(allocations == 0);
+  CHECK(frees == 0);
+}
+
+TEST_CASE("host input works before prepare (the buffer grows on first use)") {
+  RealtimeHost host(mirage_test::adcLoopRom(1));  // never prepared
+  std::vector<float> in(256, 0.5f), out(256);
+  for (int i = 0; i < 60; ++i) host.process(in.data(), out.data(), 256, 48000.0, 0.0);
+  CHECK(host.machineForTest().jackConnected());
+  CHECK(host.machineForTest().filters().output(7) == Catch::Approx(0.5).margin(0.01));
+  CHECK(host.status().inputPeak == Catch::Approx(0.5f));
 }

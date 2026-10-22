@@ -1,4 +1,5 @@
 // mirage_cli run: option parsing and the event schedule (tools/mirage_cli/run_options.*).
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
@@ -406,4 +407,171 @@ TEST_CASE("cli runSchedule refuses an import while the drive is busy") {
   cli::runSchedule(m, o, nullptr, nullptr, &log);
   CHECK(log.str() == "import: " + file + " refused, the drive is busy\n");
   CHECK(m.sampleRam(0) == 0);
+}
+
+// ---- --audio-in -------------------------------------------------------------
+
+namespace {
+const RunEvent& audioInAt(const cli::RunOptions& o, size_t nth) {
+  size_t seen = 0;
+  for (const RunEvent& e : o.events)
+    if (e.kind == Kind::AudioIn && seen++ == nth) return e;
+  FAIL("no such --audio-in entry");
+  return o.events.front();
+}
+
+// A mono WAV of `frames` samples, ramping 0 to just under 1, in the temp folder; the file
+// is removed when the object goes out of scope, so a failed REQUIRE leaks nothing.
+struct RampWav {
+  std::filesystem::path path;
+  std::string file;  // path as the --audio-in option spells it
+  RampWav(const char* name, size_t frames, int rate)
+      : path(std::filesystem::temp_directory_path() / name), file(path.generic_string()) {
+    std::vector<float> v(frames);
+    for (size_t i = 0; i < frames; ++i) v[i] = float(i) / float(frames);
+    writeWav(path, v, rate);
+  }
+  ~RampWav() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+};
+}  // namespace
+
+TEST_CASE("cli run --audio-in: defaults") {
+  const auto o = parseOk({"--audio-in", "a.wav@2.5"});
+  REQUIRE(o.events.size() == 1);
+  const RunEvent& e = audioInAt(o, 0);
+  CHECK(e.file == "a.wav");
+  CHECK(e.cycle == 5 * kSecond / 2);
+  CHECK(e.gain == 1.0);
+  CHECK_FALSE(e.loop);
+}
+
+TEST_CASE("cli run --audio-in: every field") {
+  const auto o = parseOk({"--audio-in", "C:/some dir/a@b.wav@1,gain=0.25,loop=1"});
+  const RunEvent& e = audioInAt(o, 0);
+  CHECK(e.file == "C:/some dir/a@b.wav");
+  CHECK(e.cycle == kSecond);
+  CHECK(e.gain == 0.25);
+  CHECK(e.loop);
+  CHECK_FALSE(audioInAt(parseOk({"--audio-in", "a.wav@0,loop=0,gain=3"}), 0).loop);
+  CHECK(audioInAt(parseOk({"--audio-in", "a.wav@0,loop=0,gain=3"}), 0).gain == 3.0);
+}
+
+TEST_CASE("cli run --audio-in is repeatable and sorted with the other events") {
+  const auto o = parseOk({"--seconds", "5", "--note", "60:100@2:1", "--audio-in", "b.wav@3",
+                          "--audio-in", "a.wav@1", "--audio-in", "c.wav@1"});
+  std::vector<std::pair<uint64_t, std::string>> got;
+  for (const RunEvent& e : o.events)
+    got.emplace_back(e.cycle, e.kind == Kind::AudioIn ? e.file : std::string("midi"));
+  CHECK(got == std::vector<std::pair<uint64_t, std::string>>{{kSecond, "a.wav"},
+                                                             {kSecond, "c.wav"},
+                                                             {2 * kSecond, "midi"},
+                                                             {3 * kSecond, "b.wav"},
+                                                             {3 * kSecond, "midi"}});
+}
+
+TEST_CASE("cli run --audio-in: bad values are usage errors") {
+  for (const char* v : {"", "a.wav", "@1", "a.wav@", "a.wav@x", "a.wav@-1", "a.wav@1,",
+                        "a.wav@1,gain", "a.wav@1,gain=", "a.wav@1,gain=loud", "a.wav@1,gain=-1",
+                        "a.wav@1,loop", "a.wav@1,loop=", "a.wav@1,loop=2", "a.wav@1,loop=yes",
+                        "a.wav@1,rate=22050", "a.wav@1,,gain=1"}) {
+    INFO(v);
+    const auto e = parseFails({"--audio-in", v});
+    CHECK(e.exitCode == 2);
+    CHECK(e.message == std::string("bad value for --audio-in: ") + v);
+  }
+}
+
+TEST_CASE("cli prepareAudioIn reports a missing file") {
+  auto o = parseOk({"--audio-in", "no-such-file.wav@1"});
+  CHECK(cli::prepareAudioIn(o) == "no-such-file.wav: The WAV file could not be opened.");
+}
+
+TEST_CASE("cli prepareAudioIn resamples to --rate and applies the gain") {
+  const RampWav wav("mirage_cli_audio_in_test.wav", 1000, 22050);
+  const std::string& file = wav.file;
+  SECTION("the same rate: the file's samples times the gain") {
+    auto o = parseOk({"--rate", "22050", "--audio-in", file + "@0,gain=0.5"});
+    REQUIRE(cli::prepareAudioIn(o).empty());
+    const auto& s = audioInAt(o, 0).samples;
+    REQUIRE(s.size() == 1000);
+    CHECK(s[0] == 0.0f);
+    CHECK(s[500] == Catch::Approx(0.25f));
+    CHECK(s[999] == Catch::Approx(0.4995f));
+  }
+  SECTION("twice the rate: twice the frames, a linear ramp through the same values") {
+    auto o = parseOk({"--rate", "44100", "--audio-in", file + "@0"});
+    REQUIRE(cli::prepareAudioIn(o).empty());
+    const auto& s = audioInAt(o, 0).samples;
+    REQUIRE(s.size() == 2000);
+    CHECK(s[1000] == Catch::Approx(0.5f).margin(1e-5));
+    CHECK(s[1001] == Catch::Approx(0.5005f).margin(1e-5));  // halfway to the next sample
+    CHECK(s[1999] == Catch::Approx(0.999f).margin(1e-5));  // past the last sample it holds
+  }
+  SECTION("half the rate") {
+    auto o = parseOk({"--rate", "11025", "--audio-in", file + "@0"});
+    REQUIRE(cli::prepareAudioIn(o).empty());
+    const auto& s = audioInAt(o, 0).samples;
+    REQUIRE(s.size() == 500);
+    CHECK(s[250] == Catch::Approx(0.5f).margin(1e-5));
+  }
+}
+
+TEST_CASE("cli runSchedule plays --audio-in from its time and logs the frames played") {
+  const RampWav wav("mirage_cli_audio_in_test2.wav", 22050, 22050);  // 1 s
+  const std::string& file = wav.file;
+  auto o = parseOk({"--seconds", "0.5", "--rate", "22050", "--audio-in", file + "@0.1"});
+  REQUIRE(cli::prepareAudioIn(o).empty());
+  SECTION("without --wav the run still renders the input") {
+    Machine m(idleRom());
+    m.powerOn();
+    std::ostringstream log;
+    cli::runSchedule(m, o, nullptr, nullptr, &log);
+    CHECK(log.str() == "audio-in: " + file + " 8820 frames played\n");  // 0.1 s to 0.5 s
+    CHECK(m.jackConnected());
+    CHECK(m.cycles() >= o.endCycle);
+    CHECK(m.cycles() < o.endCycle + 8);
+  }
+  SECTION("with --wav the output is the usual length") {
+    Machine m(idleRom());
+    m.powerOn();
+    std::vector<float> audio;
+    std::ostringstream log;
+    cli::runSchedule(m, o, nullptr, &audio, &log);
+    CHECK(audio.size() == 11025);
+    CHECK(log.str() == "audio-in: " + file + " 8820 frames played\n");
+  }
+}
+
+TEST_CASE("cli runSchedule: a later --audio-in replaces the earlier; loop repeats; a short "
+          "file leaves the jack silent") {
+  const RampWav longWav("mirage_cli_audio_in_test3a.wav", 22050, 22050);  // 1 s
+  const std::string& longFile = longWav.file;
+  const RampWav shortWav("mirage_cli_audio_in_test3b.wav", 5000, 22050);
+  const std::string& shortFile = shortWav.file;
+  auto o = parseOk({"--seconds", "1", "--rate", "22050", "--audio-in", longFile + "@0",
+                    "--audio-in", shortFile + "@0.2,loop=1", "--audio-in", shortFile + "@0.6"});
+  REQUIRE(cli::prepareAudioIn(o).empty());
+  Machine m(idleRom());
+  m.powerOn();
+  std::ostringstream log;
+  cli::runSchedule(m, o, nullptr, nullptr, &log);
+  // long: 0 to 0.2 s = 4410; short looping: 0.2 to 0.6 s = 8820 (more than one pass);
+  // short once: 0.6 s to 1 s = 8820 asked for, the file has 5000.
+  CHECK(log.str() == "audio-in: " + longFile + " 4410 frames played\n" + "audio-in: " + shortFile +
+                         " 8820 frames played\n" + "audio-in: " + shortFile +
+                         " 5000 frames played\n");
+}
+
+TEST_CASE("cli runSchedule without --audio-in leaves the jack unplugged") {
+  const auto o = parseOk({"--seconds", "0.1", "--rate", "22050", "--wav", "x.wav"});
+  Machine m(idleRom());
+  m.powerOn();
+  std::vector<float> audio;
+  std::ostringstream log;
+  cli::runSchedule(m, o, nullptr, &audio, &log);
+  CHECK_FALSE(m.jackConnected());
+  CHECK(log.str().empty());
 }

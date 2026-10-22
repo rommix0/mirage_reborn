@@ -13,11 +13,28 @@
 #include "mirage/realtime_host.h"
 #include "mirage/wav_import.h"
 
+// The input level meter in the status strip: a bar on a dB scale (-60 to 0 dB
+// of the jack's full scale), red when the level reaches 1.0, and "no input" when
+// the open device has no active input channel.
+class InputMeter : public juce::Component {
+ public:
+  // `peak`: linear, after the input gain (HostStatus::inputPeak). A rise shows at
+  // once and a fall decays, because the status holds only the last block's peak.
+  void update(float peak, bool hasInput);
+  void paint(juce::Graphics&) override;
+
+ private:
+  float shown_ = 0.0f;
+  bool hasInput_ = false;
+};
+
 // The window's content: the replica panel above a status strip. The panel's
-// volume slider drives the engine's output gain.
+// volume slider drives the engine's output gain; the strip's Input slider the
+// gain of the audio input before the emulated jack, and its meter shows the level.
 class MirageContent : public juce::Component, private juce::Timer {
  public:
   static constexpr int kStripHeight = 26;
+  static constexpr int kInputControlsWidth = 280;  // label, slider with its box, meter, margin
   static constexpr juce::uint32 kNoticeMs = 15000;
 
   MirageContent(mirage::RealtimeHost& host, AudioEngine& engine);
@@ -41,6 +58,7 @@ class MirageContent : public juce::Component, private juce::Timer {
 
   void timerCallback() override;
   StripText buildText() const;
+  juce::Rectangle<int> stripText() const;  // the strip left of the Input controls
 
   mirage::RealtimeHost& host_;
   AudioEngine& engine_;
@@ -48,6 +66,9 @@ class MirageContent : public juce::Component, private juce::Timer {
   juce::String notice_;
   juce::uint32 noticeUntil_ = 0;  // juce::Time::getMillisecondCounter() when notice_ goes
   std::unique_ptr<PanelComponent> panel_;
+  juce::Label inputLabel_{{}, "Input"};
+  juce::Slider inputSlider_;
+  InputMeter inputMeter_;
   StripText text_;
 };
 

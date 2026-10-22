@@ -513,3 +513,64 @@ TEST_CASE("wav: a non-ANSI file name writes, and failing there throws the module
   }
   CHECK(ok);
 }
+
+TEST_CASE("machine with nothing plugged in renders exactly as before", "[assets]") {
+  // A silent jack changes nothing: the OS never selects mux 1 outside sampling,
+  // and on mux 0 a silent jack adds 0.0f to filter 7's input. So a boot from
+  // power-on is bit-identical whether render() is told about the jack or not.
+  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  const auto rom = mirage_test::bootRomBytes();
+  Machine plain(rom), none(rom), zero(rom);
+  for (Machine* m : {&plain, &none, &zero}) {
+    m->insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+    m->powerOn();
+    m->prepare(256, 48000);
+  }
+  constexpr size_t kFrames = 256;
+  constexpr int kBlocks = int(20.0 * 48000.0 / double(kFrames));
+  const std::vector<float> silence(kFrames, 0.0f);
+  std::vector<float> a(kFrames), b(kFrames), c(kFrames);
+  for (int i = 0; i < kBlocks; ++i) {
+    plain.render(a.data(), kFrames, 48000.0);
+    none.render(nullptr, b.data(), kFrames, 48000.0);
+    zero.render(silence.data(), c.data(), kFrames, 48000.0);
+    if (std::memcmp(a.data(), b.data(), kFrames * sizeof(float)) != 0 ||
+        std::memcmp(a.data(), c.data(), kFrames * sizeof(float)) != 0 ||
+        plain.display().left != none.display().left || plain.display().right != none.display().right ||
+        plain.display().left != zero.display().left || plain.display().right != zero.display().right)
+      FAIL("the three machines diverged in block " << i);
+  }
+  CHECK(plain.cycles() == none.cycles());
+  CHECK(plain.cycles() == zero.cycles());
+  CHECK(plain.cycles() > 19 * kCpuClockHz);
+  REQUIRE_FALSE(plain.jackConnected());
+  REQUIRE_FALSE(none.jackConnected());
+  REQUIRE(zero.jackConnected());
+  bool sameRam = true;
+  for (uint32_t addr = 0; addr < Machine::kSampleRamSize; ++addr)
+    sameRam = sameRam && plain.sampleRam(addr) == none.sampleRam(addr) &&
+              plain.sampleRam(addr) == zero.sampleRam(addr);
+  CHECK(sameRam);
+  CHECK(plain.fdc().sectorsRead() > 0);  // it really booted and loaded the disk
+  CHECK((plain.display().left || plain.display().right));
+}
+
+TEST_CASE("resampler: pop() needs exactly reach() + 1 samples buffered") {
+  for (const double inRate : {8000.0, 22050.0, 29411.76, 48000.0, 96000.0, 384000.0}) {
+    StreamResampler r(29411.76);
+    r.setInputRate(inRate);
+    CHECK(r.reach() == StreamResampler::reach(inRate, 29411.76));
+    CHECK(r.reach() >= StreamResampler::kHalfWidth);
+    int pushed = 0;
+    float y;
+    r.push(0.0f);
+    ++pushed;
+    while (!r.pop(y)) {
+      r.push(0.0f);
+      ++pushed;
+    }
+    INFO("input rate " << inRate);
+    CHECK(pushed == r.reach() + 1);
+  }
+}

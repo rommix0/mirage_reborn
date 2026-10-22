@@ -66,9 +66,16 @@ class FilterBank {
   uint8_t dac() const { return dac_; }
   // One DOC scan: each voice (plus its filter's input noise) through its
   // filter, summed into mixOut. mix() keeps the last sum (the analog value the
-  // A/D sees).
+  // A/D sees). output(ch) is the last output of channel ch's filter (mix() is
+  // their sum, added in channel order).
   void process(const std::array<float, kVoices>& voiceIn, double rateHz, float& mixOut);
   float mix() const { return mix_; }
+  float output(int ch) const { return out_[size_t(ch & 7)]; }
+  // The audio input jack's signal at the voice-8 filter's input (filters.md
+  // 3.3): added to channel 7's filter input on every process() from now on, and
+  // held until changed. Exactly 0.0f or -0.0f adds nothing, so a silent jack
+  // leaves every bit of the bank as it was without one.
+  void setExternalInput(float x) { external_ = x; }
 
   void save(StateWriter&) const;
   void load(StateReader&);  // commits only on success
@@ -81,6 +88,8 @@ class FilterBank {
   double rate_ = 0.0;     // rate the filters were last set to (0 = none yet)
   uint32_t noise_ = 1;    // xorshift32 state, never 0
   float mix_ = 0.0f;
+  std::array<float, kVoices> out_{};  // last output of each filter
+  float external_ = 0.0f;             // the jack's signal, added to channel 7's input
 };
 
 }  // namespace mirage

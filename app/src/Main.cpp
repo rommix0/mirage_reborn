@@ -102,6 +102,7 @@ class MirageApplication : public juce::JUCEApplication {
       // one absent at this launch stays saved.
       settings_.setAudioState(engine_->saveAudioState().get());
       settings_.setVolume(engine_->volume());
+      settings_.setInputGain(engine_->inputGain());
     }
     if (window_ != nullptr) settings_.setWindowState(window_->getWindowStateAsString());
     settings_.save();
@@ -165,6 +166,7 @@ class MirageApplication : public juce::JUCEApplication {
   void startMachine() {
     engine_ = std::make_unique<AudioEngine>(*host_);
     engine_->setVolume(settings_.volume());
+    engine_->setInputGain(settings_.inputGain());
     const auto saved = settings_.audioState();
     const auto error = engine_->start(saved.get());
     if (error.isNotEmpty())

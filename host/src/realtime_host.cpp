@@ -65,9 +65,46 @@ RealtimeHost::~RealtimeHost() = default;
 
 void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
   machine_->prepare(maxFrames, hostRate);
+  maxFrames_ = maxFrames;
+  inputBuf_.resize(maxFrames);
 }
 
-void RealtimeHost::process(float* out, size_t frames, double hostRate, double nowSeconds) {
+void RealtimeHost::setInputGain(float gain) {
+  if (std::isnan(gain)) return;
+  inputGain_.store(std::clamp(gain, 0.0f, 4.0f), kRelaxed);
+}
+
+void RealtimeHost::renderSegment(const float* in, float* out, size_t n, double hostRate) {
+  // Chunks of at most the prepared size keep every Machine::render call inside
+  // what prepare() reserved. Unprepared (maxFrames_ 0) there is no limit, and the
+  // input buffer grows once here, like the Machine's own (the only allocation).
+  const size_t limit = maxFrames_ ? maxFrames_ : n;
+  const float gain = inputGain_.load(kRelaxed);
+  if (in && inputBuf_.size() < std::min(n, limit)) inputBuf_.resize(std::min(n, limit));
+  for (size_t done = 0; done < n;) {
+    const size_t chunk = std::min(n - done, limit);
+    if (!in) {
+      machine_->render(nullptr, out + done, chunk, hostRate);
+    } else {
+      for (size_t i = 0; i < chunk; ++i) {
+        float v = in[done + i] * gain;
+        // NaN, infinity, and a finite sample the gain pushed to infinity (or
+        // infinity x 0 = NaN): 0, as the jack reads it.
+        if (!std::isfinite(v)) v = 0.0f;
+        inputBuf_[i] = v;
+        blockPeak_ = std::max(blockPeak_, std::fabs(v));
+      }
+      // `in` may alias `out`: this chunk was read in full above, and out is
+      // written after.
+      machine_->render(inputBuf_.data(), out + done, chunk, hostRate);
+    }
+    done += chunk;
+  }
+}
+
+void RealtimeHost::process(const float* in, float* out, size_t frames, double hostRate,
+                           double nowSeconds) {
+  blockPeak_ = 0.0f;
   flushStalled();
   applyUi();
   applyWaves();
@@ -76,7 +113,7 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
     const size_t stale = discardMidiInput();  // stale by the time audio resumes
     midiDropped_.fetch_add(stale, kRelaxed);
     midiBytesTaken_ += stale;
-    publishStatus();
+    publishStatus();  // blockPeak_ is 0: no input was read
     return;
   }
 
@@ -101,7 +138,7 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
   size_t pos = 0;
   for (size_t i = 0; i < count; ++i) {
     if (q_->offsets[i] > pos) {
-      machine_->render(out + pos, q_->offsets[i] - pos, hostRate);
+      renderSegment(in ? in + pos : nullptr, out + pos, q_->offsets[i] - pos, hostRate);
       pos = q_->offsets[i];
       applyDue();
     }
@@ -109,7 +146,7 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
     machine_->queueMidi(std::span<const uint8_t>(e.bytes.data(), e.size));
   }
   if (pos < frames) {
-    machine_->render(out + pos, frames - pos, hostRate);
+    renderSegment(in ? in + pos : nullptr, out + pos, frames - pos, hostRate);
     applyDue();
   }
   publishStatus();
@@ -263,6 +300,7 @@ void RealtimeHost::publishStatus() {
   midiDepthPub_.store(machine_->midiQueueDepth(), kRelaxed);
   midiFlushedPub_.store(midiBytesFlushed_, std::memory_order_release);
   midiTakenPub_.store(midiBytesTaken_, std::memory_order_release);
+  inputPeakPub_.store(blockPeak_, kRelaxed);
 }
 
 bool RealtimeHost::postMidi(std::span<const uint8_t> bytes, double timeSeconds) {
@@ -376,6 +414,7 @@ HostStatus RealtimeHost::status() const {
   s.midiBytesTaken = midiTakenPub_.load(std::memory_order_acquire);
   s.midiBytesFlushed = midiFlushedPub_.load(std::memory_order_acquire);
   s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
+  s.inputPeak = inputPeakPub_.load(kRelaxed);
   return s;
 }
 

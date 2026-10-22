@@ -15,6 +15,7 @@
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 #include "mirage/state_io.h"
+#include "test_roms.h"
 
 using namespace mirage;
 using mirage_test::bootedMachine;
@@ -89,7 +90,7 @@ std::string imagePath() { return std::string("Factory Library/IMG/") + kImage; }
 
 }  // namespace
 
-TEST_CASE("snapshot: header is the MIRG magic, then version 4") {
+TEST_CASE("snapshot: header is the MIRG magic, then version 5") {
   Machine m(idleRom());
   m.powerOn();
   m.runCycles(1000);
@@ -97,7 +98,7 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 4") {
   REQUIRE(snap.size() > 8);
   CHECK(getU32(snap, 0) == fourcc("MIRG"));
   CHECK(getU32(snap, 4) == Machine::kSnapshotVersion);
-  CHECK(Machine::kSnapshotVersion == 4);
+  CHECK(Machine::kSnapshotVersion == 5);
 }
 
 TEST_CASE("snapshot with an out-of-range credit is rejected and the machine is unchanged") {
@@ -243,7 +244,7 @@ TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes
     CHECK(m.saveState() == before);
     CHECK(m.cycles() == cycles);
   };
-  for (uint32_t version : {0u, 1u, 2u, 3u, 5u, 99u, 0xFFFFFFFFu}) {
+  for (uint32_t version : {0u, 1u, 2u, 3u, 4u, 6u, 99u, 0xFFFFFFFFu}) {
     INFO("version " << version);
     auto bad = snap;
     setU32(bad, 4, version);
@@ -457,4 +458,92 @@ TEST_CASE("snapshot: size with sample RAM and a disk stays under 1 MB", "[assets
   const auto& snap = bootedSnapshot(kImage).state;
   CHECK(snap.size() > size_t(Machine::kSampleRamSize) + size_t(DiskImage::kImageBytes));
   CHECK(snap.size() < 1024 * 1024);
+}
+
+// ---- The audio input jack in a snapshot (Plan 4 Task 2) ------------------------------
+
+namespace {
+
+constexpr size_t kJackBlock = 100;  // not a divisor of the scan or cycle counts
+
+std::vector<float> jackSignal(size_t from, size_t frames) {
+  std::vector<float> v(frames);
+  for (size_t i = 0; i < frames; ++i)
+    v[i] = 0.3f * std::sin(0.07f * float(from + i)) + 0.1f * std::sin(0.9f * float(from + i));
+  return v;
+}
+
+// Renders `blocks` blocks of the test signal starting at block `first`; returns the audio.
+std::vector<float> renderJack(Machine& m, size_t first, size_t blocks) {
+  std::vector<float> all;
+  std::vector<float> out(kJackBlock);
+  for (size_t b = first; b < first + blocks; ++b) {
+    const auto in = jackSignal(b * kJackBlock, kJackBlock);
+    m.render(in.data(), out.data(), kJackBlock, kHost);
+    all.insert(all.end(), out.begin(), out.end());
+  }
+  return all;
+}
+
+}  // namespace
+
+TEST_CASE("snapshot round-trips a machine with the jack connected mid-input") {
+  const auto rom = mirage_test::adcLoopRom(0);  // mic path: the jack reaches the audio
+  Machine a(rom);
+  a.powerOn();
+  a.prepare(kJackBlock, kHost);
+  const auto head = renderJack(a, 0, 37);
+  REQUIRE(a.jackConnected());
+  double energy = 0;
+  for (float x : head) energy += double(x) * x;
+  REQUIRE(energy > 1e-3);  // the jack really is audible
+
+  const auto snap = a.saveState();
+  Machine b(rom);
+  b.powerOn();
+  b.loadState(snap);
+  CHECK(b.jackConnected());
+  CHECK(b.saveState() == snap);  // load then save is the identity
+  b.prepare(kJackBlock, kHost);
+
+  const auto tailA = renderJack(a, 37, 50), tailB = renderJack(b, 37, 50);
+  CHECK(sameBits(tailA, tailB));
+  CHECK(b.filters().output(7) == a.filters().output(7));
+  CHECK(b.saveState() == a.saveState());
+}
+
+TEST_CASE("snapshot: an unplugged jack is saved as unplugged, and the old flag is restored on a bad load") {
+  const auto rom = mirage_test::adcLoopRom(1);
+  Machine a(rom);
+  a.powerOn();
+  renderJack(a, 0, 5);
+  std::vector<float> out(kJackBlock);
+  a.render(nullptr, out.data(), kJackBlock, kHost);
+  REQUIRE_FALSE(a.jackConnected());
+  const auto unplugged = a.saveState();
+
+  Machine b(rom);
+  b.powerOn();
+  renderJack(b, 0, 5);
+  REQUIRE(b.jackConnected());
+  const auto plugged = b.saveState();
+  b.loadState(unplugged);
+  CHECK_FALSE(b.jackConnected());
+  CHECK(b.saveState() == unplugged);
+
+  // A corrupt jack section (the flag byte follows the "JACK" tag) is refused and changes nothing.
+  auto bad = plugged;
+  const uint32_t tag = fourcc("JACK");
+  size_t at = 0;
+  for (; at + 4 < bad.size(); ++at)
+    if (getU32(bad, at) == tag) break;
+  REQUIRE(at + 5 < bad.size());
+  bad[at + 4] = 2;
+  CHECK_THROWS_AS(b.loadState(bad), StateError);
+  CHECK_FALSE(b.jackConnected());
+  CHECK(b.saveState() == unplugged);
+  bad = plugged;
+  bad.resize(bad.size() - 7);
+  CHECK_THROWS_AS(b.loadState(bad), StateError);
+  CHECK(b.saveState() == unplugged);
 }
