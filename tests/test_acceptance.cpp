@@ -302,16 +302,15 @@ struct Played {
   double hz = 0;
 };
 
-// Note-on at velocity 100; the peak over 0.25 s (from frame peakFrom on) and the
-// fundamental (zero crossings of the mean-removed signal from 31 ms to 125 ms, after
-// the attack).
-Played playNote(Machine& m, int note, size_t peakFrom = 0) {
+// Note-on at velocity 100; the peak over 0.25 s and the fundamental (zero
+// crossings of the mean-removed signal from 31 ms to 125 ms, after the attack).
+Played playNote(Machine& m, int note) {
   const uint8_t on[] = {0x90, uint8_t(note), 100};
   m.queueMidi(on);
   std::vector<float> v(kPlayRate / 4);
   m.render(v.data(), v.size(), kPlayRate);
   Played p;
-  for (size_t i = peakFrom; i < v.size(); ++i) p.peak = std::max(p.peak, std::fabs(v[i]));
+  for (float x : v) p.peak = std::max(p.peak, std::fabs(x));
   const size_t from = 1500, to = 6000;
   double mean = 0;
   for (size_t i = from; i < to; ++i) mean += v[i];
@@ -501,6 +500,15 @@ TEST_CASE("acceptance 6: a Giebler .EDM boots its OS", "[assets][acceptance]") {
 // ---- Acceptance 7: sampling from the audio input jack -------------------------
 
 namespace {
+// Removes the file when it goes out of scope, so a failed REQUIRE leaks nothing.
+struct RemoveOnExit {
+  std::filesystem::path path;
+  ~RemoveOnExit() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+};
+
 // A sine at the jack, fed in 512-frame render blocks so emulated time advances
 // with the input (Machine::render, not runCycles). Phase continues across calls.
 struct Jack {
@@ -509,20 +517,14 @@ struct Jack {
   uint64_t n = 0;
   std::vector<float> buf = std::vector<float>(512);
 
-  // Renders `seconds` (whole blocks of 512 frames, at least one) with the sine at the
-  // jack and stops early, after a block, when `stop` returns true.
-  template <class Stop>
-  void run(Machine& m, double seconds, Stop stop) {
+  // Renders `seconds` (whole blocks of 512 frames, at least one) with the sine at the jack.
+  void run(Machine& m, double seconds) {
     const size_t blocks = std::max<size_t>(1, size_t(seconds * kPlayRate / 512.0 + 0.5));
     for (size_t b = 0; b < blocks; ++b) {
       for (float& x : buf)
         x = float(amp * std::sin(2.0 * 3.14159265358979 * hz * double(n++) / kPlayRate));
       m.render(buf.data(), buf.data(), buf.size(), kPlayRate);
-      if (stop()) return;
     }
-  }
-  void run(Machine& m, double seconds) {
-    run(m, seconds, [] { return false; });
   }
   void press(Machine& m, PanelKey k, double holdS = 0.15, double gapS = 0.25) {
     m.setKey(k, true);
@@ -585,8 +587,14 @@ const SampledSine& sampledSine(bool line, float amp) {
     out.done = d.left == kSegDoneL && d.right == kSegDoneR;
   }
   out.secondsAfterEnter = double(j.n) / kPlayRate;
-  // Unplug: sampling is over, and runCycles would hold the jack's last value.
-  std::vector<float> idle(512);
+  // Unplug: sampling is over, and runCycles would hold the jack's last value. Then render
+  // half a second with nothing plugged in. The unplug leaves the output stage mid-sine:
+  // filter 7 rings for a few ms, and the host-side DC blocker (5 Hz, 32 ms time constant)
+  // holds the state of the sampling mix, which runCycles() does not update, so a note
+  // started at once opens with a decaying burst (peak 0.10 against 0.064; measured to be
+  // in the DC-blocked output only, the raw mix of the note is the same). Half a second
+  // of render settles both; the sampled data and the OS are not touched by it.
+  std::vector<float> idle(kPlayRate / 2);
   m->render(idle.data(), idle.size(), kPlayRate);
   out.state = m->saveState();
   out.lower = lowerHalf(*m);
@@ -665,6 +673,7 @@ TEST_CASE("acceptance 7: OS 3.2 samples a sine from the input jack", "[assets][a
   CHECK(a.peak > 0.05f);
   CHECK(b.peak > 0.05f);
   REQUIRE(a.hz > 0);
+  REQUIRE(b.hz > 0);
   CHECK(b.hz / a.hz == Catch::Approx(2.0).epsilon(0.03));
   CHECK(a.hz == Catch::Approx(kSineHz).epsilon(0.03));
 }
@@ -732,12 +741,7 @@ TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[asse
   const SampledSine& s = sampledSine(false, kMicAmp);
   REQUIRE(s.done);
   auto m = machineFrom(s.state);
-  // The first note after a sampling run opens with an extra burst (peak 0.10 against 0.064
-  // settled, over the first 100 ms; the second note and a fresh boot do not have it:
-  // the voice the OS picks was left as sampling set it up), so the level is the peak from
-  // 125 ms on.
-  constexpr size_t kSettled = 6000;
-  const Played before = playNote(*m, 52, kSettled);
+  const Played before = playNote(*m, 52);
   INFO("before saving: " << before.hz << " Hz, peak " << before.peak);
   REQUIRE(before.peak > 0.05f);
   REQUIRE(before.hz > 0);
@@ -749,14 +753,14 @@ TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[asse
   REQUIRE(m->disk() != nullptr);
   REQUIRE(m->disk()->dirty());
   const auto path = std::filesystem::temp_directory_path() / "mirage_acceptance7.img";
+  const RemoveOnExit cleanup{path};
   m->disk()->saveFile(path);
   Machine fresh(bootRomBytes());
   fresh.insertDisk(DiskImage::loadFile(path));
-  std::filesystem::remove(path);
   fresh.powerOn();
   settleBoot(fresh);
 
-  const Played after = playNote(fresh, 52, kSettled);
+  const Played after = playNote(fresh, 52);
   INFO("after reopening: " << after.hz << " Hz, peak " << after.peak);
   CHECK(after.peak == Catch::Approx(before.peak).epsilon(0.10));
   CHECK(after.hz == Catch::Approx(before.hz).epsilon(0.03));

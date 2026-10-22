@@ -420,14 +420,22 @@ const RunEvent& audioInAt(const cli::RunOptions& o, size_t nth) {
   return o.events.front();
 }
 
-// A mono WAV of `frames` samples, ramping 0 to just under 1, in the temp folder.
-std::string rampWav(const char* name, size_t frames, int rate) {
-  const auto path = std::filesystem::temp_directory_path() / name;
-  std::vector<float> v(frames);
-  for (size_t i = 0; i < frames; ++i) v[i] = float(i) / float(frames);
-  writeWav(path, v, rate);
-  return path.generic_string();
-}
+// A mono WAV of `frames` samples, ramping 0 to just under 1, in the temp folder; the file
+// is removed when the object goes out of scope, so a failed REQUIRE leaks nothing.
+struct RampWav {
+  std::filesystem::path path;
+  std::string file;  // path as the --audio-in option spells it
+  RampWav(const char* name, size_t frames, int rate)
+      : path(std::filesystem::temp_directory_path() / name), file(path.generic_string()) {
+    std::vector<float> v(frames);
+    for (size_t i = 0; i < frames; ++i) v[i] = float(i) / float(frames);
+    writeWav(path, v, rate);
+  }
+  ~RampWav() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+};
 }  // namespace
 
 TEST_CASE("cli run --audio-in: defaults") {
@@ -482,7 +490,8 @@ TEST_CASE("cli prepareAudioIn reports a missing file") {
 }
 
 TEST_CASE("cli prepareAudioIn resamples to --rate and applies the gain") {
-  const std::string file = rampWav("mirage_cli_audio_in_test.wav", 1000, 22050);
+  const RampWav wav("mirage_cli_audio_in_test.wav", 1000, 22050);
+  const std::string& file = wav.file;
   SECTION("the same rate: the file's samples times the gain") {
     auto o = parseOk({"--rate", "22050", "--audio-in", file + "@0,gain=0.5"});
     REQUIRE(cli::prepareAudioIn(o).empty());
@@ -508,11 +517,11 @@ TEST_CASE("cli prepareAudioIn resamples to --rate and applies the gain") {
     REQUIRE(s.size() == 500);
     CHECK(s[250] == Catch::Approx(0.5f).margin(1e-5));
   }
-  std::filesystem::remove(file);
 }
 
 TEST_CASE("cli runSchedule plays --audio-in from its time and logs the frames played") {
-  const std::string file = rampWav("mirage_cli_audio_in_test2.wav", 22050, 22050);  // 1 s
+  const RampWav wav("mirage_cli_audio_in_test2.wav", 22050, 22050);  // 1 s
+  const std::string& file = wav.file;
   auto o = parseOk({"--seconds", "0.5", "--rate", "22050", "--audio-in", file + "@0.1"});
   REQUIRE(cli::prepareAudioIn(o).empty());
   SECTION("without --wav the run still renders the input") {
@@ -534,13 +543,14 @@ TEST_CASE("cli runSchedule plays --audio-in from its time and logs the frames pl
     CHECK(audio.size() == 11025);
     CHECK(log.str() == "audio-in: " + file + " 8820 frames played\n");
   }
-  std::filesystem::remove(file);
 }
 
 TEST_CASE("cli runSchedule: a later --audio-in replaces the earlier; loop repeats; a short "
           "file leaves the jack silent") {
-  const std::string longFile = rampWav("mirage_cli_audio_in_test3a.wav", 22050, 22050);  // 1 s
-  const std::string shortFile = rampWav("mirage_cli_audio_in_test3b.wav", 5000, 22050);
+  const RampWav longWav("mirage_cli_audio_in_test3a.wav", 22050, 22050);  // 1 s
+  const std::string& longFile = longWav.file;
+  const RampWav shortWav("mirage_cli_audio_in_test3b.wav", 5000, 22050);
+  const std::string& shortFile = shortWav.file;
   auto o = parseOk({"--seconds", "1", "--rate", "22050", "--audio-in", longFile + "@0",
                     "--audio-in", shortFile + "@0.2,loop=1", "--audio-in", shortFile + "@0.6"});
   REQUIRE(cli::prepareAudioIn(o).empty());
@@ -553,8 +563,6 @@ TEST_CASE("cli runSchedule: a later --audio-in replaces the earlier; loop repeat
   CHECK(log.str() == "audio-in: " + longFile + " 4410 frames played\n" + "audio-in: " + shortFile +
                          " 8820 frames played\n" + "audio-in: " + shortFile +
                          " 5000 frames played\n");
-  std::filesystem::remove(longFile);
-  std::filesystem::remove(shortFile);
 }
 
 TEST_CASE("cli runSchedule without --audio-in leaves the jack unplugged") {
