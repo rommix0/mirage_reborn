@@ -33,5 +33,6 @@ add_executable(mirage_tests
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_host mirage_cli_core Catch2::Catch2WithMain)
 target_include_directories(mirage_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../engine/src)
 target_compile_definitions(mirage_tests PRIVATE
-  MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
+  MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}"
+  MIRAGE_ROM="${MIRAGE_ROM}")
 catch_discover_tests(mirage_tests)

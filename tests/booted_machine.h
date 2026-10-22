@@ -23,7 +23,7 @@ inline std::vector<uint8_t> loadBytes(const std::filesystem::path& p) {
 }
 
 inline std::vector<uint8_t> bootRomBytes() {
-  return loadBytes(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  return loadBytes(romPath());
 }
 
 // Boots a factory disk image (the OS auto-loads the lower sound) until it has

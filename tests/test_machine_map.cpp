@@ -62,7 +62,7 @@ TEST_CASE("machine reset vector comes from the ROM") {
 }
 
 TEST_CASE("machine boots the real ROM to $FC7F", "[assets]") {
-  auto p = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin");
+  auto p = romPath();
   REQUIRE_ASSET(p);
   auto rom = loadFile(p);
   REQUIRE(rom.size() == 4096);
@@ -367,7 +367,7 @@ TEST_CASE("machine PB5 reads the DOC's CA3 line") {
 }
 
 TEST_CASE("machine boot ROM fills sample RAM through the VIA bank bits", "[assets]") {
-  auto p = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin");
+  auto p = romPath();
   REQUIRE_ASSET(p);
   auto rom = loadFile(p);
   Machine m(rom);

@@ -3,3 +3,5 @@ build*/
 *.snap
 .superpowers/
 dist/
+# the boot ROM (MIRAGE_ROM); user-owned, never committed
+/mirage.bin

@@ -25,8 +25,8 @@
 #include "non_interactive.h"
 #include "run_options.h"
 
-#ifndef MIRAGE_ASSET_ROOT
-#error "MIRAGE_ASSET_ROOT must be defined by the build"
+#ifndef MIRAGE_ROM
+#error "MIRAGE_ROM must be defined by the build"
 #endif
 
 using namespace mirage;
@@ -51,7 +51,7 @@ int usage() {
       "                 [--snapshot-out f] [--snapshot-in f] [--save-disk f]\n"
       "      Powers on and runs the machine headless for S emulated seconds\n"
       "      (default 10); without --disk the drive is empty. --rom defaults to\n"
-      "      <asset root>/Ensoniq Mirage EPROM Firmware/mirage.bin. Times T are\n"
+      "      the build's MIRAGE_ROM (emulator/mirage.bin). Times T are\n"
       "      seconds from power-on. NAME is a panel key in any case (LoadUpper,\n"
       "      K0..K9, Enter, Up, Down, Param, Value, Cancel, ...), held HOLD s\n"
       "      (default 0.1). --note sends note-on N VEL (channel 1) at T and\n"
@@ -184,9 +184,7 @@ void traceLine(std::ostream& out, Machine& m, uint16_t pc, const Regs& r) {
 }
 
 int run(int argc, char** argv) {
-  const std::string defaultRom =
-      (std::filesystem::path(MIRAGE_ASSET_ROOT) / "Ensoniq Mirage EPROM Firmware" / "mirage.bin")
-          .string();
+  const std::string defaultRom = std::filesystem::path(MIRAGE_ROM).string();
   auto parsed = cli::parseRunArgs(std::vector<std::string>(argv, argv + argc), defaultRom);
   if (const auto* err = std::get_if<cli::RunArgsError>(&parsed)) {
     if (err->message.empty()) return usage();

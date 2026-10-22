@@ -265,7 +265,7 @@ TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes
 }
 
 TEST_CASE("snapshot: a version-99 blob throws and leaves a booted machine unchanged", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath(imagePath()));
   auto m = bootedMachine(kImage);
   const auto snap = m->saveState();
@@ -283,7 +283,7 @@ TEST_CASE("snapshot: a version-99 blob throws and leaves a booted machine unchan
 }
 
 TEST_CASE("snapshot: determinism, a restored machine renders the same bits", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath(imagePath()));
   auto a = bootedMachine(kImage);
   const auto snap = a->saveState();
@@ -306,7 +306,7 @@ TEST_CASE("snapshot: determinism, a restored machine renders the same bits", "[a
 
 TEST_CASE("snapshot: a mid-boot FDC command, held key and queued MIDI all resume exactly",
           "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath(imagePath()));
   // Power on and stop while the OS is loading the sound: motor on, a command
   // in flight and several sectors already read.
@@ -453,7 +453,7 @@ TEST_CASE("snapshot: host callbacks are not state and survive a load") {
 }
 
 TEST_CASE("snapshot: size with sample RAM and a disk stays under 1 MB", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath(imagePath()));
   const auto& snap = bootedSnapshot(kImage).state;
   CHECK(snap.size() > size_t(Machine::kSampleRamSize) + size_t(DiskImage::kImageBytes));

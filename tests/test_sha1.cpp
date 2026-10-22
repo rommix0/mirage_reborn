@@ -36,7 +36,7 @@ TEST_CASE("sha1: published test vectors") {
 }
 
 TEST_CASE("sha1: the real boot ROM matches the known firmware hash", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const auto rom = mirage_test::bootRomBytes();
   CHECK(hex(sha1(rom)) == "ec6ea5613eeafd21d8f3a7431a35a6ff16eed56d");
   CHECK(hex(Machine(rom).romSha1()) == "ec6ea5613eeafd21d8f3a7431a35a6ff16eed56d");

@@ -112,16 +112,16 @@ void checkCalibrated(const BootRun& r, double bySeconds) {
 }
 
 #define LOAD_ROM(var)                                                           \
-  const auto var##Path = assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"); \
-  REQUIRE_ASSET(var##Path);                                                     \
-  const std::vector<uint8_t> var = loadFile(var##Path);                         \
+  const auto var##File = romPath();                                             \
+  REQUIRE_ASSET(var##File);                                                     \
+  const std::vector<uint8_t> var = loadFile(var##File);                         \
   REQUIRE(var.size() == 4096)
 
 const char* const kSndA01 = "Factory Library/IMG/SND-A01.img";
 
 // The first image (by name) of the Soundprocess sound packs.
 std::filesystem::path firstSoundPack() {
-  const auto dir = assetPath("Soundprocess/Soundprocess Sound Packs/IMG");
+  const auto dir = assetPath("Soundprocess/Soundprocess Sound Packs");
   std::vector<std::filesystem::path> files;
   if (std::filesystem::is_directory(dir))
     for (const auto& e : std::filesystem::directory_iterator(dir))
@@ -188,7 +188,7 @@ TEST_CASE("boot: SND-A01 calibrates its filters and finishes booting", "[assets]
 TEST_CASE("boot: SND-A01 settles with its lower sound loaded in under 15 s", "[assets]") {
   const auto disk = assetPath(kSndA01);
   REQUIRE_ASSET(disk);
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   CHECK(mirage_test::bootedSnapshot("SND-A01.img").seconds < 15.0);
 }
 
@@ -198,7 +198,7 @@ TEST_CASE("boot: SND-A01 settles with its lower sound loaded in under 15 s", "[a
 TEST_CASE("boot: settled SND-A01 display never reads blank", "[assets]") {
   const auto disk = assetPath(kSndA01);
   REQUIRE_ASSET(disk);
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   auto m = mirage_test::bootedMachine("SND-A01.img");
   int blank = 0;
   for (int i = 0; i < 300; ++i) {

@@ -273,7 +273,7 @@ TEST_CASE("host places MIDI by timestamp within the block") {
 }
 
 TEST_CASE("host process allocates nothing after prepare", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A02.img"));
   // Everything that allocates or frees happens outside the scopes: the host,
@@ -458,7 +458,7 @@ TEST_CASE("host keeps wave writes queued while the return queue is full") {
 
 TEST_CASE("host refuses a wave write while the drive is active and returns it untouched",
           "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   // Two hosts booting the same disk with the same blocks stay identical; only
   // one is sent the write, which must change nothing.

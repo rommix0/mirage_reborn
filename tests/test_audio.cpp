@@ -302,7 +302,7 @@ TEST_CASE("render: silence from an idle machine, and the host rate can change") 
 constexpr uint8_t kKeyLow = 44, kKeyHigh = 56, kKeyBrief = 60;
 
 TEST_CASE("render: SND-A01 plays a note through the whole chain", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   const double bootSeconds = bootedSnapshot("SND-A01.img").seconds;
   INFO("booted at " << bootSeconds << " s");
@@ -403,7 +403,7 @@ TEST_CASE("render: the audio state is part of the saved state, atomically") {
 // sound 1 is percussive: every key ends by itself within 1.3 s, so it cannot
 // show that note-off matters). Key 48 is 131.05 Hz, key 60 261.55 Hz.
 TEST_CASE("render: SND-A04 strings sustain while held and stop after release", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A04.img"));
   const double bootSeconds = bootedSnapshot("SND-A04.img").seconds;
   INFO("booted at " << bootSeconds << " s");
@@ -518,7 +518,7 @@ TEST_CASE("machine with nothing plugged in renders exactly as before", "[assets]
   // A silent jack changes nothing: the OS never selects mux 1 outside sampling,
   // and on mux 0 a silent jack adds 0.0f to filter 7's input. So a boot from
   // power-on is bit-identical whether render() is told about the jack or not.
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   const auto rom = mirage_test::bootRomBytes();
   Machine plain(rom), none(rom), zero(rom);

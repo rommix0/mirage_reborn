@@ -1,9 +1,13 @@
+![](keyboard.png)
+
 # Ensoniq Mirage Reborn
 
+This is an early release, and a program created with the assistance of Claude. If you notice anything off, please raise an issue. Pull requests are also welcome.
+
 A cycle-level emulator of the Ensoniq Mirage DSK-8 sampler that runs the
-original boot ROM and the original OS from the original disk images. It emulates
-the hardware: the 6809 CPU, the WD1772 floppy controller, the DOC 5503 sound
-chip, the VIA, the ACIA (MIDI), the voice filters and the analog input stage.
+original boot ROM and the original OS from the original disk images (Triton's Soundprocess disks included).
+
+It emulates the hardware: the 6809 CPU, the WD1772 floppy controller, the DOC 5503 sound chip, the VIA, the ACIA (MIDI), the voice filters and the analog input stage.
 The Mirage's own software does everything else, as on a real unit: play it over
 MIDI, edit sounds from the front panel, save them to disk, format blank disks,
 import WAV files into wave RAM, and sample from the computer's audio input.
@@ -11,14 +15,14 @@ import WAV files into wave RAM, and sample from the computer's audio input.
 All four plans are done and the owner has passed acceptances 1-8 by ear
 (2026-10-22). Windows only so far.
 
-| Part | What it is |
-|---|---|
-| `engine/` | `mirage_engine`: the chips and the machine, JUCE-free and deterministic, with exact snapshots |
-| `host/` | `mirage_host`: real-time host (`RealtimeHost`), disk sessions, MIDI input feeding; JUCE-free |
-| `app/` | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel |
-| `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys |
-| `tests/` | Catch2 unit and end-to-end tests (`ctest`) |
-| `docs/` | the design specs, the plans, the hardware notes and the app guide ([`docs/app.md`](docs/app.md)) |
+| Part               | What it is                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------ |
+| `engine/`          | `mirage_engine`: the chips and the machine, JUCE-free and deterministic, with exact snapshots    |
+| `host/`            | `mirage_host`: real-time host (`RealtimeHost`), disk sessions, MIDI input feeding; JUCE-free     |
+| `app/`             | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel                                  |
+| `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys                                   |
+| `tests/`           | Catch2 unit and end-to-end tests (`ctest`)                                                       |
+| `docs/`            | the design specs, the plans, the hardware notes and the app guide ([`docs/app.md`](docs/app.md)) |
 
 ## Running a release
 
@@ -52,12 +56,12 @@ are git-ignored. From `emulator/` in Git Bash:
 
 ```
 git clone . build-dist/src
-cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)"
+cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)/(xtras)" "-DMIRAGE_ROM=$(pwd -W)/mirage.bin"
 cmake --build build-dist/out --config Release --target MirageApp mirage_cli --parallel
 mkdir -p dist/Mirage-0.2.0-win64 && cd dist/Mirage-0.2.0-win64
 cp ../../build-dist/out/app/MirageApp_artefacts/Release/Mirage.exe ../../build-dist/out/Release/mirage_cli.exe .
 cp ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
-cp "../../../Ensoniq Mirage EPROM Firmware/mirage.bin" .
+cp ../../mirage.bin .
 cd .. && powershell -Command "Compress-Archive -Path Mirage-0.2.0-win64 -DestinationPath Mirage-0.2.0-win64.zip -Force"
 ```
 
@@ -65,18 +69,32 @@ The zip carries a copy of your `mirage.bin` (the ROM is never committed to the
 repo); think before sharing it. `OFL-Michroma.txt` goes with it because the
 panel font embedded in the exe asks for its licence to travel with it.
 
-## MIRAGE_ASSET_ROOT
+## MIRAGE_ASSET_ROOT and MIRAGE_ROM
 
-The ROM (`Ensoniq Mirage EPROM Firmware/mirage.bin`) and disk images are
-user-owned and are never copied into this repo. Tests locate them through the
-CMake cache variable `MIRAGE_ASSET_ROOT`, which defaults to the parent of
-`emulator/`. Override it with `-DMIRAGE_ASSET_ROOT=<path>`. Tests that need an
-asset skip when it is missing.
+The ROM and disk images are user-owned and are never committed to this repo.
+Two CMake cache variables locate them:
+
+- `MIRAGE_ROM`, the 4096-byte boot ROM, defaults to `emulator/mirage.bin`
+  (git-ignored). It is the default `--rom` of `mirage_cli`, the app's fallback
+  ROM, and the ROM every test boots.
+- `MIRAGE_ASSET_ROOT`, the disk image library, defaults to `../(xtras)` (the
+  `(xtras)` folder next to `emulator/`). The tests use these files under it:
+  `Factory Library/IMG/SND-A01.img`, `SND-A02.img`, `SND-A04.img`;
+  `EnsoniqOS/os32`, `masos`, `resmos32.s`, `fmt2`; `MetascapeMetaSounds/mp1.edm`;
+  `Soundprocess/Soundprocess OS/Soundprocess OS.img`;
+  `Soundprocess/Soundprocess Sound Packs/*.img`; `Soundprocess/TritonSoundprocess/`
+  (`SP1.EDM`-`SP6.EDM`, `SoundProcess_Vol1.edm`-`Vol7.edm`, `SNDPROCS.EDM`,
+  `Triton - Soundprocess OS.edm`); and `DaDash Collection/M_10.EDM`-`M_12.EDM`.
+
+Override either with `-DMIRAGE_ROM=<file>` / `-DMIRAGE_ASSET_ROOT=<path>`; an
+existing build directory keeps its cached values until you pass new ones. Tests
+that need an asset skip when it is missing, so check the skip count after a
+reorganisation (`ctest` prints skipped tests as "Not Run" or "Skipped").
 
 ## Rendering a note to a WAV
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A04.img" --note 48:100@16:3 --seconds 20 --wav a04.wav
+mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A04.img" --note 48:100@16:3 --seconds 20 --wav a04.wav
 ```
 
 The OS needs about 14.6 s of emulated time after power-on to load the disk's
@@ -94,7 +112,7 @@ sections 13.5 and 13.6.
 saved a sound from `--key` presses:
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --key Param@16 --key K1@17 --key K1@18 --key K1@19 --key Enter@20 --seconds 30 --save-disk edited.img
+mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --key Param@16 --key K1@17 --key K1@18 --key K1@19 --key Enter@20 --seconds 30 --save-disk edited.img
 ```
 
 It exits 1 if there is no disk, a track is unformatted or the file cannot be
@@ -104,7 +122,7 @@ disk file formats are in `docs/hardware/fdc.md`.
 ## Importing a WAV into wave RAM
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412,half=lower,page=0" --note 48:100@16:2 --seconds 19 --wav out.wav
+mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412,half=lower,page=0" --note 48:100@16:2 --seconds 19 --wav out.wav
 ```
 
 `--import "FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper][,page=P][,normalize=0|1]"`
@@ -116,7 +134,7 @@ and the pitch hint.
 ## Sampling from the audio input jack
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
+mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
 ```
 
 `--audio-in "FILE@T[,gain=G][,loop=0|1]"` plays a WAV file into the emulated input
@@ -152,7 +170,7 @@ emulator/build/app/MirageApp_artefacts/Release/Mirage.exe
 **Build Release for live play**; the Debug build is unoptimised and may glitch.
 On start it loads the boot ROM from the saved path, then from `mirage.bin`
 next to `Mirage.exe`, then from
-`MIRAGE_ASSET_ROOT/Ensoniq Mirage EPROM Firmware/mirage.bin`, and otherwise
+`MIRAGE_ROM` (`emulator/mirage.bin` by default), and otherwise
 asks for it (a 4096-byte file; a ROM with a different SHA-1 is allowed but
 warned about). Settings are kept in `%APPDATA%\MirageEmulator\MirageEmulator.settings`.
 `Mirage.exe --panel-png out.png` renders the front panel to a PNG and exits;

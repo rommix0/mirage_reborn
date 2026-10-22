@@ -233,7 +233,7 @@ TEST_CASE("known boot ROM hash matches", "[boot_rom]") {
   REQUIRE_FALSE(isKnownBootRom(other));
   REQUIRE_FALSE(isKnownBootRom(std::array<uint8_t, 20>{}));
 
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const Machine m(mirage_test::bootRomBytes());
   REQUIRE(isKnownBootRom(m.romSha1()));
 }

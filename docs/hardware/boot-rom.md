@@ -1,13 +1,13 @@
 # Mirage boot ROM findings
 
-ROM: `Ensoniq Mirage EPROM Firmware/mirage.bin`, 4096 bytes, SHA1
+ROM: `emulator/mirage.bin` (the build's `MIRAGE_ROM`), 4096 bytes, SHA1
 `ec6ea5613eeafd21d8f3a7431a35a6ff16eed56d`, mapped at `$F000-$FFFF`.
 
 Every claim below cites the ROM address it comes from. To regenerate the
 listing:
 
 ```
-mirage_cli disasm "Ensoniq Mirage EPROM Firmware/mirage.bin" --from 0xF000 --to 0xF614
+mirage_cli disasm mirage.bin --from 0xF000 --to 0xF614
 ```
 
 A linear sweep is only meaningful over the code ranges in the ROM map; the
@@ -588,7 +588,7 @@ Other observations:
 |---|---|---|
 | None | PB6=0 → "nd" blinking, retry forever. No illegal opcodes. | `boot: no disk shows "nd"` |
 | Blank (every track unformatted) | Restore with verify ends in Seek Error after 5 revolutions → "ud" blinking (code 6, §8), retry forever. No sector is read, `$800E` is never reached, no illegal opcodes. | `boot: a blank disk shows "ud" ...` |
-| Soundprocess sound packs (`Soundprocess Sound Packs/IMG/*`) | **Not sound-only:** all 7 carry the Soundprocess OS in tracks 0-10 (`$8008: JMP $996E`, `$800E: LBRA $A5F1`). The ROM boots it exactly like SND-A01: 22 sectors, `$800E` at 6.25 s, the same `$F571` calibration, display "01" (`3F 06`) and 142 sectors by 120 s. No illegal opcodes. | `boot: a Soundprocess sound pack boots its own OS` |
+| Soundprocess sound packs (`Soundprocess Sound Packs/*`) | **Not sound-only:** all 7 carry the Soundprocess OS in tracks 0-10 (`$8008: JMP $996E`, `$800E: LBRA $A5F1`). The ROM boots it exactly like SND-A01: 22 sectors, `$800E` at 6.25 s, the same `$F571` calibration, display "01" (`3F 06`) and 142 sectors by 120 s. No illegal opcodes. | `boot: a Soundprocess sound pack boots its own OS` |
 | SND-A01 with tracks 0-11 zero-filled (a sound disk with an empty OS area) | Every sector reads, so the ROM loads zeros and jumps to `$800E`. `00 00` is `NEG <$00` with DP=`$E8`, i.e. read-modify-write on the WD1772 command register; the CPU runs through zeroed RAM, hits illegal opcodes (8 by 10 s, counted and skipped) and ends up in the ROM's read loop waiting in `SYNC` at `$F00C`. The host keeps running. | `boot: a disk with a zero-filled OS area ...` |
 | Noise (450,560 bytes from a fixed-seed LCG) | Loads noise and jumps to `$800E`. The CPU keeps executing garbage: 369,208 illegal opcodes by 10 s, still rising, many distinct PCs. | `boot: a disk of LCG noise ...` |
 | All `$FF` | `$800E` is `STU $FFFF`, repeated through RAM into I/O and ROM. The CPU falls into the Read Sector primitive `$F000`, issues `$88` and waits in `SYNC` at `$F00C` for good: the motor is off (PB4=1 since the hand-off), so the disk never turns and no DRQ arrives, and the ROM has no time-out (§5.1). 8 illegal opcodes on the way. Hardware would hang the same way. | `boot: an all-$FF disk ...` |
@@ -751,6 +751,6 @@ the DOC retrigger rule).
 | `EnsoniqOS/resmos32.s` | 14.56 s | `DB 06` | 155 | 0.26, 0.079 |
 | `EnsoniqOS/fmt2` | 14.87 s | `71 5E` "F" "d" | 162 | not played: fmt2 asks for a blank disk (acceptance 5) |
 | `Soundprocess/Soundprocess OS/Soundprocess OS.img` | 13.28 s | `3F 06` "0" "1" | 142 | 0.73, 0.080 (was silent before the PB5 fix) |
-| `Soundprocess Sound Packs/IMG/Soundprocess Sound Pack 1.img` | 13.28 s | `3F 06` | 142 | 0.061, 0.019 (pack 3: 0.32, 0.035) |
+| `Soundprocess Sound Packs/Soundprocess Sound Pack 1.img` | 13.28 s | `3F 06` | 142 | 0.061, 0.019 (pack 3: 0.32, 0.035) |
 
 No illegal opcodes on any of them. Test: `acceptance 4: each OS image boots and plays`.

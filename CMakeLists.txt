@@ -5,9 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Folder holding the user's ROM and disk images (never copied into this repo).
-set(MIRAGE_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." CACHE PATH
-    "Folder containing the Mirage ROM and disk images")
+# The user's disk image library and boot ROM (never copied into this repo).
+set(MIRAGE_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../(xtras)" CACHE PATH
+    "Folder containing the Mirage disk images")
+set(MIRAGE_ROM "${CMAKE_CURRENT_SOURCE_DIR}/mirage.bin" CACHE FILEPATH
+    "The Mirage boot ROM (4096 bytes)")
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8)
@@ -34,11 +36,11 @@ target_link_libraries(mirage_cli_core PUBLIC mirage_engine)
 add_subdirectory(tests)
 add_executable(mirage_cli tools/mirage_cli/main.cpp)
 target_link_libraries(mirage_cli PRIVATE mirage_cli_core)
-target_compile_definitions(mirage_cli PRIVATE MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
+target_compile_definitions(mirage_cli PRIVATE MIRAGE_ROM="${MIRAGE_ROM}")
 
 # mirage_cli end to end: exact exit code plus stdout/stderr regexes
 # (tests/cli_check.cmake). Arguments are separated by "|".
-set(MIRAGE_TEST_ROM "${MIRAGE_ASSET_ROOT}/Ensoniq Mirage EPROM Firmware/mirage.bin")
+set(MIRAGE_TEST_ROM "${MIRAGE_ROM}")
 set(MIRAGE_TEST_SND_A01 "${MIRAGE_ASSET_ROOT}/Factory Library/IMG/SND-A01.img")
 function(mirage_cli_test name rc args)
   add_test(NAME ${name}

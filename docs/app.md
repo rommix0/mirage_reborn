@@ -30,8 +30,7 @@ On start the app looks for the 4096-byte boot ROM in this order:
 1. the path saved in the settings (from the last successful start),
 2. `mirage.bin` in the same folder as `Mirage.exe` (where a release zip puts
    it, so a release starts the first time without asking),
-3. `<MIRAGE_ASSET_ROOT>/Ensoniq Mirage EPROM Firmware/mirage.bin` (the default
-   asset root is the parent of `emulator/`),
+3. the build's `MIRAGE_ROM` (by default `emulator/mirage.bin`),
 4. a file chooser.
 
 A file that is not exactly 4096 bytes is refused. A ROM whose SHA-1 is not
@@ -596,7 +595,7 @@ or settings the import refuses, print the message and exit 1 before the run star
 SND-A01 is busy until about 14.6 s, so import at 15 s or later:
 
 ```
-mirage_cli run --disk "../Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
+mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
 ```
 
 **Pitch hint** (the dialog shows it as "Plays at original pitch around B2 (with the
@@ -696,7 +695,7 @@ Soundprocess was silent until Plan 3 Task 7: it waits for a DOC timing signal on
 VIA PB5 before every DOC write, which the emulator did not provide (§13.7). To
 try its other sounds: **SEQ REC** (Soundprocess's *PROG* key, manual section 1)
 and two digits 01-32 select a program. Each pack in
-`Soundprocess/Soundprocess Sound Packs/IMG/` also boots the OS by itself and
+`Soundprocess/Soundprocess Sound Packs/` also boots the OS by itself and
 plays the same way. (Loading a bank from a pack with the manual's *LOAD* key, a
 bank number 1-3 and *ENTER* is not tried here; the manual's key overlay says
 which panel key *LOAD* is.) `EnsoniqOS/fmt2` is not in the table: it shows "F" "d" and

@@ -49,7 +49,7 @@ int displayedValue(DisplayState d) {
 TEST_CASE("acceptance 2: an edited parameter survives OS save, Save As and reopen",
           "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kImage));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
 
   auto m = bootedMachineAt(kImage);
   const DisplayState original = showParameter(*m, kFilterFc);
@@ -91,7 +91,7 @@ TEST_CASE("acceptance 2: an edited parameter survives OS save, Save As and reope
 TEST_CASE("acceptance 2: Open leaves the running OS alone, Open then Reset boots the new disk",
           "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kImage));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   constexpr uint8_t kTwo = 0xDB, kOne = 0x06;  // "2." "1": the settled display
 
   auto m = bootedMachineAt(kImage);
@@ -193,7 +193,7 @@ const Formatted& fmt2Formatted() {
 
 TEST_CASE("acceptance 5: fmt2 formats a blank disk that then boots", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kFmt2));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
 
   const Formatted& formatted = fmt2Formatted();
   REQUIRE(formatted.bytes.size() == size_t(DiskImage::kImageBytes));
@@ -213,7 +213,7 @@ TEST_CASE("acceptance 5: fmt2 formats a blank disk that then boots", "[assets][a
 TEST_CASE("acceptance 5: a sound saved to the formatted disk loads back", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kFmt2));
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
 
   const Formatted& formatted = fmt2Formatted();
 
@@ -358,7 +358,7 @@ OriginalPitch measureOriginalPitchKey(const std::filesystem::path& wav, double r
 TEST_CASE("acceptance 3: an imported sine plays at a pitch set by the key",
           "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const auto wav = writeSineWav("mirage_acceptance3.wav");
 
   // The OS 3.2 lower sound lives in the lower half: Load Lower rewrites
@@ -400,7 +400,7 @@ TEST_CASE("acceptance 3: an imported sine plays at a pitch set by the key",
 TEST_CASE("acceptance 3: the imported sound survives an OS save and reopen",
           "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const auto wav = writeSineWav("mirage_acceptance3b.wav");
 
   auto m = bootedMachineAt(kSndA01);
@@ -444,7 +444,7 @@ namespace {
 // section 1; boot-rom.md 13.7), so no panel action is needed.
 void bootsAndPlays(const char* image) {
   REQUIRE_ASSET(assetPath(image));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const Booted& b = bootedSnapshotAt(image);
   auto m = bootedMachineAt(image);
   const DisplayState d = m->display();
@@ -640,7 +640,7 @@ constexpr float kMicAmp = 0.08f;
 
 TEST_CASE("acceptance 7: OS 3.2 samples a sine from the input jack", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
 
   // The sample time is parameter 73, 34 us by default.
   {
@@ -684,7 +684,7 @@ TEST_CASE("acceptance 7: OS 3.2 samples a sine from the input jack", "[assets][a
 // mic; through line it is still a clean sine at the right pitch.
 TEST_CASE("acceptance 7: the mic input is hotter than the line input", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   // Line is 11 times quieter, and filter 7 passes about 0.54 of it: 1.0 crosses the OS's
   // default threshold, 0.5 does not (the OS gives up with "nS").
   const SampledSine& mic = sampledSine(false, 1.0f);
@@ -706,7 +706,7 @@ TEST_CASE("acceptance 7: the mic input is hotter than the line input", "[assets]
 // wave RAM is untouched.
 TEST_CASE("acceptance 7: a silent jack never crosses the threshold", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   auto m = bootedMachineAt(kSndA01);
   Jack j;
   j.amp = 0.0f;
@@ -738,7 +738,7 @@ TEST_CASE("acceptance 7: a silent jack never crosses the threshold", "[assets][a
 // fresh machine boots from it; the same note has the same level and pitch.
 TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[assets][acceptance]") {
   REQUIRE_ASSET(assetPath(kSndA01));
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   const SampledSine& s = sampledSine(false, kMicAmp);
   REQUIRE(s.done);
   auto m = machineFrom(s.state);

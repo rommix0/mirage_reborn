@@ -149,8 +149,8 @@ bytes).
 
 Decoded from the seven Triton pairs in `Soundprocess/TritonSoundprocess/` (`SP1.EDM`-`SP6.EDM`
 with `SoundProcess_Vol1.edm`-`Vol6.edm`, `SNDPROCS.EDM` with `Triton - Soundprocess OS.edm`) and
-checked against the three EDM2IMG samples (`Tools/Ensoniq EDM2IMG ... v0.3/[EDM_IN]/M_10.EDM`-
-`M_12.EDM`). It is Gary Giebler's `.EDE` disk layout (`Tools/Ensoniq EFE File Format (Steve Quartly
+checked against the three EDM2IMG v0.3 samples (`M_10.EDM`-`M_12.EDM`, kept in
+`(xtras)/DaDash Collection/`). It is Gary Giebler's `.EDE` disk layout (`Tools/Ensoniq EFE File Format (Steve Quartly
 & Gary Giebler).txt`, which describes it for the EPS) applied to the Mirage's sectors.
 
 | Offset | Contents |

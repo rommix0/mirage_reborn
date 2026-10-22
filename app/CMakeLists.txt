@@ -32,7 +32,8 @@ target_compile_definitions(MirageApp PRIVATE
   JUCE_USE_CURL=0
   JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:MirageApp,JUCE_PRODUCT_NAME>"
   JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:MirageApp,JUCE_VERSION>"
-  MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}")
+  MIRAGE_ASSET_ROOT="${MIRAGE_ASSET_ROOT}"
+  MIRAGE_ROM="${MIRAGE_ROM}")
 
 # Panel artwork embedded in the exe: the ensoniq badge, the "Mirage" wordmark
 # (traced from a photo of the panel) and the subtitle font (Michroma, SIL OFL

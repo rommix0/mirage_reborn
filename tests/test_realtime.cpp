@@ -51,7 +51,7 @@ TEST_CASE("softClip is identity to 0.75, odd, monotonic, below 1.0") {
 }
 
 TEST_CASE("render after prepare allocates nothing", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   auto m = bootedMachine("SND-A01.img");
   m->prepare(512, 48000);
@@ -77,7 +77,7 @@ TEST_CASE("render after prepare allocates nothing", "[assets]") {
 }
 
 TEST_CASE("render allocates nothing after loadState either", "[assets]") {
-  REQUIRE_ASSET(assetPath("Ensoniq Mirage EPROM Firmware/mirage.bin"));
+  REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   auto m = bootedMachine("SND-A01.img");
   const std::vector<uint8_t> snap = m->saveState();

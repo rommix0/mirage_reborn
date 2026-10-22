@@ -27,7 +27,8 @@ namespace {
 constexpr const char* kNotADisk =
     "not a Mirage disk image (expected 450,560 bytes or a Giebler .edm file)";
 constexpr const char* kTriton = "Soundprocess/TritonSoundprocess/";
-constexpr const char* kEdmIn = "Tools/Ensoniq EDM2IMG & EDM2HFE (for Ensoniq Mirage) v0.3/[EDM_IN]/";
+// The three sample inputs that shipped with EDM2IMG v0.3 ([EDM_IN]/M_10.EDM-M_12.EDM).
+constexpr const char* kEdmIn = "DaDash Collection/";
 
 std::vector<uint8_t> readBytes(const fs::path& path) {
   std::ifstream in(path, std::ios::binary);
