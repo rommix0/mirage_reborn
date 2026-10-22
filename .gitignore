@@ -2,3 +2,4 @@ build*/
 *.wav
 *.snap
 .superpowers/
+dist/
