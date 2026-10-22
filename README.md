@@ -1,15 +1,69 @@
-# Mirage emulator engine
+# Ensoniq Mirage Reborn
 
-Headless C++20 emulator engine for the Ensoniq Mirage. See `docs/` for the
-design spec and implementation plans.
+A cycle-level emulator of the Ensoniq Mirage DSK-8 sampler that runs the
+original boot ROM and the original OS from the original disk images. It emulates
+the hardware: the 6809 CPU, the WD1772 floppy controller, the DOC 5503 sound
+chip, the VIA, the ACIA (MIDI), the voice filters and the analog input stage.
+The Mirage's own software does everything else, as on a real unit: play it over
+MIDI, edit sounds from the front panel, save them to disk, format blank disks,
+import WAV files into wave RAM, and sample from the computer's audio input.
+
+All four plans are done and the owner has passed acceptances 1-8 by ear
+(2026-10-22). Windows only so far.
+
+| Part | What it is |
+|---|---|
+| `engine/` | `mirage_engine`: the chips and the machine, JUCE-free and deterministic, with exact snapshots |
+| `host/` | `mirage_host`: real-time host (`RealtimeHost`), disk sessions, MIDI input feeding; JUCE-free |
+| `app/` | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel |
+| `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys |
+| `tests/` | Catch2 unit and end-to-end tests (`ctest`) |
+| `docs/` | the design specs, the plans, the hardware notes and the app guide ([`docs/app.md`](docs/app.md)) |
+
+## Running a release
+
+Unzip `Mirage-0.2.0-win64.zip` and start `Mirage.exe`; nothing needs
+installing. It finds the boot ROM (`mirage.bin`) next to the exe. *File → Open
+Disk Image...* a Mirage disk (for example `SND-A01.img` from the Factory
+Library) and it boots from it, then play it from a MIDI keyboard chosen in
+*MIDI*. To boot another disk later: *Open*, then *Machine → Reset*.
+`Mirage guide.md` in the zip is the full guide (`docs/app.md`).
+
+## Building and testing
 
 Run from the folder that contains `emulator/`:
 
 ```
 cmake -S emulator -B emulator/build -G "Visual Studio 16 2019" -A x64
-cmake --build emulator/build --config Debug
-ctest --test-dir emulator/build -C Debug --output-on-failure
+cmake --build emulator/build --config Debug --parallel
+ctest --test-dir emulator/build -C Debug --parallel 8 --output-on-failure
 ```
+
+From Git Bash use `--parallel`, not `-- /m`. The first configure fetches
+Catch2 and JUCE from git.
+
+## Making a release zip
+
+Build from a clean clone of `main` with the C++ runtime linked in, so the exe
+runs on a PC without the Visual C++ redistributable, and with the asset root
+set to the folder that holds `emulator/` (the clone's own default would be
+`build-dist/`; it is where the file choosers start). `dist/` and `build-dist/`
+are git-ignored. From `emulator/` in Git Bash:
+
+```
+git clone . build-dist/src
+cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)"
+cmake --build build-dist/out --config Release --target MirageApp mirage_cli --parallel
+mkdir -p dist/Mirage-0.2.0-win64 && cd dist/Mirage-0.2.0-win64
+cp ../../build-dist/out/app/MirageApp_artefacts/Release/Mirage.exe ../../build-dist/out/Release/mirage_cli.exe .
+cp ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
+cp "../../../Ensoniq Mirage EPROM Firmware/mirage.bin" .
+cd .. && powershell -Command "Compress-Archive -Path Mirage-0.2.0-win64 -DestinationPath Mirage-0.2.0-win64.zip -Force"
+```
+
+The zip carries a copy of your `mirage.bin` (the ROM is never committed to the
+repo); think before sharing it. `OFL-Michroma.txt` goes with it because the
+panel font embedded in the exe asks for its licence to travel with it.
 
 ## MIRAGE_ASSET_ROOT
 
@@ -81,10 +135,10 @@ clips a full-scale sine, so the example above uses `gain=0.08`. How the OS sampl
 ## The standalone app (`app/`)
 
 A JUCE 8 app (replica front panel, menus, audio and MIDI devices, disk open and
-save, New Blank Disk, Import WAV) around the same engine. It opens raw
+save, New Blank Disk, Import WAV, sampling from an audio input) around the same engine. It opens raw
 450,560-byte images and Giebler `.edm` files (by content) and saves in the
 format a disk was read in. The full guide, with the menus, shortcuts, threading
-model, decisions, the acceptance 1-6 checklists and the known limitations, is in
+model, decisions, the acceptance 1-8 checklists and the known limitations, is in
 [`docs/app.md`](docs/app.md).
 
 Building it fetches JUCE (git, tag 8.0.4) on the first configure, and the first
