@@ -121,6 +121,41 @@ std::optional<RunEvent> parseImport(std::string_view v) {
   return e;
 }
 
+// "FILE@T[,gain=G][,loop=0|1]". The file name cannot contain a comma.
+std::optional<RunEvent> parseAudioIn(std::string_view v) {
+  RunEvent e;
+  e.kind = RunEvent::Kind::AudioIn;
+  const size_t comma = v.find(',');
+  std::string_view head = v.substr(0, comma), rest;
+  if (comma != std::string_view::npos) rest = v.substr(comma + 1);
+  std::string_view file, when;
+  if (!splitLast(head, '@', file, when) || file.empty()) return std::nullopt;
+  const auto t = parseSeconds(when);
+  if (!t) return std::nullopt;
+  e.file = file;
+  e.cycle = toCycles(*t);
+  while (comma != std::string_view::npos) {
+    const size_t next = rest.find(',');
+    const std::string_view field = rest.substr(0, next);
+    const size_t eq = field.find('=');
+    if (eq == std::string_view::npos) return std::nullopt;
+    const std::string_view key = field.substr(0, eq), val = field.substr(eq + 1);
+    if (key == "gain") {
+      const auto g = parseSeconds(val);  // a finite number >= 0
+      if (!g) return std::nullopt;
+      e.gain = *g;
+    } else if (key == "loop") {
+      if (val != "0" && val != "1") return std::nullopt;
+      e.loop = val == "1";
+    } else {
+      return std::nullopt;
+    }
+    if (next == std::string_view::npos) break;
+    rest = rest.substr(next + 1);
+  }
+  return e;
+}
+
 struct Hold {
   uint64_t from, to;
 };
@@ -130,7 +165,8 @@ int rank(RunEvent::Kind k) {
     case RunEvent::Kind::TraceOn: return 0;
     case RunEvent::Kind::KeyDown:
     case RunEvent::Kind::KeyUp:
-    case RunEvent::Kind::Import: return 1;
+    case RunEvent::Kind::Import:
+    case RunEvent::Kind::AudioIn: return 1;
     case RunEvent::Kind::Midi: return 2;
   }
   return 3;
@@ -161,7 +197,7 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   o.rom = defaultRom;
   double seconds = 10, traceFrom = 0;
   std::map<PanelKey, std::vector<Hold>> holds;
-  std::vector<RunEvent> midi, imports;
+  std::vector<RunEvent> midi, imports, audioIns;
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view opt = args[i];
@@ -215,6 +251,10 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
       auto e = parseImport(v);
       if (!e) return bad(opt, v);
       imports.push_back(std::move(*e));
+    } else if (opt == "--audio-in") {
+      auto e = parseAudioIn(v);
+      if (!e) return bad(opt, v);
+      audioIns.push_back(std::move(*e));
     } else if (opt == "--wav") {
       if (v.empty()) return bad(opt, v);
       o.wav = v;
@@ -244,6 +284,8 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
   addKeyEvents(holds, o.events);
   o.events.insert(o.events.end(), std::make_move_iterator(imports.begin()),
                   std::make_move_iterator(imports.end()));
+  o.events.insert(o.events.end(), std::make_move_iterator(audioIns.begin()),
+                  std::make_move_iterator(audioIns.end()));
   o.events.insert(o.events.end(), midi.begin(), midi.end());
   // Stable: MIDI events keep command-line order at equal times, and a key's
   // KeyDown stays before its KeyUp when a hold has zero length.
@@ -269,6 +311,29 @@ std::string prepareImports(RunOptions& o) {
   return {};
 }
 
+std::string prepareAudioIn(RunOptions& o) {
+  for (RunEvent& e : o.events) {
+    if (e.kind != RunEvent::Kind::AudioIn) continue;
+    try {
+      const WavAudio audio = readWavFile(e.file);
+      const std::vector<float>& src = audio.mono;
+      const double step = audio.rate / double(o.rate);  // source frames per output frame
+      const size_t n = size_t(double(src.size()) / step + 0.5);
+      e.samples.resize(n);
+      for (size_t j = 0; j < n; ++j) {
+        const double at = double(j) * step;
+        const size_t i = std::min(size_t(at), src.size() - 1);
+        const double f = at - double(i);
+        const float a = src[i], b = src[std::min(i + 1, src.size() - 1)];
+        e.samples[j] = float(double(e.gain) * (double(a) + f * (double(b) - double(a))));
+      }
+    } catch (const WavError& err) {
+      return e.file + ": " + err.what();
+    }
+  }
+  return {};
+}
+
 void runSchedule(Machine& m, const RunOptions& o,
                  const std::function<void(uint16_t pc, const Regs&)>& trace,
                  std::vector<float>* audio, std::ostream* log) {
@@ -281,27 +346,69 @@ void runSchedule(Machine& m, const RunOptions& o,
   const auto framesAt = [&o](uint64_t cycle) {
     return uint64_t(double(cycle) * o.rate / kCpuClockHz + 0.5);
   };
+  // The input jack: the AudioIn event now playing (index into o.events; -1 =
+  // none yet, so nothing is plugged in), the next sample of its file, and the
+  // frames each entry has fed to the jack.
+  const bool hasInput = std::any_of(o.events.begin(), o.events.end(), [](const RunEvent& e) {
+    return e.kind == RunEvent::Kind::AudioIn;
+  });
+  std::vector<uint64_t> played(o.events.size(), 0);
+  ptrdiff_t active = -1;
+  size_t pos = 0;
+  std::vector<float> discard;  // the output when only the input matters
   const auto advanceTo = [&](uint64_t cycle) {
-    if (!audio) {
+    if (!audio && !hasInput) {
       if (cycle > now) m.runCycles(cycle - now);
       now = std::max(now, cycle);
       return;
     }
     const uint64_t target = framesAt(cycle);
-    if (target > framesDone) {
-      const size_t at = audio->size();
-      audio->resize(at + size_t(target - framesDone));
-      m.render(audio->data() + at, size_t(target - framesDone), o.rate);
-      framesDone = target;
+    // Without --wav the input is still rendered; the output is thrown away in
+    // chunks so a long run does not grow a buffer.
+    constexpr size_t kChunk = 1 << 16;
+    while (target > framesDone) {
+      size_t n = size_t(target - framesDone);
+      float* out;
+      if (audio) {
+        const size_t at = audio->size();
+        audio->resize(at + n);
+        out = audio->data() + at;
+      } else {
+        n = std::min(n, kChunk);
+        if (discard.size() < n) discard.resize(n);
+        out = discard.data();
+      }
+      if (active < 0) {
+        m.render(out, n, o.rate);
+      } else {
+        // The input goes in the output buffer (render reads it before it writes).
+        const RunEvent& e = o.events[size_t(active)];
+        for (size_t i = 0; i < n; ++i) {
+          if (pos >= e.samples.size() && e.loop) pos = 0;
+          if (pos < e.samples.size()) {
+            out[i] = e.samples[pos++];
+            ++played[size_t(active)];
+          } else {
+            out[i] = 0.0f;  // the file has ended: the jack stays plugged in, silent
+          }
+        }
+        m.render(out, out, n, o.rate);
+      }
+      framesDone += n;
     }
   };
-  for (const RunEvent& e : o.events) {
+  for (size_t idx = 0; idx < o.events.size(); ++idx) {
+    const RunEvent& e = o.events[idx];
     advanceTo(e.cycle);
     switch (e.kind) {
       case RunEvent::Kind::TraceOn: m.setTrace(trace); break;
       case RunEvent::Kind::KeyDown: m.setKey(e.key, true); break;
       case RunEvent::Kind::KeyUp: m.setKey(e.key, false); break;
       case RunEvent::Kind::Midi: m.queueMidi(e.midi); break;
+      case RunEvent::Kind::AudioIn:
+        active = ptrdiff_t(idx);
+        pos = 0;
+        break;
       case RunEvent::Kind::Import:
         if (m.driveActive()) {
           if (log) *log << "import: " << e.file << " refused, the drive is busy\n";
@@ -320,6 +427,10 @@ void runSchedule(Machine& m, const RunOptions& o,
   }
   advanceTo(o.endCycle);
   m.setTrace(nullptr);
+  if (log)
+    for (size_t idx = 0; idx < o.events.size(); ++idx)
+      if (o.events[idx].kind == RunEvent::Kind::AudioIn)
+        *log << "audio-in: " << o.events[idx].file << ' ' << played[idx] << " frames played\n";
 }
 
 }  // namespace mirage::cli

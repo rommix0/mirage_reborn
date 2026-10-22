@@ -18,7 +18,7 @@ namespace mirage::cli {
 
 // One scheduled action of `mirage_cli run`, at an E-cycle count from power-on.
 struct RunEvent {
-  enum class Kind : uint8_t { TraceOn, KeyDown, KeyUp, Midi, Import };
+  enum class Kind : uint8_t { TraceOn, KeyDown, KeyUp, Midi, Import, AudioIn };
   uint64_t cycle = 0;
   Kind kind = Kind::Midi;
   PanelKey key{};              // KeyDown / KeyUp
@@ -29,6 +29,11 @@ struct RunEvent {
   ImportSettings import;
   ImportPlan plan;
   std::vector<uint8_t> wave;  // convertForWaveRam output, written at plan.address
+  // AudioIn (--audio-in): `file` plays into the input jack from `cycle` at its
+  // own rate; prepareAudioIn fills samples (mono, at RunOptions::rate, gain applied).
+  double gain = 1.0;
+  bool loop = false;
+  std::vector<float> samples;
 };
 
 struct RunOptions {
@@ -69,6 +74,12 @@ std::variant<RunOptions, RunArgsError> parseRunArgs(const std::vector<std::strin
 // not start).
 std::string prepareImports(RunOptions& o);
 
+// Reads every AudioIn event's WAV file and resamples it (linear interpolation)
+// to o.rate, applying its gain. Returns "" on success, else "FILE: message" for
+// the first file that cannot be read (the run must not start). Call after the
+// options are final (o.rate is parsed).
+std::string prepareAudioIn(RunOptions& o);
+
 // Runs `m` (already powered on, or restored from a snapshot) for o.endCycle in
 // slices, applying each event when its cycle is reached; cycles count from the
 // call, not from the machine's own cycle count. `trace` is installed at the TraceOn event and
@@ -80,6 +91,14 @@ std::string prepareImports(RunOptions& o);
 // logs "import: FILE N bytes at $XXXXX, last page P[, truncated]" to `log`; if
 // the drive is busy then (Machine::driveActive) nothing is written and it logs
 // "import: FILE refused, the drive is busy".
+// An AudioIn event plugs the jack in and plays its samples from its time (a
+// later one replaces the earlier from its own time; once a non-looping file has
+// ended the jack carries silence). With any AudioIn event the slices are always
+// rendered (into *audio, or into a discarded buffer when audio is null) with
+// Machine::render(in, out, ...), so the input lands sample-exactly: it starts
+// at the same frame boundary an event at that time would be applied. At the end
+// `log` gets "audio-in: FILE N frames played" per AudioIn event, N the frames
+// of that entry fed to the jack (at o.rate; a loop counts every pass).
 void runSchedule(Machine& m, const RunOptions& o,
                  const std::function<void(uint16_t pc, const Regs&)>& trace,
                  std::vector<float>* audio = nullptr, std::ostream* log = nullptr);

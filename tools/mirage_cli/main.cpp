@@ -46,6 +46,7 @@ int usage() {
       "                 [--midi-hex \"90 3C 64\"@T]...\n"
       "                 [--import \"FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper]\n"
       "                            [,page=P][,normalize=0|1]\"]...\n"
+      "                 [--audio-in \"FILE@T[,gain=G][,loop=0|1]\"]...\n"
       "                 [--wav out.wav --rate 48000] [--trace trace.txt [--trace-from T]]\n"
       "                 [--snapshot-out f] [--snapshot-in f] [--save-disk f]\n"
       "      Powers on and runs the machine headless for S emulated seconds\n"
@@ -65,6 +66,15 @@ int usage() {
       "      is refused and goes on. A file that cannot be read, or settings the\n"
       "      import refuses, exit 1 before the run; the file name cannot contain a\n"
       "      comma.\n"
+      "      --audio-in plays a WAV file into the emulated audio input jack from T\n"
+      "      at its own rate (resampled to --rate), times gain G (default 1; 1.0 is\n"
+      "      full scale of the line path) and repeating if loop=1 (default 0). A\n"
+      "      later --audio-in replaces the earlier from its T; when a file ends the\n"
+      "      jack stays plugged in, silent. Without --wav the audio is still\n"
+      "      rendered and discarded. A file that cannot be read exits 1 before the\n"
+      "      run; the file name cannot contain a comma. At the end it prints\n"
+      "      \"audio-in: FILE N frames played\" per entry (frames fed to the jack at\n"
+      "      --rate).\n"
       "      --wav writes the audio as a 16-bit mono WAV at --rate (default 48000).\n"
       "      --snapshot-out writes the whole machine state (Machine::saveState) at\n"
       "      the end of the run. --snapshot-in loads one after power-on instead of\n"
@@ -186,6 +196,11 @@ int run(int argc, char** argv) {
   }
   cli::RunOptions& o = std::get<cli::RunOptions>(parsed);
   if (const std::string problem = cli::prepareImports(o); !problem.empty()) {
+    std::fprintf(stderr, "%s\n", problem.c_str());
+    return 1;
+  }
+
+  if (const std::string problem = cli::prepareAudioIn(o); !problem.empty()) {
     std::fprintf(stderr, "%s\n", problem.c_str());
     return 1;
   }
