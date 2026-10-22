@@ -396,7 +396,7 @@ and runs 127 scans (about 1.1 s):
 
 The "O.S." error comes from `$F571`, the OS-called calibration, when it is
 entered with B≠`$10`. It shows for 2×127 scans (about 2.2 s), then
-`JMP $F0F0` (cold boot).
+`JMP $F0F0` (cold boot). Every pre-3.0 OS in the library hits it (§13.8).
 
 The glyphs read as words only if the high byte is the **left** digit. That
 means **PA3 = left-digit enable and PA4 = right-digit enable.** This
@@ -754,3 +754,61 @@ the DOC retrigger rule).
 | `Soundprocess Sound Packs/Soundprocess Sound Pack 1.img` | 13.28 s | `3F 06` | 142 | 0.061, 0.019 (pack 3: 0.32, 0.035) |
 
 No illegal opcodes on any of them. Test: `acceptance 4: each OS image boots and plays`.
+
+### 13.8 Pre-3.0 OS disks: "O.S." and a reboot loop
+
+**What happens.** 20 images in the library never settle: in the eBay bundle
+(`Ensoniq Mirage - eBay Bundle/IMG/`) `#1-3-piano+bass.img`, `#2-1-ebs.img`,
+`#2-1-os24-splits.img`, `#3-1-bass-sax-tromb.img`, `#4-rockdrums.img`, `1-3-s1beat.img`,
+`guitar-harmonics.img`, `M_1.edm`, `M_110.EDM`, `tarquis-glass.img`, and in
+`ensoniq_mirage_disks/` `047`, `052`-`054`, `056`, `059`-`063.IMG`. The ROM loads their OS
+normally (22 sectors, `JMP $800E` at 4.06 s), and 1.4 ms later the OS calls the ROM's filter
+calibration with B=`$00`:
+
+```
+B900  LDU   #$B0A4        ; (#$B0A6, or $B96D LDU #$B09E, in the other variants)
+B903  LDX   #$E418
+B906  JSR   $F571         ; B is still $00 from the LDD #$0000 at $872F (#2-1-ebs)
+B909  LEAU  $4D,U
+B90C  LEAX  $01,X
+B90E  CMPX  #$E41F
+B911  BLS   $B906
+```
+
+`$F571` starts with `CMPB #$10 / BEQ $F578 / JMP $FC91`, so the ROM shows "O.S." (`$FDB7`,
+the CLI's `BF ED`) for about 2.2 s and jumps to `$F0F0`, the cold boot (§8). The cold boot
+reloads the same OS, which fails the same way: hand-offs at 4.06, 10.49, 16.93 s ...
+(every 6.43 s), 22 sectors each time, no illegal opcodes, and the ROM never reads the keypad
+on this path, so no key gets out of it. Between the "O.S." displays the panel shows what the
+ROM shows while loading (no error code, mostly dark), and "O.S." itself blinks, which is
+why single samples read `00 00`, `03 01` or `BF ED`; the sector count keeps rising by 22 per
+reboot. MIDI notes are silent because no
+OS is running when they arrive.
+
+**Why.** OS 3.2 (`os32`, SND-A01) has the same loop with one more instruction,
+`$B974 LDB #$10`, before each `JSR $F571`. `$F571` writes B to ORB (`$F578 STB $E200`:
+PB4=1 motor off, sample bank 0, A/D mux 0) before it measures the filter, and refuses any
+other value. These OSes do not load B, so they were written for a ROM whose `$F571` did
+not take B (**inferred**: no such ROM image is here). With this ROM (SHA1 `ec6ea561...`)
+a real Mirage would do exactly the same; the emulator is correct.
+
+**Which OS.** Their OS area (tracks 0-1 and sector 5 of tracks 2-10) comes in three
+variants, none equal to `os32`, `masos` or `fmt2`. All three carry the string "Mirage
+Operating System copyright 1984 Ensoniq Corp. by Alex Limberis, J. William Mauchly,
+John O. Senior and Alan Smith", which the 3.x images do not.
+
+| Variant (entry at `$800E`) | Images |
+|---|---|
+| `JMP $8803`, `$8008` = `JMP $88E4` (`#2-1-ebs`) | `#1-3-piano+bass`, `#2-1-ebs`, `#3-1-bass-sax-tromb`, `guitar-harmonics`, `M_110.EDM`, `tarquis-glass`, `052`, `053`, `056`, `059`, `061`, `062` |
+| `JMP $B920`, `$8008` = `JMP $88CD` (`#2-1-os24-splits`) | `#2-1-os24-splits`, `1-3-s1beat`, `054`, `060`, `063` |
+| `JMP $8803`, `$8008` = `JMP $88E4`, different from the first (`047`) | `#4-rockdrums`, `M_1.edm`, `047` |
+
+The version numbers are not in the images. The file name `#2-1-os24-splits` suggests OS 2.4
+for the second variant; the others are probably earlier 2.x or 1.x (**inferred**).
+
+**What to do.** Nothing on the panel helps. As on a real Mirage with this ROM, boot an
+OS 3.x disk (`EnsoniqOS/os32` or `masos`), then insert one of these disks and load its
+sounds with Load Lower / Load Upper: their sound data is in the normal places (with the
+OS 3.2 OS area spliced in, the same images boot and play). The other way is an older boot
+ROM image passed with `--rom`, if one turns up. Test: `boot: a pre-3.0 OS is refused with
+"O.S." and the ROM reboots`.

@@ -48,7 +48,7 @@ bool shows(const DisplayState& d, uint16_t romWord) {
   return d.left == fromRomFont(uint8_t(romWord >> 8)) && d.right == fromRomFont(uint8_t(romWord));
 }
 
-constexpr uint16_t kUd = 0x387A, kNd = 0x2A7A;  // boot-rom.md section 8
+constexpr uint16_t kUd = 0x387A, kNd = 0x2A7A, kOs = 0xFDB7;  // boot-rom.md section 8
 
 // One pass of the ROM's filter calibration $F571 (filters.md 4), seen at its
 // exit $F5AC: B is the cutoff CV it settled on, Y the count of its last
@@ -65,7 +65,9 @@ struct Calibration {
 struct BootRun {
   bool ranFromRam = false;    // PC in $8000-$DFFF at some point
   bool jumpedTo800E = false;  // the ROM's hand-off JMP $800E was taken
-  bool sawUd = false, sawNd = false, sawLit = false;
+  int handOffs = 0;           // how many times
+  bool sawUd = false, sawNd = false, sawOs = false, sawLit = false;
+  std::vector<uint8_t> calibrateB;  // B at each entry to $F571
   std::vector<Calibration> calibrations;
   uint64_t cycles = 0;
 };
@@ -77,7 +79,11 @@ BootRun boot(Machine& m, uint64_t seconds, bool untilSettled = false) {
   BootRun out;
   m.setTrace([&out, &m](uint16_t pc, const Regs& r) {
     if (pc >= 0x8000 && pc < 0xE000) out.ranFromRam = true;
-    if (pc == 0x800E) out.jumpedTo800E = true;
+    if (pc == 0x800E) {
+      out.jumpedTo800E = true;
+      ++out.handOffs;
+    }
+    if (pc == 0xF571) out.calibrateB.push_back(r.b);
     if (pc == 0xF5AC) out.calibrations.push_back({r.b, r.y, m.cycles()});
   });
   uint64_t lastSectors = m.fdc().sectorsRead(), quietTicks = 0, litTicks = 0;
@@ -88,6 +94,7 @@ BootRun boot(Machine& m, uint64_t seconds, bool untilSettled = false) {
     litTicks = d.left || d.right ? litTicks + 1 : 0;
     if (shows(d, kUd)) out.sawUd = true;
     if (shows(d, kNd)) out.sawNd = true;
+    if (shows(d, kOs)) out.sawOs = true;
     quietTicks = m.fdc().sectorsRead() == lastSectors ? quietTicks + 1 : 0;
     lastSectors = m.fdc().sectorsRead();
     if (untilSettled && litTicks >= 100 && quietTicks >= 200) break;
@@ -312,6 +319,28 @@ TEST_CASE("boot: a Soundprocess sound pack boots its own OS", "[assets]") {
   CHECK(m.fdc().sectorsRead() >= kBootSectors);
   m.runCycles(kSecond);
   CHECK(ranFor(m.cycles(), 11 * kSecond));
+}
+
+// A pre-3.0 OS (boot-rom.md 13.8) calls the ROM's filter calibration $F571
+// without B=$10, so the ROM shows "O.S." and cold-boots, reloading the OS
+// every 6.4 s for ever. This is the ROM's own check, not an emulator fault.
+TEST_CASE("boot: a pre-3.0 OS is refused with \"O.S.\" and the ROM reboots", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath("Ensoniq Mirage - eBay Bundle/IMG/#2-1-ebs.img");
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  const BootRun r = boot(m, 12);
+  CHECK(r.handOffs == 2);  // at 4.06 s and 10.49 s
+  REQUIRE(r.calibrateB.size() == 2);
+  CHECK(r.calibrateB[0] == 0x00);
+  CHECK(r.calibrateB[1] == 0x00);
+  CHECK(r.calibrations.empty());  // $F571 never gets past its B check
+  CHECK(r.sawOs);
+  CHECK_FALSE(r.sawUd);
+  CHECK(m.cpu().illegalCount() == 0);
+  CHECK(m.fdc().sectorsRead() == 2 * kBootSectors);
 }
 
 // A sound disk whose OS area (tracks 0-11) is zero-filled: every sector reads
