@@ -742,7 +742,8 @@ Re-run it after changes to `DiskImage` or `DiskSession`.
 
 ## Acceptance-7 checklist (sample live from the audio input)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22). `tests/test_acceptance.cpp` runs the same
 route headlessly against a synthetic 440 Hz sine on the jack (`acceptance 7: OS 3.2
 samples a sine from the input jack`): the sampled lower half holds the sine at
 the right pitch, it plays on the lower keyboard (an octave apart on keys 52
@@ -818,7 +819,8 @@ device code.
 
 ## Acceptance-8 checklist (line against mic)
 
-**Status: not yet run by the owner.** Headlessly (`acceptance 7: the mic input
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22). Headlessly (`acceptance 7: the mic input
 is hotter than the line input`) the same full-scale sine swings the sampled bytes
 more through the mic than through line and both come out at the right pitch;
 what it sounds like is for you to judge. Parameter 75 is the OS's **Line/Mic**
