@@ -30,24 +30,34 @@ DiskImage DiskImage::fromBytes(std::span<const uint8_t> bytes) {
   return d;
 }
 
-DiskImage DiskImage::loadFile(const std::filesystem::path& path) {
+DiskImage DiskImage::fromFileBytes(std::span<const uint8_t> file, DiskFormat* found) {
+  const DiskFormat format = detectDiskFormat(file);
+  DiskImage d = format == DiskFormat::Raw ? fromBytes(file) : fromGieblerEdm(file);
+  if (found) *found = format;
+  return d;
+}
+
+DiskImage DiskImage::loadFile(const std::filesystem::path& path, DiskFormat* found) {
   std::error_code ec;
   auto size = std::filesystem::file_size(path, ec);
   if (ec)
     throw DiskImageError("Cannot read disk image '" + pathStr(path) + "': " + ec.message());
   std::ifstream in(path, std::ios::binary);
   if (!in) throw DiskImageError("Cannot open disk image '" + pathStr(path) + "'.");
-  // A wrong-size file is reported by fromBytes with its real size; don't
-  // allocate absurd amounts for a huge unrelated file.
-  if (size != uintmax_t(kImageBytes))
-    throw DiskImageError(
-        "Not a Mirage disk image: expected exactly 450,560 bytes, got " + std::to_string(size) +
-        ". (" + pathStr(path) + ")");
-  std::vector<uint8_t> buf(kImageBytes);
+  const std::string name = pathStr(path.filename()) + ": ";
+  // The largest Giebler file holds all 480 sectors in 1024 bytes each after its
+  // 512-byte header (492,033 bytes with its end byte). A bigger file is not
+  // read at all: with no bytes, detection fails just the same.
+  constexpr uintmax_t kLargestFile = uintmax_t(1) << 20;
+  std::vector<uint8_t> buf(size <= kLargestFile ? size_t(size) : 0);
   in.read(reinterpret_cast<char*>(buf.data()), std::streamsize(buf.size()));
   if (!in || in.gcount() != std::streamsize(buf.size()))
     throw DiskImageError("Failed reading disk image '" + pathStr(path) + "'.");
-  return fromBytes(buf);
+  try {
+    return fromFileBytes(buf, found);
+  } catch (const DiskImageError& e) {
+    throw DiskImageError(name + e.what());
+  }
 }
 
 DiskImage DiskImage::blank() { return DiskImage{}; }
@@ -64,8 +74,9 @@ std::vector<uint8_t> DiskImage::toBytes() const {
   return out;
 }
 
-void DiskImage::saveFile(const std::filesystem::path& path) const {
-  const auto bytes = toBytes();  // before touching the disk: an unformatted track throws here
+void DiskImage::saveFile(const std::filesystem::path& path, DiskFormat format) const {
+  // Before touching the disk: an unformatted track throws here.
+  const auto bytes = format == DiskFormat::Raw ? toBytes() : toEdmBytes();
   std::filesystem::path tmp = path;
   tmp += ".tmp";  // same folder, so the rename stays on one volume
   std::error_code ec;
@@ -87,7 +98,7 @@ void DiskImage::saveFile(const std::filesystem::path& path) const {
   if (!written) fail("Failed writing disk image");
   // Never replace the user's file with a short write.
   const auto onDisk = std::filesystem::file_size(tmp, ec);
-  if (ec || onDisk != uintmax_t(kImageBytes)) fail("Disk image was not written completely to");
+  if (ec || onDisk != uintmax_t(bytes.size())) fail("Disk image was not written completely to");
   std::filesystem::rename(tmp, path, ec);  // replaces an existing file
   if (ec) fail("Cannot replace disk image (" + ec.message() + ")");
 }
@@ -139,6 +150,27 @@ void DiskImage::writeSector(int track, int sectorId, std::span<const uint8_t> in
   std::copy(in.begin(), in.end(), tracks_[track]->begin() + off);
   dirty_ = true;
   ++writeCount_;
+}
+
+void DiskImage::setTrack(int track, std::span<const uint8_t, kTrackBytes> data) {
+  if (track < 0 || track >= kTracks)
+    throw DiskImageError("setTrack: no track " + std::to_string(track) + ".");
+  std::copy(data.begin(), data.end(), tracks_[track].emplace().begin());  // inline: no heap
+  dirty_ = true;
+  ++writeCount_;
+}
+
+void DiskImage::unformatTrack(int track) {
+  if (track < 0 || track >= kTracks)
+    throw DiskImageError("unformatTrack: no track " + std::to_string(track) + ".");
+  tracks_[track].reset();
+  dirty_ = true;
+  ++writeCount_;
+}
+
+int DiskImage::formattedTracks() const {
+  return int(std::count_if(tracks_.begin(), tracks_.end(),
+                           [](const std::optional<Track>& t) { return t.has_value(); }));
 }
 
 void DiskImage::save(StateWriter& w) const {

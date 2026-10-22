@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -88,7 +89,7 @@ std::string imagePath() { return std::string("Factory Library/IMG/") + kImage; }
 
 }  // namespace
 
-TEST_CASE("snapshot: header is the MIRG magic, then version 2") {
+TEST_CASE("snapshot: header is the MIRG magic, then version 4") {
   Machine m(idleRom());
   m.powerOn();
   m.runCycles(1000);
@@ -96,7 +97,7 @@ TEST_CASE("snapshot: header is the MIRG magic, then version 2") {
   REQUIRE(snap.size() > 8);
   CHECK(getU32(snap, 0) == fourcc("MIRG"));
   CHECK(getU32(snap, 4) == Machine::kSnapshotVersion);
-  CHECK(Machine::kSnapshotVersion == 2);
+  CHECK(Machine::kSnapshotVersion == 4);
 }
 
 TEST_CASE("snapshot with an out-of-range credit is rejected and the machine is unchanged") {
@@ -242,7 +243,7 @@ TEST_CASE("snapshot: wrong magic, unknown version, truncation and trailing bytes
     CHECK(m.saveState() == before);
     CHECK(m.cycles() == cycles);
   };
-  for (uint32_t version : {0u, 1u, 3u, 99u, 0xFFFFFFFFu}) {
+  for (uint32_t version : {0u, 1u, 2u, 3u, 5u, 99u, 0xFFFFFFFFu}) {
     INFO("version " << version);
     auto bad = snap;
     setU32(bad, 4, version);
@@ -364,6 +365,77 @@ TEST_CASE("snapshot: a dirty disk stays dirty, with its contents, across a round
   empty.powerOn();
   other.loadState(empty.saveState());
   CHECK(other.disk() == nullptr);
+}
+
+namespace {
+
+// Formats track 0 the way a formatter would: motor on (PB4 = 0), Write Track
+// ($F8, h=1) with DP = $E8, then SYNC / LDA ,X+ / STA <$03 for every DRQ from
+// a stream at $8200. The NMI handler counts the INTRQ at $8020.
+std::vector<uint8_t> writeTrackRom() {
+  std::vector<uint8_t> rom = idleRom();
+  const uint8_t code[] = {0x10, 0xCE, 0xBF, 0x80,        // LDS #$BF80
+                          0x86, 0xE8, 0x1F, 0x8B,        // LDA #$E8; TFR A,DP
+                          0x86, 0x1F, 0xB7, 0xE2, 0x02,  // DDRB = $1F
+                          0x7F, 0xE2, 0x00,              // CLR $E200: motor on
+                          0x8E, 0x82, 0x00,              // LDX #$8200
+                          0x86, 0xF8, 0x97, 0x00,        // Write Track
+                          // SYNC; LDA ,X+; STA <$03; BRA
+                          0x13, 0xA6, 0x80, 0x97, 0x03, 0x20, 0xF9};
+  std::copy(std::begin(code), std::end(code), rom.begin());
+  const uint8_t nmi[] = {0x7C, 0x80, 0x20, 0x20, 0xFE};  // INC $8020; BRA *
+  std::copy(std::begin(nmi), std::end(nmi), rom.begin() + 0x80);
+  rom[0xFFC] = 0xF0;
+  rom[0xFFD] = 0x80;
+  return rom;
+}
+
+// The Mirage layout on track 0, every data byte `fill` (test_wd1772.cpp has the
+// layout spelled out).
+std::vector<uint8_t> mirageTrack0(uint8_t fill) {
+  std::vector<uint8_t> s(16, 0x4E);
+  for (uint8_t id = 0; id < 6; ++id) {
+    s.insert(s.end(), 12, 0x00);
+    s.insert(s.end(), {0xF5, 0xF5, 0xF5, 0xFE, 0x00, 0x00, id, uint8_t(id < 5 ? 3 : 2), 0xF7});
+    s.insert(s.end(), 22, 0x4E);
+    s.insert(s.end(), 12, 0x00);
+    s.insert(s.end(), {0xF5, 0xF5, 0xF5, 0xFB});
+    s.insert(s.end(), id < 5 ? 1024u : 512u, fill);
+    s.push_back(0xF7);
+    s.insert(s.end(), 32, 0x4E);
+  }
+  s.insert(s.end(), 100, 0x4E);
+  return s;
+}
+
+}  // namespace
+
+TEST_CASE("snapshot round-trips a machine mid write track") {
+  Machine a(writeTrackRom());
+  a.insertDisk(DiskImage::blank());
+  a.powerOn();
+  const auto stream = mirageTrack0(0x3C);
+  for (size_t i = 0; i < stream.size(); ++i) a.debugWrite(uint16_t(0x8200 + i), stream[i]);
+  // The index pulse comes one revolution after the motor starts; stop half way
+  // through the revolution that follows.
+  a.runCycles(kDiskIndexCycles * 3 / 2);
+  REQUIRE(a.fdc().busy());
+  REQUIRE(a.peek(0x8020) == 0);
+  const auto snap = a.saveState();
+
+  Machine b(writeTrackRom());
+  b.loadState(snap);
+  CHECK(b.saveState() == snap);
+  a.runCycles(kDiskIndexCycles);
+  b.runCycles(kDiskIndexCycles);
+  CHECK(a.saveState() == b.saveState());
+  CHECK(b.peek(0x8020) == 1);
+  REQUIRE(b.disk() != nullptr);
+  CHECK(b.disk()->formattedTracks() == 1);
+  std::vector<uint8_t> sec(1024);
+  b.disk()->readSector(0, 4, sec);
+  CHECK(std::all_of(sec.begin(), sec.end(), [](uint8_t v) { return v == 0x3C; }));
+  CHECK_FALSE(a.fdc().busy());
 }
 
 TEST_CASE("snapshot: host callbacks are not state and survive a load") {

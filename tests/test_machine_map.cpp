@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "alloc_counter.h"
 #include "asset_paths.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
@@ -341,7 +342,23 @@ TEST_CASE("machine PB6 reads 0 (no disk) and DDRB masks port B reads") {
   Machine m(romFrom({ldaSta(0x1F, 0xE202), ldaSta(0x1F, 0xE200), {0xB6, 0xE2, 0x00, 0xB7, 0x80, 0x00}}));
   m.powerOn();
   m.runCycles(40);
-  CHECK(m.peek(0x8000) == 0x1F);  // PB5-7 inputs read 0
+  CHECK((m.peek(0x8000) & 0xDF) == 0x1F);  // PB6-7 inputs read 0 (PB5 is the DOC's CA3)
+}
+
+// PB5 is the DOC's CA3 output ("Q Chip sync", MAME enmirage.cpp). After reset
+// the DOC scans one oscillator (control $01, CA3 = 0) and two refresh slots of
+// 1 us each, so PB5 reads low for one slot in three.
+TEST_CASE("machine PB5 reads the DOC's CA3 line") {
+  Machine m(romWith({}));  // NOPs: 2 E cycles = one DOC slot each
+  m.powerOn();
+  std::vector<int> pb5;
+  for (int i = 0; i < 12; ++i) {
+    pb5.push_back((m.debugRead(0xE200) >> 5) & 1);
+    m.runCycles(2);
+  }
+  const int lowAt = int(std::find(pb5.begin(), pb5.end(), 0) - pb5.begin());
+  REQUIRE(lowAt < 3);
+  for (int i = 0; i < 12; ++i) CHECK(pb5[size_t(i)] == ((i - lowAt) % 3 == 0 ? 0 : 1));
 }
 
 TEST_CASE("machine boot ROM fills sample RAM through the VIA bank bits", "[assets]") {
@@ -525,4 +542,56 @@ TEST_CASE("machine save/load includes the filter bank and the A/D") {
   other.runCycles(30001);
   CHECK(other.filters().mix() == m.filters().mix());
   CHECK(other.saveState() == m.saveState());
+}
+
+TEST_CASE("machine writeWaveRam writes sample RAM and nothing else") {
+  Machine m(romWith({}));
+  m.powerOn();
+  const auto before = m.saveState();
+  std::vector<uint8_t> ramBefore;
+  for (uint32_t a = 0x8000; a < 0xE000; ++a) ramBefore.push_back(m.peek(uint16_t(a)));
+
+  std::vector<uint8_t> bytes(300);
+  for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(1 + i % 250);
+  m.writeWaveRam(0x10100, bytes);
+
+  for (uint32_t a = 0; a < Machine::kSampleRamSize; ++a) {
+    const bool inRange = a >= 0x10100 && a < 0x10100 + bytes.size();
+    INFO("address " << a);
+    if (!inRange) {
+      if (m.sampleRam(a) != 0) FAIL("byte outside the range changed");
+    } else if (m.sampleRam(a) != bytes[a - 0x10100]) {
+      FAIL("byte in the range is wrong");
+    }
+  }
+  for (uint32_t a = 0x8000; a < 0xE000; ++a)  // OS RAM, expansion and I/O window
+    if (m.peek(uint16_t(a)) != ramBefore[a - 0x8000]) FAIL("RAM changed at " << a);
+  CHECK(m.saveState() != before);  // only the sample RAM part of the state differs
+  m.writeWaveRam(0x10100, std::vector<uint8_t>(bytes.size(), 0));
+  CHECK(m.saveState() == before);
+}
+
+TEST_CASE("machine writeWaveRam: the last byte fits, one more throws, nothing is written") {
+  Machine m(romWith({}));
+  m.powerOn();
+  const std::vector<uint8_t> two(2, 0x55);
+  CHECK_NOTHROW(m.writeWaveRam(Machine::kSampleRamSize - 2, two));
+  CHECK(m.sampleRam(Machine::kSampleRamSize - 1) == 0x55);
+  CHECK_NOTHROW(m.writeWaveRam(Machine::kSampleRamSize, {}));
+  CHECK_THROWS_AS(m.writeWaveRam(Machine::kSampleRamSize - 1, two), std::out_of_range);
+  CHECK_THROWS_AS(m.writeWaveRam(Machine::kSampleRamSize + 1, {}), std::out_of_range);
+  CHECK_THROWS_AS(m.writeWaveRam(0xFFFFFFFFu, two), std::out_of_range);
+  CHECK(m.sampleRam(Machine::kSampleRamSize - 2) == 0x55);  // the refused writes changed nothing
+  CHECK(m.sampleRam(0) == 0);
+}
+
+TEST_CASE("machine writeWaveRam allocates nothing") {
+  Machine m(romWith({}));
+  m.powerOn();
+  const std::vector<uint8_t> bytes(65536, 0x90);
+  mirage_test::AllocationScope scope;
+  m.writeWaveRam(0, bytes);
+  m.writeWaveRam(0x10000, bytes);
+  CHECK(scope.count() == 0);
+  CHECK(scope.frees() == 0);
 }

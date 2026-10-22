@@ -33,8 +33,10 @@ class Machine : private Bus {
   static constexpr uint32_t kBootRomSize = 0x1000;
   static constexpr uint32_t kSampleRamSize = 0x20000;
   // Version of the saveState() layout (after the "MIRG" magic). Bumped whenever
-  // the layout changes; loadState() rejects any other value.
-  static constexpr uint32_t kSnapshotVersion = 2;
+  // the layout or the meaning of saved state changes; loadState() rejects any
+  // other value. 4: same layout as 3, but a version-3 WD1772 state can hold MO
+  // off after an h=1 command and a sticky $D4 interrupt (Plan 3 Task 7).
+  static constexpr uint32_t kSnapshotVersion = 4;
 
   // Throws std::invalid_argument unless bootRom is exactly 4096 bytes.
   explicit Machine(std::span<const uint8_t> bootRom);
@@ -51,6 +53,11 @@ class Machine : private Bus {
   uint64_t cycles() const { return cycles_; }
   uint8_t peek(uint16_t addr);  // CPU view, no I/O side effects (I/O reads $FF)
   uint8_t sampleRam(uint32_t addr) const { return sample_[addr & (kSampleRamSize - 1)]; }
+  // WAV import (spec 6.7): copies bytes into the 128 KB sample RAM at `address`
+  // and touches nothing else (not the OS's RAM, not the DOC). Throws
+  // std::out_of_range if address + size > kSampleRamSize. Never allocates. Call
+  // it on the thread that runs the machine, between runCycles/render calls.
+  void writeWaveRam(uint32_t address, std::span<const uint8_t> bytes);
   Cpu6809& cpu() { return cpu_; }
   // Debug trace: when set, called before each instruction (and before each
   // interrupt entry, with the interrupted PC) with the PC about to execute and
@@ -165,7 +172,8 @@ class Machine : private Bus {
   // RAM), CPU (registers, wait state, interrupt lines), VIA, DOC (oscillators,
   // FIFO, A/D, master clock remainder), filter bank, audio path (resampler,
   // DC blocker, fractional cycles, pending samples), WD1772 (registers and any
-  // command in flight), the inserted disk with its dirty flag (or "no disk"),
+  // command in flight, with a Write Track's bytes so far), the inserted disk
+  // with its dirty flag (or "no disk"),
   // ACIA (with the transmit holding register and shifter), the MIDI input queue with its next-delivery cycle, and the panel
   // (held keys and display history). Restoring a snapshot into any Machine built
   // with the same boot ROM, then running the same inputs, gives bit-identical

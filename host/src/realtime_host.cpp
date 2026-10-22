@@ -44,6 +44,8 @@ struct RealtimeHost::Queues {
   SpscQueue<MidiCommand, kMidiQueueCommands> midi;     // MIDI input -> audio
   SpscQueue<MidiOutByte, kMidiOutQueueBytes> midiOut;  // audio -> MIDI output
   SpscQueue<ReturnedDisk, kReturnQueueDisks> returns;  // audio -> UI
+  SpscQueue<std::unique_ptr<WaveWrite>, kWaveQueueWrites> waves;  // UI -> audio
+  SpscQueue<ReturnedWave, kWaveQueueWrites> waveReturns;          // audio -> UI
   // process() scratch: this block's MIDI events and their frame offsets.
   std::array<MidiCommand, kMidiCommandsPerBlock> events{};
   std::array<size_t, kMidiCommandsPerBlock> offsets{};
@@ -68,9 +70,12 @@ void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
 void RealtimeHost::process(float* out, size_t frames, double hostRate, double nowSeconds) {
   flushStalled();
   applyUi();
+  applyWaves();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
-    midiDropped_.fetch_add(discardMidiInput(), kRelaxed);  // stale by the time audio resumes
+    const size_t stale = discardMidiInput();  // stale by the time audio resumes
+    midiDropped_.fetch_add(stale, kRelaxed);
+    midiBytesTaken_ += stale;
     publishStatus();
     return;
   }
@@ -87,7 +92,8 @@ void RealtimeHost::process(float* out, size_t frames, double hostRate, double no
     delta = std::clamp(delta, -1.0, double(frames) + 1.0);
     const long long at = static_cast<long long>(frames) - std::llround(delta);
     prev = std::min(at < static_cast<long long>(prev) ? prev : size_t(at), last);
-    q_->offsets[count++] = prev;
+    q_->offsets[count] = prev;
+    midiBytesTaken_ += q_->events[count++].size;
   }
 
   // Render up to each event, queue it, carry on; due releases and swap
@@ -156,7 +162,7 @@ void RealtimeHost::applyUi() {
         ejectCycle_ = 0;
         break;
       case Type::Panic:
-        discardMidiInput();  // or it would follow the All Notes Off in this block
+        midiBytesFlushed_ += discardMidiInput();  // or it would follow the All Notes Off in this block
         machine_->flushMidi();
         machine_->queueMidi(kPanicBytes);
         break;
@@ -172,6 +178,21 @@ void RealtimeHost::applyUi() {
         if (DiskImage* d = machine_->disk(); d && d->writeCount() == c.writeCount) d->clearDirty();
         break;
     }
+  }
+}
+
+void RealtimeHost::applyWaves() {
+  // Take a write only when its return has room: from the producer side
+  // sizeApprox() can only overstate the fill, so the push cannot fail. Until
+  // the UI takes some back, the rest wait in the wave queue.
+  std::unique_ptr<WaveWrite> w;
+  while (q_->waveReturns.sizeApprox() < kWaveQueueWrites && q_->waves.pop(w)) {
+    WaveReturn why = WaveReturn::RefusedDriveBusy;
+    if (!machine_->driveActive()) {  // the OS may be loading a sound into wave RAM
+      machine_->writeWaveRam(w->address, w->bytes);
+      why = WaveReturn::Written;
+    }
+    q_->waveReturns.push(ReturnedWave{std::move(w), why});
   }
 }
 
@@ -233,6 +254,15 @@ void RealtimeHost::publishStatus() {
   diskDirty_.store(disk && disk->dirty(), std::memory_order_release);
   illegalOps_.store(machine_->illegalOps(), kRelaxed);
   cycles_.store(machine_->cycles(), kRelaxed);
+  // Depth first, then taken and flushed with release; status() loads them in
+  // the opposite order with acquire. A reader that sees a block's taken count
+  // therefore sees that block's depth or a later one, never an older one, so
+  // posted - taken - flushed + depth can only overstate the bytes in flight
+  // (MidiInFeeder relies on that: an older depth with a newer taken count would
+  // hide bytes that moved from the host queue into the Machine's ring).
+  midiDepthPub_.store(machine_->midiQueueDepth(), kRelaxed);
+  midiFlushedPub_.store(midiBytesFlushed_, std::memory_order_release);
+  midiTakenPub_.store(midiBytesTaken_, std::memory_order_release);
 }
 
 bool RealtimeHost::postMidi(std::span<const uint8_t> bytes, double timeSeconds) {
@@ -308,6 +338,20 @@ bool RealtimeHost::postMarkSaved(uint64_t writeCount) {
   return q_->ui.push(std::move(c));
 }
 
+bool RealtimeHost::postWaveWrite(std::unique_ptr<WaveWrite>&& w) {
+  // Checked here so the audio thread never meets writeWaveRam's throw.
+  if (!w || w->address > Machine::kSampleRamSize ||
+      w->bytes.size() > Machine::kSampleRamSize - w->address)
+    return false;
+  return q_->waves.push(std::move(w));  // a full queue leaves w untouched
+}
+
+std::optional<ReturnedWave> RealtimeHost::takeReturnedWave() {
+  ReturnedWave r{};
+  if (!q_->waveReturns.pop(r)) return std::nullopt;
+  return r;
+}
+
 std::optional<ReturnedDisk> RealtimeHost::takeReturnedDisk() {
   ReturnedDisk r{};
   if (!q_->returns.pop(r)) return std::nullopt;
@@ -328,6 +372,10 @@ HostStatus RealtimeHost::status() const {
   s.illegalOps = illegalOps_.load(kRelaxed);
   s.midiDropped = midiDropped_.load(kRelaxed);
   s.cycles = cycles_.load(kRelaxed);
+  // taken and flushed (acquire) before depth: see publishStatus.
+  s.midiBytesTaken = midiTakenPub_.load(std::memory_order_acquire);
+  s.midiBytesFlushed = midiFlushedPub_.load(std::memory_order_acquire);
+  s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
   return s;
 }
 

@@ -4,6 +4,7 @@ add_executable(mirage_tests
   non_interactive.cpp
   test_state_io.cpp
   test_disk_image.cpp
+  test_edm_format.cpp
   test_cpu6809.cpp
   test_via6522.cpp
   test_panel.cpp
@@ -21,9 +22,12 @@ add_executable(mirage_tests
   test_realtime.cpp
   test_spsc_queue.cpp
   test_midi_byte_parser.cpp
+  test_midi_in_feeder.cpp
   test_panel_layout.cpp
   test_realtime_host.cpp
   test_disk_session.cpp
+  test_acceptance.cpp
+  test_wav_import.cpp
   alloc_counter.cpp
 )
 target_link_libraries(mirage_tests PRIVATE mirage_engine mirage_host mirage_cli_core Catch2::Catch2WithMain)

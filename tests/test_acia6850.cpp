@@ -299,17 +299,19 @@ TEST_CASE("machine MIDI output: two unpolled writes both go out, 640 cycles apar
   CHECK(seenAt[1] < out[1].second + 8);
 }
 
-TEST_CASE("machine rejects a version 1 snapshot") {
+TEST_CASE("machine rejects version 1, 2 and 3 snapshots") {
   Machine m(rom(kAciaReceiver));
   m.powerOn();
   m.runCycles(100);
-  auto snap = m.saveState();
-  REQUIRE(Machine::kSnapshotVersion == 2);
-  const auto before = snap;
-  snap[4] = 1;  // the version u32, little endian, follows the 4-byte magic
-  REQUIRE(snap[5] == 0);
-  CHECK_THROWS_AS(m.loadState(snap), StateError);
-  CHECK(m.saveState() == before);
+  const auto before = m.saveState();
+  REQUIRE(Machine::kSnapshotVersion == 4);
+  for (uint8_t old : {uint8_t(1), uint8_t(2), uint8_t(3)}) {
+    auto snap = before;
+    snap[4] = old;  // the version u32, little endian, follows the 4-byte magic
+    REQUIRE(snap[5] == 0);
+    CHECK_THROWS_AS(m.loadState(snap), StateError);
+    CHECK(m.saveState() == before);
+  }
 }
 
 TEST_CASE("machine ACIA interrupt drives FIRQ, not IRQ") {

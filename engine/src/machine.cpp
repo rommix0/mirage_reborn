@@ -46,11 +46,14 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   via_.portAOut = [this](uint8_t a) { panel_.portAWritten(a, cycles_); };
   // Port B: PB0/PB1 select the sample RAM quarter. PB4 is the drive select/motor
   // line, active low (boot-rom.md 2.1). PB6 reads 1 while a disk is in the drive
-  // (a level, not a change latch). PB5 (DOC sync) is not modelled and reads 0
-  // (no evidence any OS uses it). PB2-3 drive the ADC mux (see adcRead below).
-  // PB7 is the VIA T1 output feeding the ACIA clock; it is not emulated as a bit
-  // clock (see clocks-and-midi.md).
-  via_.portBPins = [this] { return uint8_t(disk_ ? 0x40 : 0x00); };
+  // (a level, not a change latch). PB5 is the DOC's CA3 output ("Q Chip sync",
+  // MAME); the Soundprocess OS polls it to time its DOC writes (boot-rom.md
+  // 13.7). PB2-3 drive the ADC mux (see adcRead below). PB7 is the VIA T1 output
+  // feeding the ACIA clock; it is not emulated as a bit clock (see
+  // clocks-and-midi.md).
+  via_.portBPins = [this] {
+    return uint8_t((disk_ ? 0x40 : 0x00) | (doc_.ca3() ? 0x20 : 0x00));
+  };
   via_.portBOut = [this](uint8_t b) {
     bank_ = uint8_t(b & 3);
     wd_.setMotor((b & 0x10) == 0);
@@ -176,6 +179,12 @@ void Machine::render(float* out, size_t frames, double hostRate) {
   pending_.erase(pending_.begin(), pending_.begin() + std::ptrdiff_t(n));
   if (n) lastOut_ = out[n - 1];
   std::fill(out + n, out + frames, lastOut_);
+}
+
+void Machine::writeWaveRam(uint32_t address, std::span<const uint8_t> bytes) {
+  if (address > kSampleRamSize || bytes.size() > kSampleRamSize - address)
+    throw std::out_of_range("wave RAM write past the end of sample RAM");
+  std::copy(bytes.begin(), bytes.end(), sample_.begin() + address);
 }
 
 uint8_t Machine::peek(uint16_t addr) {

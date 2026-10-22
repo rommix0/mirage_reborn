@@ -15,6 +15,17 @@ struct DiskImageError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// How a disk image is stored in a file (docs/hardware/fdc.md, "Disk file
+// formats"). Raw: the 450,560 bytes of the disk, track 0 sector 0 first, any
+// extension. GieblerEdm: a 512-byte header starting 0D 0A "Mirage Disk" with a
+// bitmap of the sectors left out (all zero), then the other sectors.
+enum class DiskFormat : uint8_t { Raw, GieblerEdm };
+
+// By content, not name: exactly 450,560 bytes is Raw, else the Giebler
+// signature is GieblerEdm. Anything else throws DiskImageError
+// "not a Mirage disk image (expected 450,560 bytes or a Giebler .edm file)".
+DiskFormat detectDiskFormat(std::span<const uint8_t> file);
+
 // A Mirage floppy: 80 single-sided tracks, each 5 sectors of 1024 bytes plus
 // one of 512 (ids 0-5), 5632 bytes per track. A track is either formatted
 // (holds data) or unformatted (absent), so a blank disk can be formatted by
@@ -34,16 +45,22 @@ class DiskImage {
 
   static constexpr int kTracks = 80, kTrackBytes = 5632, kImageBytes = 450560;
 
-  static DiskImage fromBytes(std::span<const uint8_t>);     // throws DiskImageError
-  static DiskImage loadFile(const std::filesystem::path&);  // any extension
-  static DiskImage blank();                                 // every track unformatted
+  static DiskImage fromBytes(std::span<const uint8_t>);  // raw only; throws DiskImageError
+  // A file's bytes in either format (detectDiskFormat); `found` receives the
+  // format. Throws DiskImageError for anything else or a damaged Giebler file.
+  static DiskImage fromFileBytes(std::span<const uint8_t> file, DiskFormat* found = nullptr);
+  // Either format, any extension. Errors start with the file name.
+  static DiskImage loadFile(const std::filesystem::path&, DiskFormat* found = nullptr);
+  static DiskImage blank();  // every track unformatted
 
-  std::vector<uint8_t> toBytes() const;  // throws if any track unformatted
+  std::vector<uint8_t> toBytes() const;     // throws if any track unformatted
+  std::vector<uint8_t> toEdmBytes() const;  // Giebler; throws if any track unformatted
   // Atomic: the bytes are written to "<path>.tmp" in the same folder, then
   // renamed over the target, so the target is never left partial. On any
   // failure the temp file is removed and DiskImageError names the path; an
   // existing target is untouched. Throws if any track is unformatted.
-  void saveFile(const std::filesystem::path&) const;
+  void saveFile(const std::filesystem::path&, DiskFormat format) const;
+  void saveFile(const std::filesystem::path& path) const { saveFile(path, DiskFormat::Raw); }
 
   // Deep copy (tracks, dirty flag, write count). Allocates.
   DiskImage clone() const;
@@ -59,13 +76,20 @@ class DiskImage {
   // Throw DiskImageError if the sector is absent or the span size != sectorSize.
   void readSector(int track, int sectorId, std::span<uint8_t> out) const;
   void writeSector(int track, int sectorId, std::span<const uint8_t> in);  // sets dirty
+  // Formats the track with `data` (sector order as in the raw image), or
+  // makes it unformatted, as the controller's Write Track does. Both set
+  // dirty and count one write, and never allocate. Throw DiskImageError for a
+  // track outside 0-79.
+  void setTrack(int track, std::span<const uint8_t, kTrackBytes> data);
+  void unformatTrack(int track);
+  int formattedTracks() const;  // 0-80
 
   bool dirty() const { return dirty_; }
   void clearDirty() { dirty_ = false; }
-  // Number of writeSector calls since construction (clone/copyTo carry it
-  // over). Not saved in snapshots: load() restarts it at 0. A saver compares
-  // it before and after to tell whether a write slipped in, before clearing
-  // dirty.
+  // Number of writeSector, setTrack and unformatTrack calls since
+  // construction (clone/copyTo carry it over). Not saved in snapshots: load()
+  // restarts it at 0. A saver compares it before and after to tell whether a
+  // write slipped in, before clearing dirty.
   uint64_t writeCount() const { return writeCount_; }
 
   void save(StateWriter&) const;
@@ -73,6 +97,9 @@ class DiskImage {
 
  private:
   using Track = std::array<uint8_t, kTrackBytes>;
+
+  // Giebler .edm bytes (signature already checked) to a disk (edm_format.cpp).
+  static DiskImage fromGieblerEdm(std::span<const uint8_t> file);
 
   // Validates track/sector/span size; returns the byte offset within the track.
   int locate(int track, int sectorId, size_t spanSize, const char* op) const;

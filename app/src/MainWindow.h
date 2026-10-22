@@ -11,12 +11,14 @@
 #include "Settings.h"
 #include "mirage/disk_session.h"
 #include "mirage/realtime_host.h"
+#include "mirage/wav_import.h"
 
 // The window's content: the replica panel above a status strip. The panel's
 // volume slider drives the engine's output gain.
 class MirageContent : public juce::Component, private juce::Timer {
  public:
   static constexpr int kStripHeight = 26;
+  static constexpr juce::uint32 kNoticeMs = 15000;
 
   MirageContent(mirage::RealtimeHost& host, AudioEngine& engine);
   ~MirageContent() override = default;
@@ -24,6 +26,9 @@ class MirageContent : public juce::Component, private juce::Timer {
   // File name (empty = unnamed) for the panel; title ("name (modified)" or
   // "No disk") for the status strip.
   void setDiskName(const juce::String& name, const juce::String& title);
+  // A one-line message (an import's outcome) on the right of the status strip,
+  // before any warnings, for kNoticeMs.
+  void showNotice(const juce::String& text);
   PanelComponent& panel() { return *panel_; }
   void paint(juce::Graphics&) override;
   void resized() override;
@@ -40,13 +45,16 @@ class MirageContent : public juce::Component, private juce::Timer {
   mirage::RealtimeHost& host_;
   AudioEngine& engine_;
   juce::String diskTitle_;  // empty: show "No disk"
+  juce::String notice_;
+  juce::uint32 noticeUntil_ = 0;  // juce::Time::getMillisecondCounter() when notice_ goes
   std::unique_ptr<PanelComponent> panel_;
   StripText text_;
 };
 
-// File menu: Open, Save, Save As and Eject work through a DiskSession. Open,
-// Eject and Exit (and the close button) ask first when the disk has unsaved
-// changes. The title names the disk: "Mirage <em dash> SND-A01.img (modified)".
+// File menu: Open, New Blank Disk, Save, Save As and Eject work through a
+// DiskSession; Import WAV writes wave RAM through the host (ImportDialog). Open, New Blank Disk, Eject and Exit (and the close button) ask
+// first when the disk has unsaved changes. The title names the disk: "Mirage
+// <em dash> SND-A01.img (modified)".
 //
 // Keyboard: the digits press 0..9, the up and down arrows On/Off, Return Enter
 // and Escape Cancel, one press per physical press, released when the key comes
@@ -71,9 +79,11 @@ class MainWindow : public juce::DocumentWindow,
  private:
   enum CommandIds {
     cmdOpenDisk = 1,
+    cmdNewBlankDisk,
     cmdSaveDisk,
     cmdSaveDiskAs,
     cmdEjectDisk,
+    cmdImportWav,
     cmdQuit,
     cmdReset,
     cmdPanic,
@@ -102,6 +112,7 @@ class MainWindow : public juce::DocumentWindow,
 
   // Disk files.
   void openDisk();
+  void newBlankDisk();
   void insertDisk(const juce::File& file);
   void saveDisk(std::function<void()> then = {});  // Save As when the disk has no file
   void saveDiskAs(std::function<void()> then = {});
@@ -115,6 +126,15 @@ class MainWindow : public juce::DocumentWindow,
   void refreshDiskState();  // title, drive label, menu enablement
   juce::File diskFolder() const;  // where the file dialogs start
   void showError(const juce::String& title, const juce::String& message);
+
+  // WAV import (spec 6.7): a file chooser, then the modal ImportDialog. Import
+  // converts on this thread and posts the write; pollWaves reports the outcome
+  // in the status strip when the write comes back from the audio thread.
+  bool canImportWav() const;  // an audio device runs and the drive LED is off
+  void importWav();
+  void showImportDialog(const juce::File& file);
+  void postImport(const mirage::WavAudio& audio, const mirage::ImportSettings& settings);
+  void pollWaves();  // 10 Hz, with pollDisk: frees returned writes
 
   mirage::RealtimeHost& host_;
   AudioEngine& engine_;
@@ -134,6 +154,9 @@ class MainWindow : public juce::DocumentWindow,
   std::function<void()> afterSave_;  // runs when the save in flight succeeds
   bool promptOpen_ = false;          // the unsaved-changes prompt is showing
   bool menusHaveDisk_ = false, menusSaving_ = false;  // the state the menus last saw
+  bool menusCanImport_ = false;
+  juce::File lastWavDir_;  // this session's last WAV folder; the disk folder before that
   // Deleted with the window: it refers to the engine's AudioDeviceManager.
   juce::Component::SafePointer<juce::DialogWindow> audioSettings_;
+  juce::Component::SafePointer<juce::DialogWindow> importDialog_;  // its callbacks use this window
 };

@@ -3,6 +3,7 @@
 # Linked by the unit tests and by the JUCE app.
 add_library(mirage_host STATIC
   src/midi_byte_parser.cpp
+  src/midi_in_feeder.cpp
   src/panel_layout.cpp
   src/boot_rom.cpp
   src/realtime_host.cpp

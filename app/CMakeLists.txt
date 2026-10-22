@@ -22,6 +22,7 @@ juce_add_gui_app(MirageApp
 target_sources(MirageApp PRIVATE
   src/Main.cpp
   src/MainWindow.cpp
+  src/ImportDialog.cpp
   src/PanelComponent.cpp
   src/AudioEngine.cpp
   src/Settings.cpp)
@@ -50,3 +51,10 @@ target_link_libraries(MirageApp
   PUBLIC
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+# `Mirage --panel-png` renders the panel without an audio device or the ROM:
+# exit code 0 and a file that starts with the PNG signature.
+add_test(NAME app_panel_png_smoke
+         COMMAND ${CMAKE_COMMAND} -DAPP=$<TARGET_FILE:MirageApp>
+                 -DPNG=${CMAKE_BINARY_DIR}/panel_smoke.png
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/panel_png_smoke.cmake)

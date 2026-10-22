@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <vector>
 
 #include "mirage/clocks.h"
 #include "mirage/disk_image.h"
@@ -26,6 +27,16 @@ struct HostStatus {
   bool driveActive = false, diskPresent = false, diskDirty = false;
   uint64_t diskWrites = 0;  // the inserted disk's DiskImage::writeCount(); 0 with no disk
   uint64_t illegalOps = 0, midiDropped = 0, cycles = 0;
+  // MIDI input flow, for MidiInFeeder. midiBytesTaken: cumulative bytes
+  // process() has taken from the MIDI queue (queued into the Machine, or
+  // discarded while the audio rate is invalid); midiBytesFlushed: bytes
+  // postPanic discarded from the queue. A panic flush is in neither
+  // midiDropped nor midiBytesTaken. midiQueueDepth: Machine::midiQueueDepth() at
+  // the end of the block (bytes queued and not yet delivered to the ACIA).
+  // status() never returns a taken or flushed count from a block newer than the
+  // depth, so (posted - taken - flushed + depth) can only overstate.
+  uint64_t midiBytesTaken = 0, midiBytesFlushed = 0;
+  size_t midiQueueDepth = 0;
 };
 
 // Why a disk came back from the audio thread (takeReturnedDisk).
@@ -39,6 +50,21 @@ struct ReturnedDisk {
   std::unique_ptr<DiskImage> disk;
   DiskReturn why;
   uint64_t writeCount = 0;
+};
+// WAV import (spec 6.7): bytes to copy into wave RAM at `address`, made on the
+// UI thread (convertForWaveRam) and handed back to it after the attempt.
+struct WaveWrite {
+  uint32_t address = 0;
+  std::vector<uint8_t> bytes;
+};
+// Why a wave write came back (takeReturnedWave).
+//  Written: copied into wave RAM before the block was rendered.
+//  RefusedDriveBusy: nothing written, because the drive was active (the OS may
+//    be loading a sound into wave RAM).
+enum class WaveReturn : uint8_t { Written, RefusedDriveBusy };
+struct ReturnedWave {
+  std::unique_ptr<WaveWrite> write;
+  WaveReturn why;
 };
 struct MidiOutByte {
   uint8_t byte;
@@ -55,8 +81,9 @@ struct MidiOutByte {
 // change hands on the audio thread, and every disk leaving the Machine goes
 // back to the UI to be freed there.
 //
-// The host only presses keys, queues MIDI and inserts or ejects disks (plus
-// power-on, copying the disk out and clearing its dirty flag).
+// The host only presses keys, queues MIDI, inserts or ejects disks and writes
+// wave RAM for WAV import (plus power-on, copying the disk out and clearing its
+// dirty flag).
 //
 // Timestamps: postMidi's timeSeconds and process's nowSeconds must come from
 // the same clock (the app uses juce::Time::getMillisecondCounterHiRes() *
@@ -78,6 +105,8 @@ class RealtimeHost {
   static constexpr size_t kMidiOutQueueBytes = 8192;
   static constexpr size_t kUiQueueCommands = 256;
   static constexpr size_t kReturnQueueDisks = 64;
+  // Wave writes in flight each way (UI -> audio, and back).
+  static constexpr size_t kWaveQueueWrites = 16;
 
   // Throws std::invalid_argument unless bootRom is 4096 bytes. The machine is
   // powered on with the drive empty.
@@ -94,7 +123,8 @@ class RealtimeHost {
   // before the callbacks start, and again after stopping them).
   void prepare(size_t maxFrames, double hostRate);
   // Renders `frames` mono samples at hostRate:
-  //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved);
+  //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved),
+  //     then the wave writes;
   //  2. takes up to kMidiCommandsPerBlock MIDI commands, each placed at frame
   //     frames - llround((nowSeconds - t) * hostRate), clamped to
   //     [the previous event's frame, frames - 1];
@@ -104,13 +134,14 @@ class RealtimeHost {
   //     passed and makes any swap insert that is due;
   //  5. publishes status().
   // An invalid hostRate (0, NaN, out of Machine's range) still applies the UI
-  // queue and publishes status, but writes silence and advances nothing. MIDI
-  // commands waiting meanwhile are discarded and counted in midiDropped (stale
-  // input, as MidiMessageCollector drops it), so old notes do not replay when
-  // the rate recovers.
+  // queue and the wave writes and publishes status, but writes silence and
+  // advances nothing. MIDI commands waiting meanwhile are discarded and counted
+  // in midiDropped (stale input, as MidiMessageCollector drops it), so old notes
+  // do not replay when the rate recovers.
   void process(float* out, size_t frames, double hostRate, double nowSeconds);
 
-  // MIDI-input thread only (the single producer of the MIDI queue). Messages
+  // One producer at a time (MidiInFeeder serialises its callers; the app goes
+  // through it, and it paces long messages). Messages
   // longer than kMidiCommandBytes (SysEx) travel as consecutive commands with
   // the same timestamp. A message over 12 KB (kMidiQueueCommands x
   // kMidiCommandBytes) can never fit and is always rejected. All or nothing: if the queue lacks room for the whole
@@ -147,6 +178,16 @@ class RealtimeHost {
   // caller's job (never the audio thread's).
   [[nodiscard]] std::optional<ReturnedDisk> takeReturnedDisk();
 
+  // UI thread only (the single producer of the wave queue). Returns false, and
+  // leaves `w` untouched, when the queue is full, `w` is null or the write runs
+  // past the end of wave RAM (Machine::kSampleRamSize). process() copies it into
+  // wave RAM before rendering, unless the drive is active (driveActive()), and
+  // hands it back either way. While the return queue is full the writes wait in
+  // the wave queue, so the audio thread never frees one.
+  bool postWaveWrite(std::unique_ptr<WaveWrite>&& w);
+  // UI thread: the next wave write handed back, oldest first; freed by the caller.
+  [[nodiscard]] std::optional<ReturnedWave> takeReturnedWave();
+
   // MIDI-output thread: the next byte the OS transmitted, in cycle order. If
   // the queue (kMidiOutQueueBytes) is full the audio thread drops the byte and
   // counts it in midiDropped.
@@ -167,8 +208,10 @@ class RealtimeHost {
   // full return queue parks it in stalled_ until a later block.
   void returnDisk(std::unique_ptr<DiskImage> disk, DiskReturn why, uint64_t writeCount = 0);
   void flushStalled();
+  void applyWaves();  // the wave queue, after the UI queue
   void countRingOverflows();  // adds new Machine::midiOverflows() to midiDropped
   size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
+  uint64_t midiBytesTaken_ = 0, midiBytesFlushed_ = 0;  // audio thread; published by publishStatus
   void publishStatus();
 
   std::array<uint8_t, 20> romSha1_{};
@@ -192,6 +235,8 @@ class RealtimeHost {
   std::atomic<bool> driveActive_{false}, diskPresent_{false}, diskDirty_{false};
   std::atomic<uint64_t> diskWrites_{0}, illegalOps_{0}, cycles_{0};
   std::atomic<uint64_t> midiDropped_{0};  // added to by the MIDI-input and audio threads
+  std::atomic<uint64_t> midiTakenPub_{0}, midiFlushedPub_{0};
+  std::atomic<size_t> midiDepthPub_{0};
 };
 
 }  // namespace mirage

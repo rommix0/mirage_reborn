@@ -3,6 +3,7 @@
 #include <chrono>
 #include <exception>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace mirage {
@@ -32,8 +33,9 @@ std::string DiskSession::open(const std::filesystem::path& file) {
   if (std::filesystem::is_directory(file, ec))
     return "'" + utf8(file) + "' is a folder, not a disk image.";
   std::unique_ptr<DiskImage> disk;
+  DiskFormat format = DiskFormat::Raw;
   try {
-    disk = std::make_unique<DiskImage>(DiskImage::loadFile(file));
+    disk = std::make_unique<DiskImage>(DiskImage::loadFile(file, &format));
   } catch (const DiskImageError& e) {
     return e.what();  // already names the file and the problem
   } catch (const std::exception& e) {
@@ -41,35 +43,44 @@ std::string DiskSession::open(const std::filesystem::path& file) {
   }
   if (!host_.postInsert(std::move(disk))) return "The emulator is busy. Try again.";
   path_ = file;
+  format_ = format;
+  untitled_ = false;
   savedWrites_.reset();
   return {};
+}
+
+bool DiskSession::newBlank() {
+  if (saving_) return false;
+  if (!host_.postInsert(std::make_unique<DiskImage>(DiskImage::blank()))) return false;
+  path_.clear();
+  format_ = DiskFormat::Raw;
+  untitled_ = true;
+  savedWrites_.reset();
+  return true;
 }
 
 void DiskSession::eject() {
   if (saving_) return;
   if (host_.postEject()) {
     path_.clear();
+    untitled_ = false;
     savedWrites_.reset();
   }
 }
 
-std::string DiskSession::saveRefusal(const std::filesystem::path& file) const {
-  const auto& target = file.empty() ? path_ : file;
-  auto ext = utf8(target.extension());
-  for (auto& c : ext) c = char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-  // The .edm layout is unconfirmed (spec 6.6): never write it, or a mistake
-  // would damage the user's file.
-  if (ext == ".edm")
-    return "Saving .edm files comes in a later version; use Save As to save a .img copy.";
-  return {};
-}
-
 bool DiskSession::startSave(const std::filesystem::path& file) {
   const auto& target = file.empty() ? path_ : file;
-  if (saving_ || target.empty() || !saveRefusal(file).empty()) return false;
+  if (saving_ || target.empty()) return false;
   if (!host_.postCopyDisk(std::make_unique<DiskImage>(DiskImage::blank()))) return false;
   ++copiesOut_;
   saveTarget_ = target;
+  if (file.empty()) {
+    saveFormat_ = format_;
+  } else {
+    auto ext = utf8(file.extension());
+    for (auto& c : ext) c = char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    saveFormat_ = ext == ".edm" ? DiskFormat::GieblerEdm : DiskFormat::Raw;
+  }
   saving_ = true;
   saveStarted_ = clock_();
   return true;
@@ -88,18 +99,25 @@ std::optional<SaveOutcome> DiskSession::poll() {
       // With a path the disk is still in its swap gap (inserting takes about
       // 0.5 s), not missing.
       outcome = SaveOutcome{false,
-                            path_.empty() ? "There is no disk in the drive."
-                                          : "The disk is still going into the drive; try again in a moment.",
+                            !hasDisk() ? "There is no disk in the drive."
+                                       : "The disk is still going into the drive; try again in a moment.",
                             saveTarget_};
       continue;
     }
     try {
-      r->disk->saveFile(saveTarget_);
+      // Checked here, before saveFile: a partly formatted copy leaves no file.
+      if (const int formatted = r->disk->formattedTracks(); formatted < DiskImage::kTracks)
+        throw DiskImageError("This disk is not fully formatted (" + std::to_string(formatted) +
+                             " of " + std::to_string(DiskImage::kTracks) +
+                             " tracks). Format it with the OS before saving.");
+      r->disk->saveFile(saveTarget_, saveFormat_);
       // Clears dirty unless the OS wrote again since the copy. If the queue
       // is full the disk merely stays marked modified.
       host_.postMarkSaved(r->writeCount);
       savedWrites_ = r->writeCount;
       path_ = saveTarget_;
+      format_ = saveFormat_;
+      untitled_ = false;
       outcome = SaveOutcome{true, {}, saveTarget_};
     } catch (const std::exception& e) {
       outcome = SaveOutcome{false, e.what(), saveTarget_};
@@ -115,7 +133,7 @@ std::optional<SaveOutcome> DiskSession::poll() {
 }
 
 bool DiskSession::modified() const {
-  if (path_.empty()) return false;
+  if (!hasDisk()) return false;
   const HostStatus s = host_.status();
   // The published write count equal to the saved copy's: every write is in the
   // file, even if the mark-saved has not been applied (or published) yet.
@@ -125,8 +143,8 @@ bool DiskSession::modified() const {
 bool DiskSession::needsSaveBeforeReplacing() const { return modified(); }
 
 std::string DiskSession::title() const {
-  if (path_.empty()) return "No disk";
-  std::string t = utf8(path_.filename());
+  if (!hasDisk()) return "No disk";
+  std::string t = untitled_ ? "Untitled (blank)" : utf8(path_.filename());
   if (modified()) t += " (modified)";
   return t;
 }

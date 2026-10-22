@@ -12,7 +12,7 @@ constexpr uint32_t kClocksPerSlot = 8;
 constexpr int kRefreshSlots = 2;
 constexpr uint32_t kAccMask = 0xFFFFFF;  // 24-bit accumulator
 // Control register bits.
-constexpr uint8_t kH = 0x01, kM0 = 0x02, kIe = 0x08;
+constexpr uint8_t kH = 0x01, kM0 = 0x02, kIe = 0x08, kCa3 = 0x80;
 constexpr int kModeOneShot = 1, kModeSyncAm = 2, kModeSwap = 3;
 // Size register bits.
 constexpr uint8_t kBs = 0x40;
@@ -45,6 +45,10 @@ void Doc5503::reset() {
 // OER bits 5-1 (E4-E0) hold count - 1: the datasheet's register summary, and
 // the SQ80's $2E enables 24 oscillators (buchty). 1 to 32.
 int Doc5503::enabledOscillators() const { return ((oer_ >> 1) & 0x1F) + 1; }
+
+bool Doc5503::ca3() const {
+  return slot_ >= enabledOscillators() || (osc_[size_t(slot_)].control & kCa3) != 0;
+}
 
 double Doc5503::sampleRate() const {
   return double(kMasterClockHz) / (kClocksPerSlot * double(enabledOscillators() + kRefreshSlots));
@@ -134,7 +138,7 @@ void Doc5503::updateOscillator(int n) {
   const uint32_t sum = o.acc + o.fc;
   o.acc = sum & (period - 1);
   if (sum >= period) {
-    if (mode == kModeOneShot || mode == kModeSwap) {
+    if ((mode == kModeOneShot || mode == kModeSwap) && !retriggers(n)) {
       halt(n);
       interrupt(n);
       return;
@@ -148,7 +152,7 @@ void Doc5503::updateOscillator(int n) {
   const uint32_t mask = (256u << size) - 1;
   const uint32_t addr = ((uint32_t(o.pointer) << 8) & ~mask) | ((o.acc >> (9 + res - size)) & mask);
   o.data = waveRead_(((o.sizeReg & kBs) ? 0x10000u : 0u) | addr);
-  if (o.data == 0) {  // a zero byte halts in every mode
+  if (o.data == 0) {  // a zero byte halts in every mode (unless n retriggers)
     halt(n);
     interrupt(n);
     return;
@@ -159,9 +163,20 @@ void Doc5503::updateOscillator(int n) {
   frame_[(o.control >> 4) & (kChannels - 1)] += (int32_t(o.data) - 128) * volume;
 }
 
+// An even oscillator that is not in swap mode, with its odd partner in swap
+// mode, is retriggered instead of halted: it keeps running with its phase as in
+// a wrap, and the partner is left alone (MAME es5503.cpp halt_osc, "Verified on
+// IIgs hardware, and hinted by the Ensoniq data sheet").
+bool Doc5503::retriggers(int n) const {
+  return (n & 1) == 0 && modeOf(osc_[n].control) != kModeSwap &&
+         modeOf(osc_[n + 1].control) == kModeSwap;
+}
+
 // The DOC halts oscillator n: H = 1 (A = 0 when M0 = 1); in swap mode the
-// partner is started from the top of its table.
+// partner is started from the top of its table. A retriggering oscillator is
+// not halted (its accumulator is left as it is).
 void Doc5503::halt(int n) {
+  if (retriggers(n)) return;
   Osc& o = osc_[n];
   o.control |= kH;
   if (o.control & kM0) o.acc = 0;

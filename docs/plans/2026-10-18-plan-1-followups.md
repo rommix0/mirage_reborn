@@ -72,13 +72,33 @@ Plan 1, the engine core.
   any Save UI ships. Done in Plan 2 (d3fc478/ad7dcd9).
 - Other-OS sweep: WD1772 `$D4` index interrupt and the MO bit with h=1; DOC
   swap/AM/sync edge cases, including MAME's even-one-shot-starts-odd-swap
-  partner rule, which nothing so far needs.
+  partner rule, which nothing so far needs. Done in Plan 3 Task 7 (commit
+  "feat: other OSes boot and play; WD1772 $D4 and MO, DOC swap partner
+  (acceptance 4)", fixed in "fix: DOC swap partner per MAME hardware note; doc
+  citations; snapshot v4"): `$D4` interrupts at every index pulse, every
+  command sets MO, sync/AM wrap per the datasheet (doc5503.h). The partner rule
+  as first worded here was not MAME's: current MAME (es5503.cpp halt_osc,
+  "Verified on IIgs hardware, and hinted by the Ensoniq data sheet")
+  retriggers an even non-swap oscillator whose odd partner is in swap mode
+  (H cleared, phase kept as in a wrap, partner left alone), and that is what
+  the model does. Snapshot version 4. The sweep also found why Soundprocess was silent:
+  VIA PB5 is the DOC's CA3 line, which the OS polls before every DOC write
+  (boot-rom.md 13.7).
 - WAV import (spec §6.7) replaces sampling from audio input (owner decision,
-  2026-10-18). Engine work: a wave RAM write API on `Machine` that the host
+  2026-10-18). Done in Plan 3 Tasks 4-6 (4d5cd96 converter, 60a150c wave RAM
+  writes and `mirage_cli --import`, 92ae28b Import WAV dialog). Engine work: a wave RAM write API on `Machine` that the host
   calls between slices, the WAV-to-8-bit converter (no JUCE dependency), and
   a CLI import option. App work: *File → Import WAV…* and the import dialog.
   The OS's own sampling path through filter 7 (OS `$9702`) stays unmodelled;
   the converter input stays silent.
+- Also done in Plan 3, not listed above: WD1772 Write Track and *File → New
+  Blank Disk* with an fmt2 format (Tasks 2-3, acceptance 5), `.edm` disks, raw
+  and Giebler, open and save (Task 8, acceptance 6), and the paced MIDI input
+  feeder that stops long SysEx being truncated (Task 9). The checklists for
+  acceptances 2-6 are in `docs/app.md`; the owner has not run them yet.
+  Still open: WD1772 Read Track stays unmodelled, CA3 high in the DOC refresh
+  slots is an assumption, and the other leftovers are under "Known
+  limitations" in `docs/app.md`.
 
 ## Decisions made during Plan 1
 

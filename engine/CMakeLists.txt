@@ -1,6 +1,7 @@
 add_library(mirage_engine STATIC
   src/state_io.cpp
   src/disk_image.cpp
+  src/edm_format.cpp
   src/opcodes6809.cpp
   src/cpu6809.cpp
   src/cpu6809_ops.cpp
@@ -12,6 +13,7 @@ add_library(mirage_engine STATIC
   src/voice_filter.cpp
   src/stream_resampler.cpp
   src/wav_writer.cpp
+  src/wav_import.cpp
   src/sha1.cpp
   src/machine.cpp
   src/disasm6809.cpp
