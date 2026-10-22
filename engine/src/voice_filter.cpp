@@ -151,6 +151,8 @@ void FilterBank::reset() {
   rate_ = 0.0;
   noise_ = 0x2545F491u;
   mix_ = 0.0f;
+  out_.fill(0.0f);
+  external_ = 0.0f;
 }
 
 // A write loads the DAC latch at the end of the cycle; the sample-and-holds
@@ -188,7 +190,13 @@ void FilterBank::process(const std::array<float, kVoices>& voiceIn, double rateH
     noise ^= noise >> 17;
     noise ^= noise << 5;
     const float n = (float(noise >> 8) * (1.0f / 8388608.0f) - 1.0f) * kNoiseLevel;
-    mix += f[ch].process(in[ch] + n);
+    float x = in[ch] + n;
+    // Only a real jack signal is added: x + 0.0f is x for every x but -0.0f,
+    // and skipping it makes "nothing plugged in" exact by construction.
+    if (ch == kVoices - 1 && external_ != 0.0f) x += external_;
+    const float y = f[ch].process(x);
+    out_[size_t(ch)] = y;
+    mix += y;
   }
   noise_ = noise;
   dirty_ = 0;
@@ -206,6 +214,8 @@ void FilterBank::save(StateWriter& w) const {
   w.f64(rate_);
   w.u32(noise_);
   putF32(w, mix_);
+  for (float o : out_) putF32(w, o);
+  putF32(w, external_);
 }
 
 void FilterBank::load(StateReader& r) {
@@ -219,9 +229,14 @@ void FilterBank::load(StateReader& r) {
   const double rate = r.f64();
   const uint32_t noise = r.u32();
   const float mix = getF32(r);
+  std::array<float, kVoices> out{};
+  for (float& o : out) o = getF32(r);
+  const float external = getF32(r);
   if (noise == 0) throw StateError("filter bank: bad noise state");
-  if (!(rate == 0.0 || (rate >= 1000.0 && rate < 1e7)) || !std::isfinite(mix))
+  if (!(rate == 0.0 || (rate >= 1000.0 && rate < 1e7)) || !std::isfinite(mix) || !std::isfinite(external))
     throw StateError("filter bank: bad state");
+  for (float o : out)
+    if (!std::isfinite(o)) throw StateError("filter bank: bad state");
   filters_ = filters;
   cutoff_ = cutoff;
   res_ = res;
@@ -230,6 +245,8 @@ void FilterBank::load(StateReader& r) {
   rate_ = rate;
   noise_ = noise;
   mix_ = mix;
+  out_ = out;
+  external_ = external;
 }
 
 }  // namespace mirage

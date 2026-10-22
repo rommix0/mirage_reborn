@@ -299,13 +299,13 @@ TEST_CASE("machine MIDI output: two unpolled writes both go out, 640 cycles apar
   CHECK(seenAt[1] < out[1].second + 8);
 }
 
-TEST_CASE("machine rejects version 1, 2 and 3 snapshots") {
+TEST_CASE("machine rejects version 1, 2, 3 and 4 snapshots") {
   Machine m(rom(kAciaReceiver));
   m.powerOn();
   m.runCycles(100);
   const auto before = m.saveState();
-  REQUIRE(Machine::kSnapshotVersion == 4);
-  for (uint8_t old : {uint8_t(1), uint8_t(2), uint8_t(3)}) {
+  REQUIRE(Machine::kSnapshotVersion == 5);
+  for (uint8_t old : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(4)}) {
     auto snap = before;
     snap[4] = old;  // the version u32, little endian, follows the 4-byte magic
     REQUIRE(snap[5] == 0);

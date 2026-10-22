@@ -31,6 +31,32 @@ constexpr uint8_t kLineInputIdle = 0x80;
 constexpr double kDcBlockHz = 5.0;
 constexpr uint32_t kMaxPendingAudio = 1u << 16;
 
+// A host input sample as the jack sees it: NaN and infinity read as 0, and
+// finite values are limited so the filters (and a snapshot of them) stay finite.
+inline float jackSample(float x) {
+  return std::isfinite(x) ? std::clamp(x, -Machine::kMaxJackLevel, Machine::kMaxJackLevel) : 0.0f;
+}
+
+// The DOC's lowest scan rate (32 oscillators, 8 master clocks per slot, two
+// refresh slots): the rate at which the input resampler's kernel reaches
+// furthest, in host samples.
+constexpr double kSlowestScanRate = double(kMasterClockHz) / (8.0 * 34.0);
+
+// Zeros the first plug-in feeds the input resampler so that it never starves:
+// pop() needs the kernel's reach (kHalf input samples, stretched by in/out when
+// the host rate is above the scan rate) pushed beyond the output position, and
+// the position follows emulated time while a block's samples all arrive at its
+// start. Sized for the slowest scan rate, whatever the DOC is doing at the
+// moment (the OS enables its oscillators only after boot starts), so the
+// delay is the same wherever the jack is plugged in; a few samples of margin
+// cover the CPU's instruction overshoot.
+size_t jackPreroll(double hostRate) {
+  constexpr double kHalfWidth = 32.0, kMinStretch = 0.04, kMargin = 4.0;
+  const double ratio = kSlowestScanRate / hostRate;
+  const double reach = ratio < 1.0 ? std::ceil(kHalfWidth / std::max(ratio, kMinStretch)) : kHalfWidth;
+  return size_t(reach + kMargin);
+}
+
 }  // namespace
 
 Machine::Machine(std::span<const uint8_t> bootRom)
@@ -64,6 +90,7 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   // Each DOC scan runs the voice filters in emulated time, so an A/D
   // conversion sees the analog mix of that instant (filters.md 1).
   doc_.onFrame = [this](const std::array<int32_t, Doc5503::kChannels>& frame) {
+    filters_.setExternalInput(jackForScan());
     std::array<float, FilterBank::kVoices> in;
     const int32_t* sums = frame.data();
     float* v = in.data();
@@ -76,8 +103,11 @@ Machine::Machine(std::span<const uint8_t> bootRom)
   // DOC A/D input: the analog mux on VIA PB3:PB2 (boot-rom.md 2.1, filters.md 3).
   doc_.adcRead = [this] {
     switch ((via_.outB() >> 2) & 3) {
-      case 0: return compressedAdcCode(filters_.mix());  // voices + audio in (silent)
-      case 1: return kLineInputIdle;
+      case 0: return compressedAdcCode(filters_.mix());  // voices + audio in (mic gain)
+      case 1:  // the line input: the whole mix (voices + audio in) as a level, hard clipped
+        if (!jackConnected_) return kLineInputIdle;
+        return uint8_t(std::clamp(std::lround(128.0f + 127.0f * std::clamp(filters_.mix(), -1.0f, 1.0f)),
+                                  1L, 255L));
       case 2: return kPitchWheelRest;
       default: return kModWheelRest;
     }
@@ -101,6 +131,9 @@ void Machine::powerOn() {
   midiOverflows_ = 0;
   nextMidiCycle_ = 0;
   resampler_.reset();
+  inputResampler_.reset();  // powerOn unplugs the jack; the next render with input plugs it in
+  jack_ = 0.0f;
+  jackConnected_ = false;
   dcIn_ = dcOut_ = lastOut_ = 0.0f;
   renderCycleFrac_ = 0.0;
   pending_.clear();
@@ -158,6 +191,24 @@ void Machine::prepare(size_t maxFrames, double hostRate) {
 }
 
 void Machine::render(float* out, size_t frames, double hostRate) {
+  render(nullptr, out, frames, hostRate);
+}
+
+float Machine::jackForScan() {
+  if (!jackConnected_) return 0.0f;
+  inputResampler_.setOutputRate(doc_.sampleRate());
+  float s;
+  if (inputResampler_.pop(s)) jack_ = s;  // a shortfall holds the last value
+  // The 4052's X half feeds the A/D; its Y half routes the jack to filter 7
+  // only on channels 0 (the mic path) and 1, and is grounded on 2 and 3.
+  switch ((via_.outB() >> 2) & 3) {
+    case 0: return jack_ * kMicGain;
+    case 1: return jack_;
+    default: return 0.0f;
+  }
+}
+
+void Machine::render(const float* in, float* out, size_t frames, double hostRate) {
   // A host can report 0 (or garbage) before it has a real rate. Writing silence
   // and advancing nothing is safe; running 1e9 cycles or a NaN count is not.
   if (!(hostRate >= kMinHostRate && hostRate <= kMaxHostRate)) {  // also false for NaN
@@ -165,6 +216,23 @@ void Machine::render(float* out, size_t frames, double hostRate) {
     return;
   }
   resampler_.setOutputRate(hostRate);
+  if (in) {
+    // All of the block's samples go in before the CPU runs (in may be out).
+    inputResampler_.setOutputRate(doc_.sampleRate());
+    if (!jackConnected_) {  // plugging in: start clean, with the delay already in place
+      inputResampler_.reset();
+      inputResampler_.setInputRate(hostRate);
+      jack_ = 0.0f;
+      jackConnected_ = true;
+      for (size_t n = jackPreroll(hostRate); n != 0; --n) inputResampler_.push(0.0f);
+    }
+    inputResampler_.setInputRate(hostRate);
+    for (size_t i = 0; i < frames; ++i) inputResampler_.push(jackSample(in[i]));
+  } else if (jackConnected_) {  // unplugged
+    jackConnected_ = false;
+    jack_ = 0.0f;
+    inputResampler_.reset();
+  }
   renderCycleFrac_ += double(frames) * double(kCpuClockHz) / hostRate;
   const double whole = std::floor(renderCycleFrac_);
   renderCycleFrac_ -= whole;
@@ -343,6 +411,7 @@ std::vector<uint8_t> Machine::saveState() const {
   w.u32(masterRem_);
   filters_.save(w);
   saveAudio(w);
+  saveJack(w);
   wd_.save(w);
   w.u8(disk_ ? 1 : 0);
   if (disk_) disk_->save(w);
@@ -389,6 +458,26 @@ void Machine::loadAudio(StateReader& r) {
   pending_.assign(pending.begin(), pending.end());  // keeps the capacity prepare() reserved
 }
 
+void Machine::saveJack(StateWriter& w) const {
+  w.tag(fourcc("JACK"));
+  w.u8(jackConnected_ ? 1 : 0);
+  w.f64(double(jack_));
+  inputResampler_.save(w);
+}
+
+void Machine::loadJack(StateReader& r) {
+  r.tag(fourcc("JACK"));
+  const uint8_t connected = r.u8();
+  if (connected > 1) throw StateError("machine: bad jack flag");
+  const double jack = r.f64();
+  if (!std::isfinite(jack)) throw StateError("machine: bad jack sample");
+  StreamResampler resampler = inputResampler_;
+  resampler.load(r);
+  inputResampler_ = resampler;  // keeps the capacity the constructor reserved
+  jack_ = float(jack);
+  jackConnected_ = connected != 0;
+}
+
 void Machine::loadState(std::span<const uint8_t> data) {
   StateReader r(data);
   r.tag(fourcc("MIRG"));
@@ -425,6 +514,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
   doc_.save(before);
   filters_.save(before);
   saveAudio(before);
+  saveJack(before);
   uint64_t nextMidi = 0;
   uint32_t masterRem = 0;
   std::array<uint8_t, kMidiQueueCapacity> midi{};
@@ -438,6 +528,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     if (masterRem >= kCpuClockHz) throw StateError("machine: bad DOC clock remainder");
     filters_.load(r);
     loadAudio(r);
+    loadJack(r);
     wd_.load(r);
     const uint8_t hasDisk = r.u8();
     if (hasDisk > 1) throw StateError("machine: bad disk flag");
@@ -475,6 +566,7 @@ void Machine::loadState(std::span<const uint8_t> data) {
     doc_.load(back);
     filters_.load(back);
     loadAudio(back);
+    loadJack(back);
     throw;
   }
   bank_ = bank;

@@ -28,6 +28,21 @@ inline std::vector<uint8_t> romFrom(std::initializer_list<std::vector<uint8_t>> 
   return rom;
 }
 
+// The audio-jack rig: 32 oscillators enabled (all silent), VIA DDRB $1F, the A/D
+// mux (PB3:PB2) set to `mux`, filter 7 (the channel the jack feeds) given
+// cutoff CV `cutoffCv` and resonance 0, then forever: start an A/D conversion,
+// wait, read it, and store the code at $8000.
+inline std::vector<uint8_t> adcLoopRom(uint8_t mux, uint8_t cutoffCv = 0xFF) {
+  return romFrom({
+      {0x86, 0xFF, 0xB7, 0xEC, 0xE1},                    // OER = $FF
+      {0x86, 0x1F, 0xB7, 0xE2, 0x02},                    // DDRB = $1F
+      {0x86, uint8_t(mux << 2), 0xB7, 0xE2, 0x00},       // ORB: the mux
+      {0x86, cutoffCv, 0xB7, 0xE4, 0x1F, 0xB7, 0xE4, 0x17},  // DAC preset, cutoff 7
+      {0xB6, 0xEC, 0xE2, 0x3D, 0x3D, 0x3D, 0xB6, 0xEC, 0xE2,  // loop: LDA $ECE2; MUL x3; LDA $ECE2
+       0xB7, 0x80, 0x00, 0x20, 0xF2},                    // STA $8000; BRA loop
+  });
+}
+
 // MIDI receiver: polls the ACIA status; records any OVRN sighting at $9001 and
 // stores each received byte at $8000,X+. ROM-style setup first ($03 reset, $95).
 inline const std::vector<uint8_t> kAciaReceiver = {

@@ -58,11 +58,11 @@ Background: `docs/hardware/filters.md` §3 (the A/D mux, sampling set-up at OS
 
 | Decision | Choice | Why / cost if wrong | Doc |
 |---|---|---|---|
-| Where the jack enters | Added to voice channel 7's filter input, every DOC scan | The OS sets channel 7's filter for sampling (OS `$9702`); param 74 then works for free | filters.md §3.3 |
-| Line path (mux 1) | With a jack connected: `128 + 127·clamp(f7, −1, 1)` rounded, clamped to 1..255, where f7 = channel 7's filter output. With nothing connected: `$80` as today | Hard clip as the guide warns; nothing connected unchanged | filters.md §3.1 |
-| Mic path (mux 0) | The jack signal is multiplied by `kMicGain` (10, +20 dB) before filter 7 while the mux selects 0; mux 0 still reads `compressedAdcCode(mix)` | The guide: mic "increases gain and also puts a compressor on the signal". A silent jack leaves mux 0 bit-identical, so boot calibration is untouched. Gain tuned by ear. | filters.md §3.1 |
+| Where the jack enters | Added to voice channel 7's filter input, every DOC scan, only while the mux selects 0 (x `kMicGain`) or 1 (x 1); mux 2 and 3 ground it (amended by Task 1's schematic finding) | The OS sets channel 7's filter for sampling (OS `$9702`); param 74 then works for free | filters.md §3.3 |
+| Line path (mux 1) | With a jack connected: `128 + 127·clamp(mix, −1, 1)` rounded, clamped to 1..255, where mix = the whole voice mix (all 8 filters, uncompressed; amended: not channel 7's output alone). With nothing connected: `$80` as today | Hard clip as the guide warns; nothing connected unchanged | filters.md §3.1 |
+| Mic path (mux 0) | The jack signal is multiplied by `kMicGain` (11, +20.8 dB, the schematic's resistor ratio; amended from 10) before filter 7 while the mux selects 0; mux 0 still reads `compressedAdcCode(mix)` | The guide: mic "increases gain and also puts a compressor on the signal". A silent jack leaves mux 0 bit-identical, so boot calibration is untouched. Gain may still be tuned by ear. | filters.md §3.1 |
 | Input units | ±1.0 at the jack = full scale of the line path | Simple; the host input gain sets the real level | app.md |
-| Input timing | Host frames resampled (a second `StreamResampler`, host rate → DOC scan rate) and popped one per DOC scan; a shortfall holds the last value | Same machinery as the output; group delay ≈ 1 ms, deterministic | filters.md §3.3 |
+| Input timing | Host frames resampled (a second `StreamResampler`, host rate → DOC scan rate) and popped one per DOC scan; a shortfall holds the last value | Same machinery as the output; group delay 35 DOC scans = 1.19 ms at 48 kHz (measured and pinned: the first plug-in pre-rolls zeros), deterministic | filters.md §3.3 |
 | Host input gain | 0..4, default 1, applied before the jack; saved in settings | Stands in for the mixer/preamp knob the guide recommends; the Mirage has none | app.md |
 | Device input to mono | Average of the active input channels | The Mirage samples mono | app.md |
 
@@ -135,7 +135,7 @@ builds.
 - Produces (`FilterBank`): `void setExternalInput(float x);` added to channel 7's filter input on the next `process()` (and held until changed); `float output(int ch) const;` the last output of channel `ch`'s filter.
 - Produces (`Machine`):
   - `void render(const float* in, float* out, size_t frames, double hostRate);` `in == nullptr` = nothing plugged in. The existing `render(out, frames, hostRate)` calls it with `nullptr`.
-  - `static constexpr float kMicGain = 10.0f;`
+  - `static constexpr float kMicGain = 11.0f;`
   - `bool jackConnected() const;` true after a `render` with a non-null `in`, false after one with `nullptr` (saved state).
   - `kSnapshotVersion = 5`: the input resampler and the jack flag are saved.
   - `prepare(maxFrames, hostRate)` also reserves the input path; `render` with input never allocates after it.

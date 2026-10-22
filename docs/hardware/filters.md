@@ -18,7 +18,9 @@ Anything not read directly from code or a data sheet is marked **inferred** or *
 DOC channel n (sum of (byte-128)*volume / 32768) --+-- VoiceFilter n (cutoff CV n, resonance CV n) --+
   + filter input noise (1e-4)                                                                      |
                                               sum of the 8 filter outputs = the voice mix  <-------+
-voice mix (+ audio input, always silent) --> compressor --> A/D mux input 0
+voice mix --> compressor --> A/D mux input 0 (mic)
+voice mix ------------------> A/D mux input 1 (line)
+audio input jack (host samples, section 3.3) --> + channel 7's filter input, mux 0 or 1 only
 ```
 
 - **One CEM3328 per DOC channel** (8 channels = the 8 voices, CA & 7). The DOC volume register
@@ -91,17 +93,26 @@ and the calibration rewrites them on every pass of its wait loop).
 
 The mux is U45, a CD4052 (dual 4-to-1), AN1 = PB3, AN0 = PB2. Its X half picks the A/D input;
 its Y half picks what the audio input jack feeds into filter 8 (voice channel 7, section 3.3).
+
+**Naming.** The schematic counts filters from 1, the code from 0: **filter 8 = VCF8 = zero-based
+filter index 7 = DOC channel 7** (`FilterBank` index 7; `$E417`/`$E41F` for its CVs). This document
+says "filter 8" for the part and "channel 7" or "filter 7" for the index (the engine API,
+`setExternalInput`, `output(7)`); they are the same filter.
 Schematic *Main Board DSK-8, Analog Section* (1984 rev. N and 1985 rev. G sheets, "Table 1"):
 
-| PB3:PB2 | COM X (to the A/D) | COM Y (to VCF8 `IN+`) | Model (Plan 1-3) |
+| PB3:PB2 | COM X (to the A/D) | COM Y (to VCF8 `IN+`) | Model (Plan 4) |
 |---|---|---|---|
-| 0 | **compressor**: the voice mix (summer U56 output) through the NE570 U48 | **MIC**: the jack at full level | `compressedAdcCode(voice mix)`: `128 + 127 * clip(mix)`, clip = the tanh approximation of section 6, clamped to 1..255. `$80` = 0 V. Audio in is silent. |
-| 1 | **line**: the same voice mix, not compressed | **LINE**: the jack through R51 200K (about 1/11 of the mic level) | `$80` (nothing connected) |
-| 2 | pitch wheel | GND (jack disconnected) | `kPitchWheelRest` = `$80` |
-| 3 | mod wheel | GND (jack disconnected) | `kModWheelRest` = `$00` |
+| 0 | **compressor**: the voice mix (summer U56 output) through the NE570 U48 | **MIC**: the jack at full level | `compressedAdcCode(voice mix)`: `128 + 127 * clip(mix)`, clip = the tanh approximation of section 6, clamped to 1..255. `$80` = 0 V. The jack, times `Machine::kMicGain` = 11, is added to filter 7's input, so the mix includes it; with no jack signal the code is exactly what it was before the jack existed. |
+| 1 | **line**: the same voice mix, not compressed | **LINE**: the jack through R51 200K (about 1/11 of the mic level) | Jack connected: `128 + 127 * clamp(mix, -1, 1)` rounded, clamped to 1..255 (the whole mix, hard clipped, no compressor), with the jack, times 1, added to filter 7's input. Nothing connected: `kLineInputIdle` = `$80`. |
+| 2 | pitch wheel | GND (jack disconnected) | `kPitchWheelRest` = `$80`; the jack is not routed (filter 7 sees no jack signal) |
+| 3 | mod wheel | GND (jack disconnected) | `kModWheelRest` = `$00`; the jack is not routed |
 
 So "line" and "compressed" are both the **whole voice mix** (all 8 filters summed), differing only
 by the compressor; the jack reaches the A/D only through filter 8, and only while the mux is 0 or 1.
+
+In the engine the jack side is `Machine::jackForScan` (once per DOC scan) and the A/D side is
+`adcRead`: at each scan the mux is read from the VIA's PB3:PB2, and filter 7's external input is
+`jack x kMicGain` (mux 0), `jack` (1) or 0 (2, 3).
 
 Evidence for the numbering: ROM `$F578` sets ORB = `$10` (mux 0) for the calibration; OS `$B935`
 sets `$18` (mux 2) for the pitch-wheel centre; OS `$9039-$9058` clears PB2 and sets PB3 (mux 2)
@@ -212,7 +223,9 @@ it). `$B283` is filter 8's calibration offset (`$B068 + 7 * $4D`, section 4).
    the trigger** (probe: 0 bytes changed 0.5 s after Enter).
 6. **Waiting for the threshold** `$9802-$9817`: an unpaced loop of `$977B` reads (one per 56 E
    cycles, 18,080 reads in 0.51 s) until one read has \|code − `$80`\| ≥ `<$1A`. p76 = 0 triggers
-   on the first read. Y counts to 65,535: no trigger in **1.84 s** → return 1 → "nS" (`54 6D`)
+   on the first read. Y starts at 1 (`LDY #$0001`, `$9807`) and each pass does `LEAY +1,Y` first, so it
+   takes the values 2..65,535 (the `BNE` at `$980D` falls through at 0): **65,534 polls**, no trigger in
+   **1.84 s** (65,534 x 56 E cycles) → return 1 → "nS" (`54 6D`)
    blinks (`$9512`), back to normal play. (The guide says "about six seconds"; the loop at 2 MHz
    gives 1.84 s.) The display is not driven here, so it goes blank.
 7. **Recording** `$9819-$9851`: port A = 6 (`$981B`: middle bar on both digits, driven
@@ -239,7 +252,8 @@ line with no compressor, and mux 0 is mic: more gain plus the compressor, with m
 
 - **Mux 1 reads the uncompressed voice mix** (all 8 filters), not filter 8 alone. While the OS
   samples, all 32 oscillators are halted, so the mix is filter 8's output plus the other filters'
-  input noise: in practice the same number. Corrected: mux 1 = `128 + 127·clamp(mix, −1, 1)`
+  input noise: in practice the same number (**inferred**: the probe measured the DOC channel
+  sums at 0, not the filters' outputs, and the other filters' noise is the model's 1e-4, section 1). Corrected: mux 1 = `128 + 127·clamp(mix, −1, 1)`
   rounded, clamped to 1..255. With nothing connected and the voices halted that is `$80`, as the
   current constant gives.
 - **The jack feeds filter 8 only while the mux selects 0 or 1** (`COM Y` is grounded for 2 and
@@ -247,9 +261,60 @@ line with no compressor, and mux 0 is mic: more gain plus the compressor, with m
   mux at 2/3 in normal play, a connected jack is not heard while playing; with a silent jack
   nothing changes anywhere.
 
-`kMicGain` = 10 (+20 dB) sits between the resistor ratio (11) and the guide's "about 20 times";
-still to tune by ear. Not on the sheet, so still **model choices**: the jack's scale (±1 = line
-full scale) and polarity (the summer and the level shifter both invert), and the compressor's curve.
+**Ruled (controller, Plan 4 Task 2):** `kMicGain` = **11** (+20.8 dB), the schematic's resistor
+ratio, not the plan's 10: the guide's "about 20 times" most likely includes the compressor's
+make-up gain (**inferred**), and the compressor is modelled separately. Still **model choices**,
+not on the sheet: the jack's scale (±1.0 = line full scale), its polarity (the summer and the
+level shifter both invert; the jack is not inverted here) and the compressor's curve. The two
+contradictions above are what the engine implements.
+
+**The jack model (`Machine::render(in, out, frames, hostRate)`, Task 2).**
+
+```
+host samples -> sanitise -> inputResampler_ (host rate -> DOC scan rate) -> one sample per DOC scan
+   -> x kMicGain (mux 0) / x 1 (mux 1) / 0 (mux 2, 3) -> FilterBank::setExternalInput -> filter 7 input
+```
+
+- **Units.** ±1.0 at the jack is the full scale of the line path: a held DC of 0.5 settles to a
+  mix of 0.5 and reads `128 + round(127 x 0.5)` = `$C0` on mux 1. NaN and ±infinity read as 0;
+  finite samples are limited to ±64 (`kMaxJackLevel`) so the filters, and a snapshot of them, stay
+  finite.
+- **Timing.** A second `StreamResampler` (input rate = the host rate, output rate = the DOC scan
+  rate, updated at each scan) is fed the block's samples **before** the CPU runs; `doc_.onFrame`
+  pops one sample per scan, before `filters_.process`. A shortfall holds the last value. `in` may
+  alias `out`. Pops continue (on whatever was pushed) during `runCycles()` calls made outside
+  `render()`.
+- **Group delay: 35 DOC scans = 1.19 ms at 48 kHz** (57 host samples). The resampler's output
+  position follows emulated time while a block's samples all arrive at its start, so it needs its
+  kernel reach (32 scans of input: 53 host samples at 48 kHz, 32 at host rates below the scan
+  rate) already pushed beyond the position or it starves. The first plug-in therefore pre-rolls
+  zeros: the reach for the slowest DOC scan rate (29,411.76 Hz, 32 oscillators) plus a 4-sample
+  margin for the CPU's instruction overshoot. The delay is then the same from the first sample on
+  and independent of what the DOC is doing when the jack is plugged in (the OS enables its
+  oscillators a moment after boot starts: a pre-roll sized from the instantaneous scan rate
+  measured 33 scans, not 35). **Measured and pinned** (`jack: an impulse lands at the scan for its
+  frame plus the resampler's group delay`; filter 7 open, mux 1, 48 kHz, 256-frame blocks): an
+  impulse at frame k of a block peaks in the mix 35, 36 and 35 scans after the scan nearest
+  `k x 29411.76 / 48000` for k = 40, 100 and 200 (the test allows 35 ± 1 for the scan phase at the
+  block start). Filter 7 (open, 13 kHz, four poles) adds under one scan.
+- **Plugging.** The flag follows the last `render`: with a buffer the jack is plugged (the first
+  such call after unplugging resets the input resampler and pre-rolls), with `nullptr` (or the old
+  `render(out, ...)`) it is unplugged (held value 0, resampler reset). A `render` skipped for an
+  unusable host rate changes nothing. `powerOn()` unplugs; the next `render` with input plugs in
+  again. While unplugged, `adcRead` mux 1 reads `$80` and nothing is added to filter 7.
+- **A silent jack changes nothing, exactly.** `FilterBank` adds the external input only when it is
+  not ±0.0 (`x + 0.0f` is already `x` except for `-0.0f`; never adding makes it exact), and mux 0
+  with a zero jack is `0 x 11` = 0. The test `machine with nothing plugged in renders exactly as
+  before` boots SND-A01 for 20 s from power-on in 256-frame blocks with `render(out)`,
+  `render(nullptr, out)` and `render(zeros, out)`: bit-identical audio and displays in every
+  block, and the same sample RAM and `cycles()` at the end. (A connected jack on mux 1 does read
+  differently from an unplugged one, but OS 3.2 selects mux 1 only while sampling.)
+- **Saved state (snapshot version 5).** `FilterBank` also saves the last output of every filter and
+  the held external input; a `JACK` section (after the audio path) saves the plugged flag, the held
+  value and the input resampler. Version 4 snapshots are refused.
+- **Real time.** The input resampler is built, with its rate-change list reserved, with the
+  `Machine`; `render` with input never allocates after `prepare()` (a plug-in, an unplug and a host
+  rate change are all inside the audited loop).
 
 **Not modelled, noted for the display:** port A = 6 drives the middle bars statically, but the
 panel model only lights a segment for 35 ms after a port A write (`Panel::portAWritten`), so in
@@ -345,8 +410,9 @@ before Task 11, 1.38-1.45 s after (8 filters × 29.4 kHz, plus the A/D path).
 
 - Per-chip spread of cutoff and resonance (calibration would return different offsets).
 - S/H droop and CV feedthrough.
-- The audio input (out of scope, spec §3) and the input compressor's real curve; the routing of the sampling input
-  through voice 8's filter (section 3.3).
+- The input compressor's real curve, and the jack's absolute level (jack volts to A/D codes), polarity
+  and real mic gain (section 3.3). The audio input itself and its routing through voice 8's filter
+  are modelled (section 3.3, Plan 4).
 - Whether reading `$E400-$E41F` strobes anything (SP clears CVs with `CLR`, which reads first;
   the model ignores reads).
 
