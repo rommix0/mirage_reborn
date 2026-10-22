@@ -28,9 +28,11 @@ emulator/build/app/MirageApp_artefacts/Release/Mirage.exe
 On start the app looks for the 4096-byte boot ROM in this order:
 
 1. the path saved in the settings (from the last successful start),
-2. `<MIRAGE_ASSET_ROOT>/Ensoniq Mirage EPROM Firmware/mirage.bin` (the default
+2. `mirage.bin` in the same folder as `Mirage.exe` (where a release zip puts
+   it, so a release starts the first time without asking),
+3. `<MIRAGE_ASSET_ROOT>/Ensoniq Mirage EPROM Firmware/mirage.bin` (the default
    asset root is the parent of `emulator/`),
-3. a file chooser.
+4. a file chooser.
 
 A file that is not exactly 4096 bytes is refused. A ROM whose SHA-1 is not
 `ec6ea5613eeafd21d8f3a7431a35a6ff16eed56d` is accepted, but a warning shows the

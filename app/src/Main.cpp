@@ -87,11 +87,15 @@ class MirageApplication : public juce::JUCEApplication {
       quit();
       return;
     }
-    // Boot ROM: the saved path, then the default location, then ask.
+    // Boot ROM: the saved path, then mirage.bin next to the exe (a release
+    // folder), then the default location, then ask.
+    const auto besideExe =
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("mirage.bin");
     const auto defaultRom = juce::File(MIRAGE_ASSET_ROOT)
                                 .getChildFile("Ensoniq Mirage EPROM Firmware")
                                 .getChildFile("mirage.bin");
     if (settings_.romPath().isNotEmpty() && tryRom(juce::File(settings_.romPath()))) return;
+    if (tryRom(besideExe)) return;
     if (tryRom(defaultRom)) return;
     chooseRom();
   }

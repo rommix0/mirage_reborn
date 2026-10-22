@@ -96,7 +96,8 @@ emulator/build/app/MirageApp_artefacts/Release/Mirage.exe
 ```
 
 **Build Release for live play**; the Debug build is unoptimised and may glitch.
-On start it loads the boot ROM from the saved path, then from
+On start it loads the boot ROM from the saved path, then from `mirage.bin`
+next to `Mirage.exe`, then from
 `MIRAGE_ASSET_ROOT/Ensoniq Mirage EPROM Firmware/mirage.bin`, and otherwise
 asks for it (a 4096-byte file; a ROM with a different SHA-1 is allowed but
 warned about). Settings are kept in `%APPDATA%\MirageEmulator\MirageEmulator.settings`.
