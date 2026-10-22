@@ -302,15 +302,16 @@ struct Played {
   double hz = 0;
 };
 
-// Note-on at velocity 100; the peak over 0.25 s and the fundamental (zero
-// crossings of the mean-removed signal from 31 ms to 125 ms, after the attack).
-Played playNote(Machine& m, int note) {
+// Note-on at velocity 100; the peak over 0.25 s (from frame peakFrom on) and the
+// fundamental (zero crossings of the mean-removed signal from 31 ms to 125 ms, after
+// the attack).
+Played playNote(Machine& m, int note, size_t peakFrom = 0) {
   const uint8_t on[] = {0x90, uint8_t(note), 100};
   m.queueMidi(on);
   std::vector<float> v(kPlayRate / 4);
   m.render(v.data(), v.size(), kPlayRate);
   Played p;
-  for (float x : v) p.peak = std::max(p.peak, std::fabs(x));
+  for (size_t i = peakFrom; i < v.size(); ++i) p.peak = std::max(p.peak, std::fabs(v[i]));
   const size_t from = 1500, to = 6000;
   double mean = 0;
   for (size_t i = from; i < to; ++i) mean += v[i];
@@ -741,7 +742,15 @@ TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[asse
   const SampledSine& s = sampledSine(false, kMicAmp);
   REQUIRE(s.done);
   auto m = machineFrom(s.state);
-  const Played before = playNote(*m, 52);
+  // The level is the peak from 10 ms on. A note's first milliseconds depend on when the
+  // OS happens to handle the note-on against its own timer ticks, which a machine that
+  // booted at another moment does not share (acceptance 3's two machines happen to line
+  // up bit for bit; these two do not). Measured on this sampled sound, note-on offset by
+  // 0-12 ms in 1 ms steps: peak of the first 10 ms 0.064-0.074, peak after it 0.0638-0.0644
+  // (the stock SND-A01 piano shows the same: 0.253-0.280 after 10 ms). The data is also
+  // checked directly: the reopened wave RAM is the sampled wave RAM, byte for byte.
+  constexpr size_t kAfterStart = 480;  // 10 ms at kPlayRate
+  const Played before = playNote(*m, 52, kAfterStart);
   INFO("before saving: " << before.hz << " Hz, peak " << before.peak);
   REQUIRE(before.peak > 0.05f);
   REQUIRE(before.hz > 0);
@@ -760,7 +769,8 @@ TEST_CASE("acceptance 7: a sampled sound survives an OS save and reopen", "[asse
   fresh.powerOn();
   settleBoot(fresh);
 
-  const Played after = playNote(fresh, 52);
+  CHECK(lowerHalf(fresh) == s.lower);
+  const Played after = playNote(fresh, 52, kAfterStart);
   INFO("after reopening: " << after.hz << " Hz, peak " << after.peak);
   CHECK(after.peak == Catch::Approx(before.peak).epsilon(0.10));
   CHECK(after.hz == Catch::Approx(before.hz).epsilon(0.03));
