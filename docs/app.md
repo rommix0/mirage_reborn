@@ -386,8 +386,7 @@ dialogs.
 
 ## Acceptance-5 checklist (format a blank disk with fmt2)
 
-**Status: not yet accepted.** On 2026-10-22 the owner saw a blank disk go
-straight to "ud" (see the note under step 2).  `tests/test_acceptance.cpp` runs the same
+**Status: passed.** The owner accepted it (2026-10-22).  `tests/test_acceptance.cpp` runs the same
 panel keys headlessly (`acceptance 5: fmt2 formats a blank disk that then boots`
 and `acceptance 5: a sound saved to the formatted disk loads back`) and passes.
 Formatting is emulated at real speed (no turbo): on the emulated clock fmt2 takes
