@@ -190,7 +190,14 @@ and held keys are let go while it is open.
   was applied (nothing is written then). *Cancel* or Esc closes it.
 
 The OS is not told about the import: its wavesample start, end, loop and
-tuning stay as they were, as on a real Mirage after sampling. The imported
+tuning stay as they were, as on a real Mirage after sampling. There is
+deliberately no loop setter in the dialog: loop points are OS parameters, and the
+app never writes OS parameters (spec §3). Set them on the panel as on a real
+Mirage, with the page numbers the dialog shows (in hex, as the OS shows them):
+OS 3.2 parameters **60** Wavesample Start, **61** Wavesample End, **62** Loop
+Start, **63** Loop End, **64** Loop End Fine Adjust and **65** Loop Switch
+(Advanced Sampler's Guide, "Looping"). Select one with **Param** and the two
+digits, then **Value** and **Up**/**Down**. The imported
 sample is kept only once you save the sound with the OS (and then the disk
 image with *Save*); a reset loses it.
 
@@ -342,7 +349,8 @@ Re-run it after changes to the audio path or the app.
 
 ## Acceptance-2 checklist (edit, save in the OS, Save As, reopen)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22).  `tests/test_acceptance.cpp` runs the same
 panel keys headlessly (the test `acceptance 2: an edited parameter survives OS
 save, Save As and reopen`) and passes. The display strings below are what that
 run shows; the keys are from the OS 3.2 manual (*Selecting and changing a
@@ -378,7 +386,8 @@ dialogs.
 
 ## Acceptance-5 checklist (format a blank disk with fmt2)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+**Status: not yet accepted.** On 2026-10-22 the owner saw a blank disk go
+straight to "ud" (see the note under step 2).  `tests/test_acceptance.cpp` runs the same
 panel keys headlessly (`acceptance 5: fmt2 formats a blank disk that then boots`
 and `acceptance 5: a sound saved to the formatted disk loads back`) and passes.
 Formatting is emulated at real speed (no turbo): on the emulated clock fmt2 takes
@@ -391,6 +400,15 @@ waiting with the drive LED on.
 2. *File → New Blank Disk* (Ctrl+N). The title says "Untitled (blank)". The
    Mirage notices the disk change. (If fmt2 had unsaved changes the app would
    ask first; it has none.)
+   **Only insert the blank disk while fmt2 shows "F" "d", and do not Reset after
+   it.** A blank disk cannot boot. If the Mirage tries to boot it, the boot ROM
+   shows "ud" (unformatted disk) and retries for ever, exactly as the hardware
+   does. That happens when the blank disk goes into an empty drive at the "nd"
+   prompt, when it replaces fmt2 before fmt2 has finished loading (before "F"
+   "d"), or when you Reset with it in the drive. To recover, open fmt2 again,
+   Reset, wait for "F" "d", then *New Blank Disk*. (Checked headlessly: with fmt2
+   at "F" "d" the display stays "F" "d" after the blank goes in, and 1, Enter
+   starts formatting.)
 3. Press **1**, then **Enter** (format; OS 3.2 goes onto the disk). The drive
    LED lights and the head steps through the tracks.
 4. While it runs, try *File → Save Disk Image As...* and pick a name: the save is
@@ -484,7 +502,8 @@ The hint is a starting point, not a promise for every sound.
 
 ## Acceptance-3 checklist (import a WAV, play it, save it with the OS, reopen)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` runs the same
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22).  `tests/test_acceptance.cpp` runs the same
 route headlessly (`acceptance 3: an imported sine plays at a pitch set by the key`
 and `acceptance 3: the imported sound survives an OS save and reopen`) and
 passes. No wavesample start or end edits are needed: SND-A01's lower sound
@@ -524,7 +543,8 @@ or the dialog.
 
 ## Acceptance-4 checklist (other OS images boot and play)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` boots each image
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22).  `tests/test_acceptance.cpp` boots each image
 headlessly and plays note 60 (`acceptance 4: each OS image boots and plays`) and
 passes. Times are on the emulated clock (`docs/hardware/boot-rom.md` §13.7).
 
@@ -555,7 +575,8 @@ Re-run it after changes to the DOC, the VIA wiring or the FDC.
 
 ## Acceptance-6 checklist (`.edm` disks, raw and Giebler)
 
-**Status: not yet run by the owner.** `tests/test_acceptance.cpp` boots both
+**Status: passed.** The owner ran this checklist and accepted it by ear
+(2026-10-22).  `tests/test_acceptance.cpp` boots both
 disks headlessly and plays note 60 (`acceptance 6: a Metascape .edm boots and
 plays`, `acceptance 6: a Giebler .EDM boots its OS`), and `tests/test_edm_format.cpp`
 and `tests/test_disk_session.cpp` cover the format and Save / Save As; all pass.
