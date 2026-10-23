@@ -1,4 +1,4 @@
-![](keyboard.png)
+![](interface.png)
 
 # Ensoniq Mirage Reborn
 
