@@ -2,6 +2,9 @@
 
 # Ensoniq Mirage Reborn
 
+Disk images for use with this emulator can be grabbed here:
+[Ensoniq Mirage disks and manuals](https://github.com/rommix0/mirage_disk_and_manuals)
+
 This is an early release, and a program created with the assistance of Claude. If you notice anything off, please raise an issue. Pull requests are also welcome.
 
 A cycle-level emulator of the Ensoniq Mirage DSK-8 sampler that runs the
