@@ -176,7 +176,6 @@ void MirageProcessor::prepareToPlay(double sampleRate, int maximumExpectedSample
     if (!midiOutDest_->addEvent(m.data(), (int)m.size(), midiOutFrame_)) ++midiLost_;
   };
   midiOut_.ensureSize(kMidiOutBytes);
-  midiOutStorage_ = midiOut_.data.getRawDataPointer();
 }
 
 bool MirageProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
@@ -239,11 +238,15 @@ void MirageProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
   // MIDI out, each message at the frame its cycle maps to. It is written into
   // the storage reserved in prepareToPlay, so the host's buffer never grows
-  // here: if the host's buffer already holds that storage (handed over by an
-  // earlier block), write there; otherwise write into midiOut_ and swap.
+  // here: the first block writes into midiOut_ and swaps that storage into the
+  // host's buffer, and later blocks write there. That buffer holds it still,
+  // or, if the host's own events outgrew it, a larger block the host
+  // allocated (growing never shrinks), so its address is not what is checked.
   // ponytail: assumes the host passes the same MidiBuffer each block (JUCE's
-  // VST3 wrapper does); one that rotates buffers could make addEvent allocate.
-  midiOutDest_ = midi.data.getRawDataPointer() == midiOutStorage_ ? &midi : &midiOut_;
+  // VST3 wrapper does); one that rotates buffers gets midiOut_'s storage, the
+  // host's old one, which addEvent may have to grow (reserved again at the next
+  // prepareToPlay).
+  midiOutDest_ = &midi == midiOutHolder_ ? &midi : &midiOut_;
   midiOutDest_->clear();
   const double elapsed = (double)(c1 - c0);
   mirage::MidiOutByte b;
@@ -252,7 +255,10 @@ void MirageProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     midiOutFrame_ = (int)std::clamp(at, 0.0, (double)std::max(frames - 1, 0));
     midiOutParser_->feed(b.byte, emitMidiOut_);
   }
-  if (midiOutDest_ != &midi) midi.swapWith(midiOut_);
+  if (midiOutDest_ != &midi) {
+    midi.swapWith(midiOut_);
+    midiOutHolder_ = &midi;
+  }
   midiDropped_.store(midiLost_ + midiOutParser_->dropped(), std::memory_order_relaxed);
 }
 

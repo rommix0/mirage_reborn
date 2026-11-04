@@ -152,7 +152,7 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   std::unique_ptr<mirage::MidiByteParser> midiOutParser_;
   std::function<void(std::span<const uint8_t>)> emitMidiOut_;
   juce::MidiBuffer midiOut_;           // reserved storage for MIDI out
-  const void* midiOutStorage_ = nullptr;  // its data, wherever it is now (see processBlock)
+  const juce::MidiBuffer* midiOutHolder_ = nullptr;  // the host's buffer we swapped it into (see processBlock)
   juce::MidiBuffer* midiOutDest_ = nullptr;
   int midiOutFrame_ = 0;
   uint64_t midiLost_ = 0;                  // see midiDropped(), less the parser's count
