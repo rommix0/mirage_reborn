@@ -32,7 +32,7 @@ ctest --test-dir emulator/build -C Debug --parallel 8 --output-on-failure
 - First configure fetches Catch2 and JUCE 8.0.4. `-DMIRAGE_BUILD_APP=OFF` skips the app.
 - Build **Release** for live play; Debug glitches.
 - `MIRAGE_ROM` (default `emulator/mirage.bin`) is the boot ROM; `MIRAGE_ASSET_ROOT`
-  (default `../(xtras)`) is the disk library. Tests that need a missing asset
+  (default `../disks and manuals`) is the disk library. Tests that need a missing asset
   **skip**, so check the skip count, not only the pass count.
 - Test and CLI processes route MSVC Debug assertions to stderr
   (`tools/mirage_cli/non_interactive.h`, `tests/non_interactive.cpp`); nothing may pop a dialog.
@@ -54,7 +54,7 @@ ctest --test-dir emulator/build -C Debug --parallel 8 --output-on-failure
   format changes.
 - **The audio thread never allocates or blocks**: talk to `Machine` only through
   `RealtimeHost`'s queues.
-- **Never write to the user's library images** under `(xtras)`; tests copy to temp files.
+- **Never write to the user's library images** under `disks and manuals`; tests copy to temp files.
 - Fidelity is judged **by ear by the owner** (no real Mirage to compare
   against). Automated tests can't hear; give the owner a checklist in `docs/app.md`.
 - C++20, MSVC 2019 x64, CMake. LF line endings (`.gitattributes`). Commit

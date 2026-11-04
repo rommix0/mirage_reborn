@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # The user's disk image library and boot ROM (never copied into this repo).
-set(MIRAGE_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../(xtras)" CACHE PATH
+set(MIRAGE_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../disks and manuals" CACHE PATH
     "Folder containing the Mirage disk images")
 set(MIRAGE_ROM "${CMAKE_CURRENT_SOURCE_DIR}/mirage.bin" CACHE FILEPATH
     "The Mirage boot ROM (4096 bytes)")

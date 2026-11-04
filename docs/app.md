@@ -595,7 +595,7 @@ or settings the import refuses, print the message and exit 1 before the run star
 SND-A01 is busy until about 14.6 s, so import at 15 s or later:
 
 ```
-mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
+mirage_cli run --disk "../disks and manuals/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412" --note 48:100@16:2 --seconds 19 --wav out.wav
 ```
 
 **Pitch hint** (the dialog shows it as "Plays at original pitch around B2 (with the

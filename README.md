@@ -59,7 +59,7 @@ are git-ignored. From `emulator/` in Git Bash:
 
 ```
 git clone . build-dist/src
-cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)/(xtras)" "-DMIRAGE_ROM=$(pwd -W)/mirage.bin"
+cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)/disks and manuals" "-DMIRAGE_ROM=$(pwd -W)/mirage.bin"
 cmake --build build-dist/out --config Release --target MirageApp mirage_cli --parallel
 mkdir -p dist/Mirage-0.2.0-win64 && cd dist/Mirage-0.2.0-win64
 cp ../../build-dist/out/app/MirageApp_artefacts/Release/Mirage.exe ../../build-dist/out/Release/mirage_cli.exe .
@@ -80,8 +80,8 @@ Two CMake cache variables locate them:
 - `MIRAGE_ROM`, the 4096-byte boot ROM, defaults to `emulator/mirage.bin`
   (git-ignored). It is the default `--rom` of `mirage_cli`, the app's fallback
   ROM, and the ROM every test boots.
-- `MIRAGE_ASSET_ROOT`, the disk image library, defaults to `../(xtras)` (the
-  `(xtras)` folder next to `emulator/`). The tests use these files under it:
+- `MIRAGE_ASSET_ROOT`, the disk image library, defaults to `../disks and manuals` (the
+  `disks and manuals` folder next to `emulator/`). The tests use these files under it:
   `Factory Library/IMG/SND-A01.img`, `SND-A02.img`, `SND-A04.img`;
   `EnsoniqOS/os32`, `masos`, `resmos32.s`, `fmt2`; `MetascapeMetaSounds/mp1.edm`;
   `Soundprocess/Soundprocess OS/Soundprocess OS.img`;
@@ -97,7 +97,7 @@ reorganisation (`ctest` prints skipped tests as "Not Run" or "Skipped").
 ## Rendering a note to a WAV
 
 ```
-mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A04.img" --note 48:100@16:3 --seconds 20 --wav a04.wav
+mirage_cli run --disk "../disks and manuals/Factory Library/IMG/SND-A04.img" --note 48:100@16:3 --seconds 20 --wav a04.wav
 ```
 
 The OS needs about 14.6 s of emulated time after power-on to load the disk's
@@ -115,7 +115,7 @@ sections 13.5 and 13.6.
 saved a sound from `--key` presses:
 
 ```
-mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --key Param@16 --key K1@17 --key K1@18 --key K1@19 --key Enter@20 --seconds 30 --save-disk edited.img
+mirage_cli run --disk "../disks and manuals/Factory Library/IMG/SND-A01.img" --key Param@16 --key K1@17 --key K1@18 --key K1@19 --key Enter@20 --seconds 30 --save-disk edited.img
 ```
 
 It exits 1 if there is no disk, a track is unformatted or the file cannot be
@@ -125,7 +125,7 @@ disk file formats are in `docs/hardware/fdc.md`.
 ## Importing a WAV into wave RAM
 
 ```
-mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412,half=lower,page=0" --note 48:100@16:2 --seconds 19 --wav out.wav
+mirage_cli run --disk "../disks and manuals/Factory Library/IMG/SND-A01.img" --import "sine.wav@15,rate=29412,half=lower,page=0" --note 48:100@16:2 --seconds 19 --wav out.wav
 ```
 
 `--import "FILE@T[,rate=R][,start=S][,end=E][,half=lower|upper][,page=P][,normalize=0|1]"`
@@ -137,7 +137,7 @@ and the pitch hint.
 ## Sampling from the audio input jack
 
 ```
-mirage_cli run --disk "../(xtras)/Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
+mirage_cli run --disk "../disks and manuals/Factory Library/IMG/SND-A01.img" --audio-in "sine.wav@15,gain=0.08,loop=1" --key SampleLower@16 --key Enter@19 --note 52:100@23:0.5 --seconds 24 --wav sampled.wav
 ```
 
 `--audio-in "FILE@T[,gain=G][,loop=0|1]"` plays a WAV file into the emulated input
