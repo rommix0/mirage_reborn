@@ -86,11 +86,11 @@ void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
   // Waits out a pumpWhileIdle() on another thread (a process() meanwhile gets
   // silence). The holder never waits on anything, so this ends.
   while (!claim()) std::this_thread::yield();
+  const Release releaseAtEnd{this};  // the allocations below may throw
   machine_->prepare(maxFrames, hostRate);
   maxFrames_.store(maxFrames, kRelaxed);
   preparedRate_.store(hostRate, kRelaxed);
   inputBuf_.resize(maxFrames);
-  release();
 }
 
 void RealtimeHost::setInputGain(float gain) {
@@ -142,12 +142,12 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
 
 bool RealtimeHost::pumpWhileIdle() {
   if (!claim()) return false;
+  const Release releaseAtEnd{this};
   flushStalled();
   applyUi();
   applyWaves();
   applyState(true);
   publishStatus();
-  release();
   return true;
 }
 
@@ -165,10 +165,7 @@ void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double h
     }
     return;
   }
-  struct Release {
-    RealtimeHost* h;
-    ~Release() { h->release(); }
-  } releaseAtEnd{this};
+  const Release releaseAtEnd{this};
   blockPeak_ = 0.0f;
   flushStalled();
   applyUi();

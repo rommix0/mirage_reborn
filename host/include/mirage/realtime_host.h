@@ -367,6 +367,10 @@ class RealtimeHost {
   // True if no one else holds the machine; then it is ours until release().
   bool claim() { return !claimed_.exchange(true, std::memory_order_acquire); }
   void release() { claimed_.store(false, std::memory_order_release); }
+  struct Release {  // release() however the claim's scope ends
+    RealtimeHost* h;
+    ~Release() { h->release(); }
+  };
   void countRingOverflows();  // adds new Machine::midiOverflows() to midiDropped
   size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
   uint64_t midiBytesTaken_ = 0, midiBytesFlushed_ = 0;  // audio thread; published by publishStatus
