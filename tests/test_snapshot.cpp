@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "alloc_counter.h"
 #include "asset_paths.h"
 #include "booted_machine.h"
 #include "mirage/boot_rom.h"
@@ -601,4 +603,66 @@ TEST_CASE("calibration gate: a note after boot is untouched", "[assets]") {
   const std::vector<float> b = renderNote(*armed);
   CHECK(sameBits(a, b));
   CHECK_FALSE(armed->outputMuted());
+}
+
+// ---- Saving into a reserved buffer (Plan 5 Task 5) ---------------------------
+
+namespace {
+
+// A machine with a dirty disk, queued MIDI and audio in flight: every section
+// of the snapshot has something in it.
+std::unique_ptr<Machine> busyMachine() {
+  auto m = std::make_unique<Machine>(idleRom());
+  m->insertDisk(DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes, 0x3C)));
+  m->powerOn();
+  std::vector<uint8_t> sector(1024, 0x77);
+  m->disk()->writeSector(3, 1, sector);
+  m->prepare(256, kHost);
+  std::vector<float> out(256);
+  for (int i = 0; i < 20; ++i) m->render(out.data(), out.size(), kHost);
+  note(*m, 0x90, 60, 100);
+  return m;
+}
+
+}  // namespace
+
+TEST_CASE("machine: saveStateInto equals saveState and never allocates") {
+  const auto m = busyMachine();
+  const auto want = m->saveState();
+  std::vector<uint8_t> buf(10, 0xEE);  // stale contents are cleared
+  buf.reserve(want.size());
+  bool ok = false;
+  size_t allocations = 0, frees = 0;
+  {
+    mirage_test::AllocationScope scope;
+    ok = m->saveStateInto(buf);
+    allocations = scope.count();
+    frees = scope.frees();
+  }
+  CHECK(allocations == 0);
+  CHECK(frees == 0);
+  CHECK(ok);
+  CHECK(buf == want);
+  CHECK(Machine::kSnapshotVersion == 5);
+}
+
+TEST_CASE("machine: saveStateInto fails on a small buffer") {
+  const auto m = busyMachine();
+  const size_t size = m->saveState().size();
+  for (size_t reserve : {size_t(0), size_t(16), size - 1}) {
+    std::vector<uint8_t> buf;
+    buf.reserve(reserve);
+    const size_t capacity = buf.capacity();
+    REQUIRE(capacity < size);
+    bool ok = true;
+    size_t allocations = 0;
+    {
+      mirage_test::AllocationScope scope;
+      ok = m->saveStateInto(buf);
+      allocations = scope.count() + scope.frees();
+    }
+    CHECK_FALSE(ok);
+    CHECK(allocations == 0);
+    CHECK(buf.capacity() == capacity);
+  }
 }

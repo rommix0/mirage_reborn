@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -48,4 +49,43 @@ TEST_CASE("StateReader cannot be built from a temporary vector") {
   const std::vector<uint8_t> buf = {1, 2};
   StateReader r(buf);
   REQUIRE(r.u16() == 0x0201);
+}
+
+TEST_CASE("state_io: bounded writer fails instead of growing") {
+  std::vector<uint8_t> out = {9, 9, 9};
+  out.reserve(8);
+  const uint8_t* data = out.data();
+  const size_t capacity = out.capacity();
+  {
+    StateWriter w(out);  // clears out first
+    CHECK(out.empty());
+    w.u32(0x04030201);
+    w.u16(0x0605);
+    CHECK(w.ok());
+    CHECK(out == std::vector<uint8_t>{1, 2, 3, 4, 5, 6});
+    const uint8_t two[2] = {7, 8};
+    w.bytes(two);  // exactly fills the capacity
+    CHECK(w.ok());
+    w.u8(0xAA);  // one byte too many: refused, never grown
+    CHECK_FALSE(w.ok());
+    w.bytes(std::span<const uint8_t>());  // still failed afterwards
+    CHECK_FALSE(w.ok());
+  }
+  CHECK(out.capacity() == capacity);
+  CHECK(out.data() == data);
+  CHECK(out.size() <= capacity);
+
+  // Every width refuses past the capacity.
+  std::vector<uint8_t> small;
+  small.reserve(7);
+  StateWriter w2(small);
+  w2.u64(1);
+  CHECK_FALSE(w2.ok());
+  CHECK(small.capacity() == 7);
+
+  // The unbounded form is unchanged: it always succeeds.
+  StateWriter w3;
+  for (int i = 0; i < 1000; ++i) w3.u64(uint64_t(i));
+  CHECK(w3.ok());
+  CHECK(w3.take().size() == 8000);
 }

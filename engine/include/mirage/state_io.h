@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -19,8 +20,16 @@ struct StateError : std::runtime_error {
 };
 
 // Serialises machine state. All multi-byte values are little-endian.
+// The default form grows its own buffer, handed out by take(). The bounded form
+// clears the caller's `out` and writes into it without ever growing it past
+// out.capacity(), so it never allocates: a write that does not fit is dropped
+// and ok() is false from then on (out's contents are then unspecified).
 class StateWriter {
  public:
+  StateWriter() : buf_(&own_.emplace()) {}
+  explicit StateWriter(std::vector<uint8_t>& out) : buf_(&out), bounded_(true) { out.clear(); }
+  StateWriter(const StateWriter&) = delete;
+  StateWriter& operator=(const StateWriter&) = delete;
   void u8(uint8_t v);
   void u16(uint16_t v);
   void u32(uint32_t v);
@@ -29,10 +38,17 @@ class StateWriter {
   void f64(double v);
   void bytes(std::span<const uint8_t> data);  // raw, no length prefix
   void tag(uint32_t fourcc);
-  std::vector<uint8_t> take();
+  bool ok() const { return ok_; }  // always true for the default form
+  std::vector<uint8_t> take();     // default form only
 
  private:
-  std::vector<uint8_t> buf_;
+  bool room(size_t n);  // false (and ok() false for good) if n more bytes do not fit
+  void putLE(uint64_t v, size_t n);
+
+  // Only the default form has one (an MSVC debug vector allocates even when empty).
+  std::optional<std::vector<uint8_t>> own_;
+  std::vector<uint8_t>* buf_;
+  bool bounded_ = false, ok_ = true;
 };
 
 // Reads what StateWriter wrote. Overrun or tag mismatch throws StateError.

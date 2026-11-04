@@ -157,6 +157,8 @@ class Machine : private Bus {
   // rate) and changes no emulated state. powerOn() and loadState() keep the
   // reserved capacity.
   void prepare(size_t maxFrames, double hostRate);
+  // maxFrames of the last prepare() (0 if never prepared). Not saved.
+  size_t preparedFrames() const { return preparedFrames_; }
   void render(float* out, size_t frames, double hostRate);
 
   // The rear-panel audio input jack (filters.md 3.1, 3.3). The same call as
@@ -251,6 +253,10 @@ class Machine : private Bus {
   // values no running machine can have: a cycle credit over 64, or (with MIDI
   // queued) a next-delivery cycle outside (cycles - 64, cycles + 640].
   std::vector<uint8_t> saveState() const;
+  // The same bytes into `out` (cleared first) without allocating: returns false,
+  // leaving out's contents unspecified, if they do not fit in out.capacity().
+  // Safe on the audio thread with a buffer reserved elsewhere.
+  bool saveStateInto(std::vector<uint8_t>& out) const;
   void loadState(std::span<const uint8_t> data);
   // SHA-1 of the boot ROM, computed once by the constructor.
   std::array<uint8_t, 20> romSha1() const { return romSha1_; }
@@ -272,6 +278,7 @@ class Machine : private Bus {
   void pushMix(float mix);
   void updateGate();  // per DOC scan
   void openGate() { gateGain_ = 1.0f; gateHolding_ = false; }
+  void saveTo(StateWriter&) const;  // the whole snapshot
   void saveAudio(StateWriter&) const;
   void loadAudio(StateReader&);  // commits only on success
   void saveJack(StateWriter&) const;
@@ -313,6 +320,7 @@ class Machine : private Bus {
   std::vector<float> pending_;        // resampled samples not yet handed out
   float lastOut_ = 0.0f;              // last sample handed out (held on an underrun)
   bool rendering_ = false;            // inside render(): pushMix feeds pending_
+  size_t preparedFrames_ = 0;         // the last prepare()'s maxFrames (not saved)
 
   // Output gate (not saved; see setOutputMuteRange).
   bool muteArmed_ = false;

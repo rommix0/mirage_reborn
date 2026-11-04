@@ -6,23 +6,27 @@
 
 namespace mirage {
 
-namespace {
-void putLE(std::vector<uint8_t>& buf, uint64_t v, size_t n) {
-  for (size_t i = 0; i < n; ++i) buf.push_back(uint8_t(v >> (8 * i)));
+bool StateWriter::room(size_t n) {
+  if (bounded_ && ok_ && buf_->capacity() - buf_->size() < n) ok_ = false;
+  return ok_;
 }
-}  // namespace
 
-void StateWriter::u8(uint8_t v) { buf_.push_back(v); }
-void StateWriter::u16(uint16_t v) { putLE(buf_, v, 2); }
-void StateWriter::u32(uint32_t v) { putLE(buf_, v, 4); }
-void StateWriter::u64(uint64_t v) { putLE(buf_, v, 8); }
+void StateWriter::putLE(uint64_t v, size_t n) {
+  if (!room(n)) return;
+  for (size_t i = 0; i < n; ++i) buf_->push_back(uint8_t(v >> (8 * i)));
+}
+
+void StateWriter::u8(uint8_t v) { putLE(v, 1); }
+void StateWriter::u16(uint16_t v) { putLE(v, 2); }
+void StateWriter::u32(uint32_t v) { putLE(v, 4); }
+void StateWriter::u64(uint64_t v) { putLE(v, 8); }
 void StateWriter::i32(int32_t v) { u32(std::bit_cast<uint32_t>(v)); }
 void StateWriter::f64(double v) { u64(std::bit_cast<uint64_t>(v)); }
 void StateWriter::bytes(std::span<const uint8_t> data) {
-  buf_.insert(buf_.end(), data.begin(), data.end());
+  if (room(data.size())) buf_->insert(buf_->end(), data.begin(), data.end());
 }
 void StateWriter::tag(uint32_t fourcc) { u32(fourcc); }
-std::vector<uint8_t> StateWriter::take() { return std::move(buf_); }
+std::vector<uint8_t> StateWriter::take() { return std::move(*own_); }
 
 uint64_t StateReader::readLE(size_t n) {
   if (data_.size() - pos_ < n) throw StateError("state read past end");

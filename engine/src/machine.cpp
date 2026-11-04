@@ -212,6 +212,7 @@ void Machine::prepare(size_t maxFrames, double hostRate) {
   const size_t kPendingSurplus =
       1024 * size_t(std::ceil(std::max(hostRate, 1.0) / 48000.0));
   pending_.reserve(2 * maxFrames + 64 + kPendingSurplus);
+  preparedFrames_ = maxFrames;
   if (hostRate >= kMinHostRate && hostRate <= kMaxHostRate) resampler_.setOutputRate(hostRate);
 }
 
@@ -440,6 +441,17 @@ void Machine::updateFirq() { cpu_.setFirq(acia_.irq()); }
 
 std::vector<uint8_t> Machine::saveState() const {
   StateWriter w;
+  saveTo(w);
+  return w.take();
+}
+
+bool Machine::saveStateInto(std::vector<uint8_t>& out) const {
+  StateWriter w(out);
+  saveTo(w);
+  return w.ok();
+}
+
+void Machine::saveTo(StateWriter& w) const {
   w.tag(fourcc("MIRG"));
   w.u32(kSnapshotVersion);
   w.bytes(romSha1_);
@@ -465,7 +477,6 @@ std::vector<uint8_t> Machine::saveState() const {
   w.u32(uint32_t(midiCount_));
   for (size_t i = 0; i < midiCount_; ++i) w.u8(midiRing_[(midiHead_ + i) % kMidiQueueCapacity]);
   panel_.save(w);
-  return w.take();
 }
 
 void Machine::saveAudio(StateWriter& w) const {
