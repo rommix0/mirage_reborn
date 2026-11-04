@@ -142,7 +142,10 @@ reverse, and runs identically.
   - **Real-time playback:** at each block, while the condition holds, the host
     runs the machine in 1 ms (emulated) chunks until the condition ends or it has
     used **half the block's duration** of wall-clock time. That is about 12 times
-    real time on this PC, and it adapts to a slower PC or many instances. If the
+    real time on this PC, and less on a slower one. The budget is each
+    instance's own, so several instances loading at once on one DAW thread can
+    overrun the block. With the drive empty, the OS's "nd" retry turns the motor
+    on about every 1.6 s, so the host briefly fast-forwards then too. If the
     condition ended, the block is then rendered normally, with a 10 ms fade-in. If
     the budget ran out, the block is silent.
   - **Offline rendering** (`isNonRealtime()`): there is no wall-clock budget. The
@@ -163,6 +166,10 @@ reverse, and runs identically.
 - **Where it lives:** `RealtimeHost::setFastDisk(FastDisk::{Off, RealTime,
   Offline})`, which defaults to `Off`. The app never calls it. The clock is
   `std::chrono::steady_clock`, which needs no JUCE.
+  *Implementation note:* the code has `HostOptions{.fastDisk}` (off by default),
+  given to the `RealtimeHost` constructor with `.muteCalibration`, and
+  `RealtimeHost::setOffline(bool)` for the offline cap, which the plugin calls
+  each block with `isNonRealtime()`. The app passes no options.
 
 ## 4. The plugin
 
@@ -283,7 +290,10 @@ GZIP-compressed:
 
 - `machine`: `Machine::saveState()`, the full snapshot (main spec §6.9). That
   covers CPU, RAM, wave RAM, every chip, the audio path, the jack, the MIDI input
-  queue, the panel, and **the inserted disk with its dirty flag and write count**.
+  queue, the panel, and **the inserted disk with its dirty flag**. Not its write
+  count: a restored disk counts from 0, so a save that copied the disk before a
+  restore must not mark the restored one saved (a mark-saved carries the
+  machine's generation, which each restore bumps).
 - `disk`: what `DiskSession` knows that the machine does not. That is the file
   path, the format (raw or Giebler), and whether the disk is untitled.
 - `volume`, `inputGain`: the two parameters.

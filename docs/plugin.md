@@ -106,7 +106,9 @@ while the drive LED is on and while the DAW is not running audio.
 from its file, or "No disk". Right: the Input slider and meter, and a warning
 only when something is wrong: the outcome of the last WAV import (for 15 s),
 `illegal ops: N`, `MIDI dropped: N`, "calibration not muted (unknown ROM)", a
-project that could not be restored (below) and a failed save.
+project that could not be restored (below) and a failed save. `MIDI dropped`
+counts bytes of MIDI lost on the way in or out (as in the app), plus one for
+each MIDI-out message the plugin could not pass on (a SysEx over 65,535 bytes).
 
 ## The machine runs free
 
@@ -202,7 +204,11 @@ skipped.
   wall-clock duration is used. If it ended, the rest of the block plays
   normally with a 10 ms fade-in; if the budget ran out, the block is silent and
   it continues next block. The machine is therefore about 12 times real time on the
-  owner's PC and adapts to a slower PC or many instances.
+  owner's PC, and less on a slower one. The budget is each instance's own:
+  several Mirages loading at once on one DAW audio thread each take up to half
+  the block, so together they can overrun it (crackles) until they finish.
+- **Empty drive:** the OS's "nd" retry turns the drive motor on about every
+  1.6 s, so an idle Mirage with no disk briefly fast-forwards then too.
 - **Offline bounce:** no wall-clock budget. The chunks run until the condition
   ends, up to 60 s of emulated time per block. The cap keeps a disk the OS
   retries for ever (an unformatted disk at "ud") from hanging a bounce.
@@ -242,12 +248,12 @@ device threads.
 | Calibration mute trigger | Output gate while the CPU PC is in `$F571-$F5E6`, checked once per DOC scan. Armed only for the known ROM SHA-1. | The routine is in the boot ROM and every OS calls it. Another ROM is heard as in the standalone. |
 | Gate timing | Closes over 5 ms, holds 20 ms after the PC leaves the range, opens over 10 ms; after the DC blocker, before the output resampler. | The hold bridges interrupts and OS code between the 8 calls. Retune by ear. The gate is fully closed 5 ms after the first entry, but the output only goes silent about 13 ms after it (a delay in the audio path that was measured and not explained). |
 | Fast-forward trigger | Drive motor on, or gate closed, at a block's start. | Hardware signals only. |
-| Fast-forward pacing | 1 ms chunks; real time: until the trigger ends or half a block's duration; offline: until the trigger ends, up to 60 s per block. | About 12 times real time, adapting to slower PCs. Cost: sound an OS plays during a load is skipped. |
+| Fast-forward pacing | 1 ms chunks; real time: until the trigger ends or half a block's duration, per instance; offline: until the trigger ends, up to 60 s per block. | About 12 times real time, less on a slower PC. Cost: sound an OS plays during a load is skipped, and several instances loading at once on one audio thread can overrun the block. |
 | Small blocks while loading | One 1 ms chunk always runs per fast-forwarded block. | With very small blocks (a few dozen frames) a fast-forwarding block can use more than real time. Raise the block size while loading if the DAW crackles. |
 | Zero-frame blocks | A block of zero frames applies queued input but never fast-forwards. | An offline zero-frame block could otherwise run 60 s of emulated time. A load waits for the next real block. |
 | Input during a fast-forward | Applied before the chunks; key releases and swap inserts that fall due are applied between chunks. | Emulated-time timers still hold. |
-| Host MIDI in | Each event is queued at its frame in the block, with no added latency (the app adds one block). A 256 KB backlog on the audio thread feeds the machine's 4096-byte MIDI ring when a block segment ends. Overflow is dropped and counted in `MIDI dropped`. At most 8192 events per block are taken. | Sample-accurate; long SysEx dumps from a DAW track survive. |
-| MIDI out | After each block, the bytes the OS sent are parsed into messages on the audio thread (SysEx up to 64 KB), placed at the frame their cycle maps to, and clamped to the block. A longer SysEx is dropped and counted. | No extra thread. Cost: an OS SysEx over 64 KB is lost. |
+| Host MIDI in | Each event is queued at its frame in the block, with no added latency (the app adds one block). A 256 KB backlog on the audio thread feeds the machine's 4096-byte MIDI ring when a block segment ends. Overflow is dropped and counted in `MIDI dropped`. At most 8192 events per block are taken; the rest are dropped and counted too. | Sample-accurate; long SysEx dumps from a DAW track survive. |
+| MIDI out | After each block, the bytes the OS sent are parsed into messages on the audio thread (SysEx up to 65,535 bytes, the most a JUCE `MidiBuffer` event holds), placed at the frame their cycle maps to, and clamped to the block. A longer SysEx is dropped and counted in `MIDI dropped` (one per SysEx). | No extra thread. Cost: an OS SysEx over 65,535 bytes, such as a long wavesample dump, is lost; the app passes it on. |
 | State taking | The state thread posts a buffer sized from the last snapshot plus 64 KB; the audio thread fills it at a block start. With no block for 200 ms (audio stopped) the snapshot is taken directly; while blocks run it waits up to 2 s. | No allocation or pause on the audio thread. A save can take up to 2 s during constant panel-key tapping. |
 | Project loading | While no block has ever run (a project loading), state calls do not wait the 200 ms. | Many instances load fast. |
 | State restoring | A new machine is built off the audio thread and swapped in at a block start; the old one is freed off the audio thread. The blob stays "pending", and a save returns it, until the swap is confirmed. | Exact recall; a save during the swap returns the right state. |
@@ -270,10 +276,14 @@ device threads.
 - **Sound during a load is skipped** (fast-forward).
 - **Small DAW blocks while loading.** One 1 ms chunk always runs per
   fast-forwarded block, so with very small blocks loading can overrun real time.
+- **Several instances loading at once** on one DAW audio thread can overrun
+  the block: each has its own half-block budget.
 - **Two instances on one image:** the last Save wins.
 - **A host that withholds program changes from VST3 instruments** hides them from
   the Mirage. That is the host's limit.
-- **An OS SysEx over 64 KB** sent by the Mirage is dropped (and counted).
+- **An OS SysEx over 65,535 bytes** sent by the Mirage (a long wavesample
+  dump) is dropped and counted in `MIDI dropped`: a JUCE `MidiBuffer` event
+  holds no more. Use the app to dump such a sound over MIDI.
 - **A very long SysEx dump into the Mirage** (one block segment longer than about
   1.3 s) can let the machine's 4096-byte MIDI buffer run dry between top-ups,
   leaving gaps on the wire. The 256 KB backlog and "MIDI dropped" cover the
