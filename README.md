@@ -15,8 +15,9 @@ The Mirage's own software does everything else, as on a real unit: play it over
 MIDI, edit sounds from the front panel, save them to disk, format blank disks,
 import WAV files into wave RAM, and sample from the computer's audio input.
 
-All four plans are done and the owner has passed acceptances 1-8 by ear
-(2026-10-22). Windows only so far.
+All five plans are done (plan 5: the VST3 plugin). The owner has passed
+acceptances 1-8 by ear (2026-10-22); acceptance 9, the plugin in a DAW, is the
+checklist in [`docs/plugin.md`](docs/plugin.md). Windows only so far.
 
 | Part               | What it is                                                                                       |
 | ------------------ | ------------------------------------------------------------------------------------------------ |
@@ -193,12 +194,15 @@ cmake --build emulator/build --config Release --target MiragePlugin --parallel
 
 The plugin is `emulator/build/plugin/MiragePlugin_artefacts/Release/VST3/Mirage.vst3`.
 Copy it to `C:\Program Files\Common Files\VST3` or add its folder to your DAW's VST3
-paths. It finds the boot ROM as `mirage.bin` next to it, from the app's saved
-path, or asks. Guide: [`docs/plugin.md`](docs/plugin.md).
+paths. It takes the first boot ROM it finds: the one chosen in the plugin
+(*Choose ROM*), `mirage.bin` next to `Mirage.vst3`, the app's saved ROM path,
+then the build's `MIRAGE_ROM`; otherwise it asks. Guide (with the
+`MIRAGE_PLUGIN_ROM` test override): [`docs/plugin.md`](docs/plugin.md).
 
-Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
-engine and `mirage_host` contain no JUCE code, so the licence choice for any
-other front end (for example a VST3) stays open.
+Licence: the app and the plugin use JUCE 8 (AGPLv3, or JUCE's free Starter
+licence); the plugin also builds in the VST3 SDK that JUCE bundles
+(Steinberg's BSD-style licence). The engine and `mirage_host` contain no JUCE
+code.
 
 Panel lettering: the "Mirage" wordmark is traced from a photo of a DSK panel
 (`tools/fonts/trace_wordmark.py`) and the "DIGITAL SAMPLING KEYBOARD" legend

@@ -3,7 +3,9 @@
 Ensoniq Mirage Reborn: a cycle-level emulator of the Ensoniq Mirage DSK-8
 sampler. It runs the original 4 KB boot ROM and whatever OS is on the disk
 image (OS 3.2, MASOS, Soundprocess, resmos32, ...) unmodified. Windows only so
-far. Plans 1-4 are done and the owner has passed acceptances 1-8 by ear.
+far. Plans 1-5 are done (plan 5: the VST3 plugin). The owner has passed
+acceptances 1-8 by ear; acceptance 9 (the plugin in a DAW) is the checklist in
+`docs/plugin.md`.
 
 ## Layout
 
