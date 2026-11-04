@@ -76,6 +76,21 @@ TEST_CASE("render after prepare allocates nothing", "[assets]") {
   CHECK(peak > 0.01f);  // the note really played through the audited path
 }
 
+TEST_CASE("machine: render at 64-frame blocks across power-on allocates nothing after prepare",
+          "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  Machine m(mirage_test::bootRomBytes());
+  m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+  m.prepare(64, 48000);
+  std::vector<float> buf(64);
+  m.powerOn();
+  AllocationScope scope;
+  for (int i = 0; i < 1500; ++i) m.render(buf.data(), 64, 48000);  // 2 s
+  CHECK(scope.count() == 0);
+  CHECK(scope.frees() == 0);
+}
+
 TEST_CASE("render allocates nothing after loadState either", "[assets]") {
   REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));

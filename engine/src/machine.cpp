@@ -204,7 +204,11 @@ float Machine::softClip(float x) {
 }
 
 void Machine::prepare(size_t maxFrames, double hostRate) {
-  pending_.reserve(2 * maxFrames + 64);
+  // + kPendingSurplus: after power-on the DOC scan rate drops from ~333 kHz to
+  // 29.4 kHz, and pending_ then permanently holds ~260 surplus samples (the
+  // latency render() keeps), so small blocks would otherwise reallocate.
+  constexpr size_t kPendingSurplus = 1024;
+  pending_.reserve(2 * maxFrames + 64 + kPendingSurplus);
   if (hostRate >= kMinHostRate && hostRate <= kMaxHostRate) resampler_.setOutputRate(hostRate);
 }
 
