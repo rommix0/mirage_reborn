@@ -22,7 +22,9 @@ class MidiByteParser {
  public:
   // maxSysex > 0: a SysEx longer than maxSysex bytes (F0 and F7 included) is
   // dropped and counted, and feed() never allocates (it reserves max(maxSysex, 3)
-  // bytes: a channel message needs 3). 0: unbounded, as before.
+  // bytes: a channel message needs 3) provided `emit` is a std::function the
+  // caller built once and keeps: a lambda passed straight to feed() builds a
+  // std::function on every call, which may allocate. 0: unbounded, as before.
   explicit MidiByteParser(size_t maxSysex = 0) : maxSysex_(maxSysex) {
     if (maxSysex) msg_.reserve(maxSysex < 3 ? 3 : maxSysex);
   }

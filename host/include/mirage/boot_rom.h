@@ -9,8 +9,9 @@ inline constexpr std::array<uint8_t, 20> kKnownBootRomSha1 = {
     0xec, 0x6e, 0xa5, 0x61, 0x3e, 0xea, 0xfd, 0x21, 0xd8, 0xf3,
     0xa7, 0x43, 0x1a, 0x35, 0xa6, 0xff, 0x16, 0xee, 0xd5, 0x6d};
 
-// The ROM's filter-calibration routine, $F571-$F5E6 (boot-rom.md 9). It leaves
-// only by JMP $FC91. The output gate (Machine::setOutputMuteRange) keys on it.
+// The ROM's filter-calibration routine, $F571-$F5E6 (boot-rom.md 9). It returns
+// to its caller (the OS) by RTS; its only jump out is JMP $FC91, the "O.S."
+// error. The output gate (Machine::setOutputMuteRange) keys on it.
 inline constexpr uint16_t kCalibrationRoutineFirst = 0xF571, kCalibrationRoutineLast = 0xF5E6;
 
 // True when `sha1` (Machine::romSha1()) is the known boot ROM's hash.
