@@ -50,13 +50,14 @@ struct RealtimeHost::Queues {
   SpscQueue<ReturnedWave, kWaveQueueWrites> waveReturns;          // audio -> UI
   // process() scratch: this block's MIDI events and their frame offsets.
   std::array<MidiCommand, kMidiCommandsPerBlock> events{};
-  std::array<size_t, kMidiCommandsPerBlock> offsets{};
+  std::array<BlockMidiEvent, kMidiCommandsPerBlock> placed{};
 };
 
 RealtimeHost::RealtimeHost(std::span<const uint8_t> bootRom, HostOptions options)
     : q_(std::make_unique<Queues>()),
       machine_(std::make_unique<Machine>(bootRom)),
-      fastDisk_(options.fastDisk) {
+      fastDisk_(options.fastDisk),
+      backlog_(kMidiBacklogBytes) {
   romSha1_ = machine_->romSha1();
   if (options.muteCalibration && isKnownBootRom(romSha1_)) {
     machine_->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
@@ -112,6 +113,17 @@ void RealtimeHost::renderSegment(const float* in, float* out, size_t n, double h
 
 void RealtimeHost::process(const float* in, float* out, size_t frames, double hostRate,
                            double nowSeconds) {
+  runBlock(in, out, frames, hostRate, nowSeconds, {}, true);
+}
+
+void RealtimeHost::process(const float* in, float* out, size_t frames, double hostRate,
+                           std::span<const BlockMidiEvent> events) {
+  runBlock(in, out, frames, hostRate, 0.0, events, false);
+}
+
+void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double hostRate,
+                            double nowSeconds, std::span<const BlockMidiEvent> events,
+                            bool timestamped) {
   blockPeak_ = 0.0f;
   flushStalled();
   applyUi();
@@ -119,28 +131,42 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
     fastForwarding_ = false;
-    const size_t stale = discardMidiInput();  // stale by the time audio resumes
-    midiDropped_.fetch_add(stale, kRelaxed);
-    midiBytesTaken_ += stale;
+    if (timestamped) {
+      const size_t stale = discardMidiInput();  // stale by the time audio resumes
+      midiDropped_.fetch_add(stale, kRelaxed);
+      midiBytesTaken_ += stale;
+    } else {
+      size_t lost = 0;
+      for (const auto& e : events) lost += e.bytes.size();
+      midiDropped_.fetch_add(lost, kRelaxed);
+    }
     publishStatus();  // blockPeak_ is 0: no input was read
     return;
   }
 
-  // Place this block's MIDI events: frames - round((now - t) * rate), kept in
-  // [previous offset, frames - 1]. Clamping the distance to [-1, frames + 1]
-  // first keeps llround in range for timestamps from a stalled or mismatched
-  // clock; a NaN timestamp counts as `now`.
+  // Timestamped: place this block's MIDI events at frames - round((now - t) *
+  // rate), kept in [previous offset, frames - 1]. Clamping the distance to
+  // [-1, frames + 1] first keeps llround in range for timestamps from a stalled
+  // or mismatched clock; a NaN timestamp counts as `now`.
   const size_t last = frames ? frames - 1 : 0;
-  size_t count = 0, prev = 0;
-  while (count < kMidiCommandsPerBlock && q_->midi.pop(q_->events[count])) {
-    double delta = (nowSeconds - q_->events[count].time) * hostRate;
-    if (std::isnan(delta)) delta = 0.0;
-    delta = std::clamp(delta, -1.0, double(frames) + 1.0);
-    const long long at = static_cast<long long>(frames) - std::llround(delta);
-    prev = std::min(at < static_cast<long long>(prev) ? prev : size_t(at), last);
-    q_->offsets[count] = prev;
-    midiBytesTaken_ += q_->events[count++].size;
+  if (timestamped) {
+    size_t count = 0, prev = 0;
+    while (count < kMidiCommandsPerBlock && q_->midi.pop(q_->events[count])) {
+      double delta = (nowSeconds - q_->events[count].time) * hostRate;
+      if (std::isnan(delta)) delta = 0.0;
+      delta = std::clamp(delta, -1.0, double(frames) + 1.0);
+      const long long at = static_cast<long long>(frames) - std::llround(delta);
+      prev = std::min(at < static_cast<long long>(prev) ? prev : size_t(at), last);
+      const auto& e = q_->events[count];
+      q_->placed[count] = {uint32_t(prev), std::span<const uint8_t>(e.bytes.data(), e.size)};
+      midiBytesTaken_ += q_->events[count++].size;
+    }
+    events = std::span<const BlockMidiEvent>(q_->placed.data(), count);
   }
+  auto send = [&](std::span<const uint8_t> bytes) {
+    if (timestamped) machine_->queueMidi(bytes);
+    else sendBlockMidi(bytes);
+  };
 
   // Fast-forward: queue the block's MIDI at once, run chunks, and if the
   // trigger ended render the block normally (its MIDI is already placed).
@@ -148,35 +174,37 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
   bool silent = false;
   if (fastDisk_ && fastTrigger()) {
     fastForwarding_ = true;
-    for (size_t i = 0; i < count; ++i)
-      machine_->queueMidi(std::span<const uint8_t>(q_->events[i].bytes.data(), q_->events[i].size));
-    count = 0;
+    for (const auto& e : events) send(e.bytes);
+    events = {};
     silent = !fastForward(frames, hostRate);
     fading_ = true;
     fadePos_ = 0;
   }
   ++blocks_;
 
-  // Render up to each event, queue it, carry on; due releases and swap
-  // inserts are applied at the end of every segment.
+  // Render up to each event, queue it, carry on; due releases, swap inserts and
+  // the backlog are served at the end of every segment.
   size_t pos = 0;
   if (silent) {
     std::fill_n(out, frames, 0.0f);
     pos = frames;
   }
-  for (size_t i = 0; i < count; ++i) {
-    if (q_->offsets[i] > pos) {
-      renderSegment(in ? in + pos : nullptr, out + pos, q_->offsets[i] - pos, hostRate);
-      pos = q_->offsets[i];
+  size_t prev = 0;
+  for (const auto& e : events) {
+    prev = std::min(std::max(size_t(e.frame), prev), last);
+    if (prev > pos) {
+      renderSegment(in ? in + pos : nullptr, out + pos, prev - pos, hostRate);
+      pos = prev;
       applyDue();
+      topUpBacklog();
     }
-    const auto& e = q_->events[i];
-    machine_->queueMidi(std::span<const uint8_t>(e.bytes.data(), e.size));
+    send(e.bytes);
   }
   if (pos < frames) {
     renderSegment(in ? in + pos : nullptr, out + pos, frames - pos, hostRate);
     applyDue();
   }
+  topUpBacklog();
   if (fading_ && !silent) {
     const double len = std::max(1.0, kFadeInSeconds * hostRate);
     for (size_t i = 0; i < frames && fading_; ++i, ++fadePos_) {
@@ -185,6 +213,36 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
     }
   }
   publishStatus();
+}
+
+void RealtimeHost::sendBlockMidi(std::span<const uint8_t> bytes) {
+  if (bytes.empty()) return;
+  if (backlogCount_ == 0 &&
+      Machine::kMidiQueueCapacity - machine_->midiQueueDepth() >= bytes.size()) {
+    machine_->queueMidi(bytes);
+    return;
+  }
+  if (kMidiBacklogBytes - backlogCount_ < bytes.size()) {
+    midiDropped_.fetch_add(bytes.size(), kRelaxed);
+    return;
+  }
+  size_t tail = (backlogHead_ + backlogCount_) % kMidiBacklogBytes;
+  for (uint8_t b : bytes) {
+    backlog_[tail] = b;
+    tail = (tail + 1) % kMidiBacklogBytes;
+  }
+  backlogCount_ += bytes.size();
+}
+
+void RealtimeHost::topUpBacklog() {
+  while (backlogCount_ != 0) {
+    const size_t room = Machine::kMidiQueueCapacity - machine_->midiQueueDepth();
+    const size_t n = std::min({room, backlogCount_, kMidiBacklogBytes - backlogHead_});
+    if (n == 0) return;
+    machine_->queueMidi(std::span<const uint8_t>(backlog_.data() + backlogHead_, n));
+    backlogHead_ = (backlogHead_ + n) % kMidiBacklogBytes;
+    backlogCount_ -= n;
+  }
 }
 
 bool RealtimeHost::fastTrigger() const { return machine_->driveActive() || machine_->outputMuted(); }
@@ -202,6 +260,7 @@ bool RealtimeHost::fastForward(size_t frames, double hostRate) {
     machine_->runCycles(kFastChunkCycles);
     ran += kFastChunkCycles;
     applyDue();
+    topUpBacklog();
   }
   return true;
 }
@@ -249,12 +308,14 @@ void RealtimeHost::applyUi() {
         countRingOverflows();
         machine_->powerOn();  // cycles() restarts at 0: rebase the pending timers
         ringOverflowsSeen_ = 0;
+        backlogHead_ = backlogCount_ = 0;
         pressCycle_.fill(0);
         ejectCycle_ = 0;
         break;
       case Type::Panic:
         midiBytesFlushed_ += discardMidiInput();  // or it would follow the All Notes Off in this block
         machine_->flushMidi();
+        backlogHead_ = backlogCount_ = 0;
         machine_->queueMidi(kPanicBytes);
         break;
       case Type::Copy:
@@ -352,6 +413,7 @@ void RealtimeHost::publishStatus() {
   // (MidiInFeeder relies on that: an older depth with a newer taken count would
   // hide bytes that moved from the host queue into the Machine's ring).
   midiDepthPub_.store(machine_->midiQueueDepth(), kRelaxed);
+  midiBacklogPub_.store(backlogCount_, kRelaxed);
   midiFlushedPub_.store(midiBytesFlushed_, std::memory_order_release);
   midiTakenPub_.store(midiBytesTaken_, std::memory_order_release);
   inputPeakPub_.store(blockPeak_, kRelaxed);
@@ -471,6 +533,7 @@ HostStatus RealtimeHost::status() const {
   s.midiBytesTaken = midiTakenPub_.load(std::memory_order_acquire);
   s.midiBytesFlushed = midiFlushedPub_.load(std::memory_order_acquire);
   s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
+  s.midiBacklog = midiBacklogPub_.load(kRelaxed);
   s.inputPeak = inputPeakPub_.load(kRelaxed);
   s.outputMuted = outputMutedPub_.load(kRelaxed);
   s.fastForwarding = fastForwardingPub_.load(kRelaxed);

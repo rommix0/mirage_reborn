@@ -3,9 +3,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <vector>
 
+#include "alloc_counter.h"
 #include "mirage/midi_byte_parser.h"
 
 using mirage::MidiByteParser;
@@ -91,4 +93,38 @@ TEST_CASE("system common messages have their own lengths", "[midi_parser]") {
 TEST_CASE("a new status interrupting a partial channel message drops it", "[midi_parser]") {
   REQUIRE(parse({0x90, 0x3C, 0x80, 0x3C, 0x00}) == std::vector<Msg>{{0x80, 0x3C, 0x00}});
   REQUIRE(parse({0xE0, 0x00, 0x40}) == std::vector<Msg>{{0xE0, 0x00, 0x40}});  // pitch bend
+}
+
+TEST_CASE("midi parser: a bounded parser never allocates", "[midi_parser]") {
+  MidiByteParser p(64 * 1024);
+  size_t emitted = 0, sysexSize = 0;
+  const std::function<void(std::span<const uint8_t>)> emit = [&](std::span<const uint8_t> m) {
+    ++emitted;
+    if (m[0] == 0xF0) sysexSize = m.size();
+  };
+  mirage_test::AllocationScope scope;
+  p.feed(0xF0, emit);
+  for (int i = 0; i < 60 * 1024 - 2; ++i) p.feed(0x01, emit);
+  p.feed(0xF7, emit);
+  const uint8_t notes[] = {0x90, 0x3C, 0x64, 0x3E, 0x50};
+  for (uint8_t b : notes) p.feed(b, emit);
+  CHECK(scope.count() == 0);
+  CHECK(emitted == 3);
+  CHECK(sysexSize == 60 * 1024);
+  CHECK(p.dropped() == 0);
+}
+
+TEST_CASE("midi parser: a SysEx past the bound is dropped", "[midi_parser]") {
+  MidiByteParser p(8);
+  const std::vector<uint8_t> in = {0xF0, 1, 2, 3, 4, 5, 6, 0xF7,     // 8 bytes: fits
+                                   0xF0, 1, 2, 3, 4, 5, 6, 7, 0xF7,  // 9: dropped
+                                   0x90, 0x3C, 0x64};
+  std::vector<Msg> out;
+  for (uint8_t b : in)
+    p.feed(b, [&](std::span<const uint8_t> m) { out.emplace_back(m.begin(), m.end()); });
+  REQUIRE(out.size() == 2);
+  CHECK(out[0].size() == 8);
+  CHECK(out[1] == Msg{0x90, 0x3C, 0x64});
+  CHECK(p.dropped() == 1);
+  CHECK(MidiByteParser().dropped() == 0);  // the default stays unbounded
 }

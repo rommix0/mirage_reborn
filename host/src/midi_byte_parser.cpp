@@ -16,15 +16,19 @@ void MidiByteParser::feed(uint8_t b, const std::function<void(std::span<const ui
     return;
   }
   if (b == 0xF7 && inSysex_) {  // end of SysEx: emit it whole
-    msg_.push_back(b);
-    emit(std::span<const uint8_t>(msg_));
-    inSysex_ = false;
+    if (sysexTooLong_) {
+      ++dropped_;
+    } else {
+      msg_.push_back(b);
+      emit(std::span<const uint8_t>(msg_));
+    }
+    inSysex_ = sysexTooLong_ = false;
     msg_.clear();
     return;
   }
   if (b >= 0x80) {
     // Any other status byte abandons what was in progress (an unfinished SysEx is dropped).
-    inSysex_ = false;
+    inSysex_ = sysexTooLong_ = false;
     msg_.clear();
     need_ = 0;
     if (b < 0xF0) {
@@ -57,6 +61,12 @@ void MidiByteParser::feed(uint8_t b, const std::function<void(std::span<const ui
   }
   // Data byte.
   if (inSysex_) {
+    if (sysexTooLong_) return;
+    if (maxSysex_ && msg_.size() + 1 >= maxSysex_) {  // no room left for this byte and the F7
+      sysexTooLong_ = true;
+      msg_.clear();
+      return;
+    }
     msg_.push_back(b);
     return;
   }

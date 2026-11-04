@@ -37,6 +37,9 @@ struct HostStatus {
   // depth, so (posted - taken - flushed + depth) can only overstate.
   uint64_t midiBytesTaken = 0, midiBytesFlushed = 0;
   size_t midiQueueDepth = 0;
+  // Bytes waiting in the host's backlog for room in the Machine's input ring
+  // (block MIDI only; see kMidiBacklogBytes).
+  size_t midiBacklog = 0;
   // Audio input level: the largest |sample| of the last block after the input
   // gain (a plain multiply, so it can exceed 1.0). NaN and infinite samples
   // count as 0 (as at the jack), so the peak is always finite. 0 when the last
@@ -86,6 +89,11 @@ struct ReturnedWave {
   std::unique_ptr<WaveWrite> write;
   WaveReturn why;
 };
+// One MIDI message at a frame of the block, as a DAW delivers it.
+struct BlockMidiEvent {
+  uint32_t frame;
+  std::span<const uint8_t> bytes;
+};
 struct MidiOutByte {
   uint8_t byte;
   uint64_t cycle;  // Machine::cycles() when the byte starts on the wire
@@ -123,6 +131,9 @@ class RealtimeHost {
   static constexpr size_t kMidiCommandBytes = 12;
   static constexpr size_t kMidiCommandsPerBlock = 256;
   static constexpr size_t kMidiOutQueueBytes = 8192;
+  // Block MIDI that does not fit the Machine's 4096-byte input ring waits here
+  // (a ring allocated in the constructor) and is moved in as room appears.
+  static constexpr size_t kMidiBacklogBytes = 256 * 1024;
   static constexpr size_t kUiQueueCommands = 256;
   static constexpr size_t kReturnQueueDisks = 64;
   // Wave writes in flight each way (UI -> audio, and back).
@@ -199,6 +210,19 @@ class RealtimeHost {
   // rate change between blocks re-plugs the jack (Machine::render). An unusable
   // hostRate reads no input and leaves the jack as it was.
   void process(const float* in, float* out, size_t frames, double hostRate, double nowSeconds);
+  // The same with MIDI events at frame offsets in the block (a plugin host's),
+  // in frame order. Each frame is clamped to [the previous frame, frames - 1]
+  // (all events land at the current cycle in a zero-frame block); the block is
+  // rendered in segments split at the frames, and each event's bytes are fed at
+  // its frame. The timestamped MIDI queue (postMidi) is not touched. A message
+  // goes straight into the Machine's ring only if the backlog is empty and the
+  // ring has room for all of it; otherwise it is appended to the backlog
+  // (dropped whole, and counted in midiDropped, if that is full too). The
+  // backlog is moved into the ring as room allows at every segment end and
+  // between fast-forward chunks; postPanic and postReset clear it. An unusable
+  // hostRate drops the events (counted in midiDropped). Otherwise as above.
+  void process(const float* in, float* out, size_t frames, double hostRate,
+               std::span<const BlockMidiEvent> events);
   // Any thread. Linear gain applied to the input before the jack, clamped to
   // 0..4 (default 1); NaN is ignored. Takes effect from the next segment
   // the audio thread renders.
@@ -280,6 +304,14 @@ class RealtimeHost {
   // Renders in[0..n) -> out[0..n) (in null: nothing plugged in) through the gain
   // buffer in chunks, and raises blockPeak_.
   void renderSegment(const float* in, float* out, size_t n, double hostRate);
+  // Shared by both process() overloads: `timestamped` takes the events from the
+  // MIDI queue (placed by nowSeconds), otherwise from `events`.
+  void runBlock(const float* in, float* out, size_t frames, double hostRate, double nowSeconds,
+                std::span<const BlockMidiEvent> events, bool timestamped);
+  // Block MIDI: into the ring if the backlog is empty and the whole message
+  // fits, else into the backlog (or dropped).
+  void sendBlockMidi(std::span<const uint8_t> bytes);
+  void topUpBacklog();  // backlog -> the Machine's ring, as far as there is room
   bool fastTrigger() const;
   // Runs chunks while the trigger holds and the budget lasts; true if the
   // trigger ended.
@@ -309,6 +341,8 @@ class RealtimeHost {
   size_t fadePos_ = 0;              // frames faded so far
   bool fastForwarding_ = false;     // the current block was fast-forwarded
   uint64_t blocks_ = 0;
+  std::vector<uint8_t> backlog_;  // ring of kMidiBacklogBytes
+  size_t backlogHead_ = 0, backlogCount_ = 0;
 
   // Published status (relaxed: each is a separate value; see HostStatus).
   std::atomic<uint16_t> display_{0};  // left | right << 8
@@ -316,7 +350,7 @@ class RealtimeHost {
   std::atomic<uint64_t> diskWrites_{0}, illegalOps_{0}, cycles_{0};
   std::atomic<uint64_t> midiDropped_{0};  // added to by the MIDI-input and audio threads
   std::atomic<uint64_t> midiTakenPub_{0}, midiFlushedPub_{0};
-  std::atomic<size_t> midiDepthPub_{0};
+  std::atomic<size_t> midiDepthPub_{0}, midiBacklogPub_{0};
   std::atomic<float> inputGain_{1.0f}, inputPeakPub_{0.0f};
   std::atomic<bool> outputMutedPub_{false}, fastForwardingPub_{false};
   std::atomic<uint64_t> blocksPub_{0};

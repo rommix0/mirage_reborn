@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -7,7 +8,7 @@
 namespace mirage {
 
 // Rebuilds whole MIDI messages from a raw byte stream (the engine's MIDI-out bytes).
-// For the MIDI-out thread, not the audio thread: it may allocate.
+// For the MIDI-out thread; allocates unless constructed with a SysEx bound.
 //  - Channel messages (80-EF) honour running status; a complete message is emitted at once.
 //  - System common: F1/F3 two bytes, F2 three, F6 one; F4/F5 (undefined) are dropped.
 //    Any system common status cancels running status.
@@ -19,12 +20,19 @@ namespace mirage {
 //  - Data bytes with no status to attach to, and a stray F7, are dropped.
 class MidiByteParser {
  public:
+  // maxSysex > 0: reserves that many bytes, drops (and counts) any SysEx longer
+  // than that, and feed() never allocates. 0: unbounded, as before.
+  explicit MidiByteParser(size_t maxSysex = 0) : maxSysex_(maxSysex) { msg_.reserve(maxSysex); }
+  uint64_t dropped() const { return dropped_; }  // SysEx dropped for length
   void feed(uint8_t b, const std::function<void(std::span<const uint8_t>)>& emit);
 
  private:
   uint8_t running_ = 0;       // running status (80-EF), 0 = none
   uint8_t need_ = 0;          // total length of the message in msg_
   bool inSysex_ = false;
+  bool sysexTooLong_ = false;  // this SysEx passed maxSysex_: its bytes are ignored
+  size_t maxSysex_;
+  uint64_t dropped_ = 0;
   std::vector<uint8_t> msg_;  // message under construction; empty = none in progress
 };
 

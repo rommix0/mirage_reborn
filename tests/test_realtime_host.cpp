@@ -1519,3 +1519,205 @@ TEST_CASE("fast-forward: a factory boot is playable fast (Release)", "[assets]")
   CHECK(sawActive);
 }
 #endif  // NDEBUG
+
+// ---- block MIDI: events with frame offsets, and the backlog ----------------
+
+namespace {
+
+// A host process() call with block MIDI, no audio input.
+void blockWith(RealtimeHost& host, size_t frames, std::span<const BlockMidiEvent> events,
+               double rate = 48000.0) {
+  std::vector<float> buf(frames + 1);
+  host.process(nullptr, buf.data(), frames, rate, events);
+}
+
+std::vector<uint8_t> sysexOf(size_t n) {
+  std::vector<uint8_t> v(n, 0x01);
+  v.front() = 0xF0;
+  v[1] = 0x7D;  // non-commercial ID
+  v.back() = 0xF7;
+  return v;
+}
+
+}  // namespace
+
+TEST_CASE("block MIDI: each event enters at its frame") {
+  const auto rom = romFrom({kAciaReceiver});
+  RealtimeHost host(rom);
+  Machine ref(rom);
+  ref.powerOn();
+  host.prepare(512, 48000);
+  ref.prepare(512, 48000);
+  std::vector<float> got(512), want(512);
+  for (int i = 0; i < 4; ++i) {  // the receiver sets up the ACIA
+    host.process(nullptr, got.data(), 512, 48000.0, std::span<const BlockMidiEvent>());
+    ref.render(want.data(), 512, 48000.0);
+  }
+  const uint8_t on[] = {0x90, 60, 100}, cc[] = {0xB0, 1, 64}, off[] = {0x80, 60, 0};
+  const BlockMidiEvent events[] = {{0, on}, {100, cc}, {511, off}};
+  host.process(nullptr, got.data(), 512, 48000.0, events);
+  ref.queueMidi(on);
+  ref.render(want.data(), 100, 48000.0);
+  ref.queueMidi(cc);
+  ref.render(want.data() + 100, 411, 48000.0);
+  ref.queueMidi(off);
+  ref.render(want.data() + 511, 1, 48000.0);
+  CHECK(got == want);
+  CHECK(host.machineForTest().cycles() == ref.cycles());
+  CHECK(host.machineForTest().midiQueueDepth() == ref.midiQueueDepth());
+  CHECK(host.machineForTest().saveState() == ref.saveState());
+  // Frames out of order or past the end are clamped, not trusted.
+  const BlockMidiEvent odd[] = {{300, on}, {200, cc}, {9999, off}};
+  host.process(nullptr, got.data(), 512, 48000.0, odd);
+  ref.render(want.data(), 300, 48000.0);
+  ref.queueMidi(on);
+  ref.queueMidi(cc);
+  ref.render(want.data() + 300, 211, 48000.0);
+  ref.queueMidi(off);
+  ref.render(want.data() + 511, 1, 48000.0);
+  CHECK(host.machineForTest().saveState() == ref.saveState());
+  CHECK(host.status().midiBytesTaken == 0);  // the timestamped queue is untouched
+}
+
+TEST_CASE("block MIDI: frames above the prepared size") {
+  RealtimeHost host(romFrom({kAciaReceiver}));
+  host.prepare(256, 48000);
+  const uint8_t a[] = {0x90, 1, 2}, b[] = {0x91, 3, 4}, c[] = {0x92, 5, 6};
+  const BlockMidiEvent events[] = {{10, a}, {600, b}, {999, c}};
+  std::vector<float> buf(1000);
+  {
+    AllocationScope scope;
+    host.process(nullptr, buf.data(), 1000, 48000.0, events);
+    CHECK(scope.count() == 0);
+    CHECK(scope.frees() == 0);
+  }
+  for (int i = 0; i < 40; ++i) block(host, 64);
+  const uint8_t want[] = {0x90, 1, 2, 0x91, 3, 4, 0x92, 5, 6};
+  for (size_t i = 0; i < 9; ++i) CHECK(host.machineForTest().peek(uint16_t(0x8000 + i)) == want[i]);
+  CHECK(host.status().midiDropped == 0);
+}
+
+TEST_CASE("block MIDI: zero-frame block") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  block(host, 64);
+  const uint64_t cycles = host.machineForTest().cycles();
+  const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
+  const BlockMidiEvent events[] = {{0, on}, {5, off}};
+  REQUIRE(host.postKey(PanelKey::Cancel, true));  // the queues are still applied
+  float unused = 0.0f;
+  host.process(nullptr, &unused, 0, 48000.0, events);
+  CHECK(host.machineForTest().keyDown(PanelKey::Cancel));
+  CHECK(host.machineForTest().cycles() == cycles);
+  CHECK(host.machineForTest().midiQueueDepth() == 6);
+}
+
+TEST_CASE("block MIDI: a 100 KB SysEx goes through the backlog") {
+  RealtimeHost host(kIdleRom);
+  constexpr size_t kBlock = 4096;
+  host.prepare(kBlock, 48000);
+  const auto sysex = sysexOf(100 * 1000);
+  const uint8_t on[] = {0x90, 60, 100};
+  const BlockMidiEvent events[] = {{0, sysex}, {1, on}};
+  blockWith(host, 1, events);
+  const size_t ring = Machine::kMidiQueueCapacity;
+  CHECK(host.status().midiBacklog == sysex.size() + 3 - ring);
+  size_t blocks = 1;
+  while (host.status().midiBacklog != 0 && blocks < 1000) {
+    CHECK(host.status().midiDropped == 0);
+    block(host, kBlock);
+    ++blocks;
+  }
+  CHECK(host.status().midiBacklog == 0);
+  // 100003 bytes at 320 us: about 32 s of emulated time, i.e. 375 blocks of 4096.
+  const double seconds = double(blocks * kBlock) / 48000.0;
+  CHECK(seconds > 30.0);
+  CHECK(seconds < 34.0);
+  CHECK(host.status().midiDropped == 0);
+  // The note-on went behind the SysEx's last byte: it is still in the ring.
+  CHECK(host.machineForTest().midiQueueDepth() >= 3);
+}
+
+TEST_CASE("block MIDI: a note-on after a long SysEx is delivered after its last byte") {
+  RealtimeHost host(romFrom({kAciaReceiver}));
+  host.prepare(512, 48000);
+  block(host, 512);
+  const auto sysex = sysexOf(4200);  // more than the ring holds; the receiver stores from $8000
+  const uint8_t on[] = {0x90, 60, 100};
+  const BlockMidiEvent events[] = {{0, sysex}, {10, on}};
+  blockWith(host, 512, events);
+  CHECK(host.status().midiBacklog > 0);
+  for (int i = 0; i < 1200; ++i) block(host, 512);  // 12.8 s, far more than 4203 x 320 us
+  CHECK(host.status().midiBacklog == 0);
+  CHECK(host.machineForTest().peek(0x8000) == 0xF0);
+  CHECK(host.machineForTest().peek(uint16_t(0x8000 + 4199)) == 0xF7);
+  CHECK(host.machineForTest().peek(uint16_t(0x8000 + 4200)) == 0x90);
+  CHECK(host.machineForTest().peek(uint16_t(0x8000 + 4202)) == 100);
+}
+
+TEST_CASE("block MIDI: a 300 KB SysEx is dropped whole") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  const auto big = sysexOf(100 * 1000);
+  const BlockMidiEvent first[] = {{0, big}};
+  float unused = 0.0f;
+  host.process(nullptr, &unused, 0, 48000.0, first);  // no time passes: nothing drains
+  const size_t waiting = host.status().midiBacklog;
+  REQUIRE(waiting > 90 * 1000);
+  const auto huge = sysexOf(300 * 1000);
+  const BlockMidiEvent second[] = {{0, huge}};
+  host.process(nullptr, &unused, 0, 48000.0, second);
+  CHECK(host.status().midiDropped == 300 * 1000);
+  CHECK(host.status().midiBacklog == waiting);
+}
+
+TEST_CASE("block MIDI: panic and reset clear the backlog") {
+  RealtimeHost host(romFrom({kAciaReceiver}));
+  host.prepare(64, 48000);
+  block(host, 64);
+  const auto sysex = sysexOf(50 * 1000);
+  const BlockMidiEvent events[] = {{0, sysex}};
+  blockWith(host, 64, events);
+  REQUIRE(host.status().midiBacklog > 40 * 1000);
+  REQUIRE(host.postPanic());
+  block(host, 64);
+  CHECK(host.status().midiBacklog == 0);
+  CHECK(host.status().midiDropped == 0);  // a flush, not a loss
+  CHECK(host.machineForTest().midiQueueDepth() <= 48);
+
+  blockWith(host, 64, events);
+  REQUIRE(host.status().midiBacklog > 40 * 1000);
+  REQUIRE(host.postReset());
+  block(host, 64);
+  CHECK(host.status().midiBacklog == 0);
+  CHECK(host.machineForTest().midiQueueDepth() == 0);
+}
+
+TEST_CASE("block MIDI: an invalid rate drops the events and counts them") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  const uint8_t on[] = {0x90, 60, 100};
+  const BlockMidiEvent events[] = {{0, on}, {1, on}};
+  blockWith(host, 64, events, 0.0);
+  CHECK(host.status().midiDropped == 6);
+  CHECK(host.machineForTest().midiQueueDepth() == 0);
+}
+
+TEST_CASE("block MIDI: process allocates nothing with events and a backlog") {
+  RealtimeHost host(kIdleRom);
+  constexpr size_t kBlock = 512;
+  host.prepare(kBlock, 48000);
+  const auto sysex = sysexOf(20 * 1000);
+  const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
+  const BlockMidiEvent events[] = {{0, sysex}, {100, on}, {400, off}};
+  std::vector<float> buf(kBlock);
+  AllocationScope scope;
+  for (int i = 0; i < 150; ++i) {
+    if (i == 0) host.process(nullptr, buf.data(), kBlock, 48000.0, events);
+    else host.process(nullptr, buf.data(), kBlock, 48000.0, std::span<const BlockMidiEvent>());
+    if (i == 100) host.postPanic();
+  }
+  CHECK(scope.count() == 0);
+  CHECK(scope.frees() == 0);
+  CHECK(host.status().midiBacklog == 0);
+}
