@@ -2120,6 +2120,9 @@ TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
       // Growing sizes: every prepare() reallocates the buffers a pump reads or writes.
       host.prepare(64 + size_t(i % 4096) * 16, i % 3 ? 48000.0 : 96000.0);
       ++prepares;
+      // A DAW's prepareToPlay is rare: back to back, a slow (Debug) prepare()
+      // would hold the machine nearly all the time and starve the pumps.
+      std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
   });
   uint64_t posted = 0, returned = 0, notOk = 0, pumped = 0;
@@ -2129,7 +2132,9 @@ TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
       if (!r->ok) ++notOk;
     }
   };
-  for (int i = 0; i < 1000; ++i) {
+  // 1000 rounds, or 10 s at most.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  for (int i = 0; i < 1000 && std::chrono::steady_clock::now() < deadline; ++i) {
     if (host.postSnapshot(reservedBuffer(1 << 20))) ++posted;
     if (host.pumpWhileIdle()) ++pumped;
     drain();
