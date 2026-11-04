@@ -172,7 +172,7 @@ void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double h
   // trigger ended render the block normally (its MIDI is already placed).
   fastForwarding_ = false;
   bool silent = false;
-  if (fastDisk_ && fastTrigger()) {
+  if (fastDisk_ && frames > 0 && fastTrigger()) {  // a zero-frame block never fast-forwards
     fastForwarding_ = true;
     for (const auto& e : events) send(e.bytes);
     events = {};

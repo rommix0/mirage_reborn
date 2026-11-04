@@ -20,10 +20,13 @@ namespace mirage {
 //  - Data bytes with no status to attach to, and a stray F7, are dropped.
 class MidiByteParser {
  public:
-  // maxSysex > 0: reserves that many bytes, drops (and counts) any SysEx longer
-  // than that, and feed() never allocates. 0: unbounded, as before.
-  explicit MidiByteParser(size_t maxSysex = 0) : maxSysex_(maxSysex) { msg_.reserve(maxSysex); }
-  uint64_t dropped() const { return dropped_; }  // SysEx dropped for length
+  // maxSysex > 0: a SysEx longer than maxSysex bytes (F0 and F7 included) is
+  // dropped and counted, and feed() never allocates (it reserves max(maxSysex, 3)
+  // bytes: a channel message needs 3). 0: unbounded, as before.
+  explicit MidiByteParser(size_t maxSysex = 0) : maxSysex_(maxSysex) {
+    if (maxSysex) msg_.reserve(maxSysex < 3 ? 3 : maxSysex);
+  }
+  uint64_t dropped() const { return dropped_; }  // SysEx dropped for length (also when cut off by a status byte)
   void feed(uint8_t b, const std::function<void(std::span<const uint8_t>)>& emit);
 
  private:

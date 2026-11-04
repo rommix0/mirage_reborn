@@ -21,7 +21,8 @@ namespace mirage {
 // blocks; every field on its own is whole. The one pairing that is kept:
 // diskWrites is never older than the block whose diskDirty was read. midiDropped counts every MIDI byte
 // lost on the way: rejected by postMidi, overflowing the Machine's input ring,
-// or overflowing the MIDI-out queue (it survives a reset).
+// overflowing the MIDI-out queue, overflowing the block-MIDI backlog, or block
+// events given at an unusable rate (it survives a reset).
 struct HostStatus {
   DisplayState display;
   bool driveActive = false, diskPresent = false, diskDirty = false;

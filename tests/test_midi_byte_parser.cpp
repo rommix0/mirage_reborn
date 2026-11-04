@@ -128,3 +128,32 @@ TEST_CASE("midi parser: a SysEx past the bound is dropped", "[midi_parser]") {
   CHECK(p.dropped() == 1);
   CHECK(MidiByteParser().dropped() == 0);  // the default stays unbounded
 }
+
+TEST_CASE("midi parser: tiny bounds never allocate and count what is cut off", "[midi_parser]") {
+  const std::function<void(std::span<const uint8_t>)> emit = [](std::span<const uint8_t>) {};
+  {  // maxSysex 2: F0 F7 fits, a channel message (3 bytes) still needs no allocation
+    MidiByteParser p(2);
+    mirage_test::AllocationScope scope;
+    for (uint8_t b : {uint8_t(0x90), uint8_t(0x3C), uint8_t(0x64), uint8_t(0xF0), uint8_t(0xF7)})
+      p.feed(b, emit);
+    CHECK(scope.count() == 0);
+    CHECK(p.dropped() == 0);
+  }
+  {  // maxSysex 1: even F0 F7 is too long
+    MidiByteParser p(1);
+    p.feed(0xF0, emit);
+    p.feed(0xF7, emit);
+    CHECK(p.dropped() == 1);
+  }
+  {  // an oversize SysEx ended by a status byte or a fresh F0 is counted too
+    MidiByteParser p(4);
+    for (uint8_t b : {uint8_t(0xF0), uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(4)}) p.feed(b, emit);
+    p.feed(0x90, emit);
+    CHECK(p.dropped() == 1);
+    for (uint8_t b : {uint8_t(0xF0), uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(4)}) p.feed(b, emit);
+    p.feed(0xF0, emit);
+    CHECK(p.dropped() == 2);
+    p.feed(0xF7, emit);  // that F0 F7 pair fits
+    CHECK(p.dropped() == 2);
+  }
+}

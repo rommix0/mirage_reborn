@@ -1644,7 +1644,9 @@ TEST_CASE("block MIDI: a note-on after a long SysEx is delivered after its last 
   block(host, 512);
   const auto sysex = sysexOf(4200);  // more than the ring holds; the receiver stores from $8000
   const uint8_t on[] = {0x90, 60, 100};
-  const BlockMidiEvent events[] = {{0, sysex}, {10, on}};
+  // The note-on is at frame 0 too, while the ring is still empty: only the
+  // backlog-empty guard keeps it behind the SysEx.
+  const BlockMidiEvent events[] = {{0, sysex}, {0, on}};
   blockWith(host, 512, events);
   CHECK(host.status().midiBacklog > 0);
   for (int i = 0; i < 1200; ++i) block(host, 512);  // 12.8 s, far more than 4203 x 320 us
@@ -1720,4 +1722,54 @@ TEST_CASE("block MIDI: process allocates nothing with events and a backlog") {
   CHECK(scope.count() == 0);
   CHECK(scope.frees() == 0);
   CHECK(host.status().midiBacklog == 0);
+}
+
+TEST_CASE("block MIDI: each event enters at its frame, on a booted SND-A01", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  RealtimeHost host(mirage_test::bootRomBytes());
+  FfDriver d(host);
+  REQUIRE(host.postInsert(sndA01()));
+  Machine ref(mirage_test::bootRomBytes());
+  ref.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+  ref.powerOn();
+  ref.prepare(kFfBlock, kFfRate);
+  REQUIRE(d.bootToSettled());
+  std::vector<float> want(kFfBlock);
+  for (uint64_t i = 0, n = host.status().blocks; i < n; ++i) ref.render(want.data(), kFfBlock, kFfRate);
+  REQUIRE(host.machineForTest().cycles() == ref.cycles());
+
+  const uint8_t on[] = {0x90, 60, 100}, cc[] = {0xB0, 1, 64}, off[] = {0x80, 60, 0};
+  const BlockMidiEvent events[] = {{0, on}, {100, cc}, {511, off}};
+  std::vector<float> got(kFfBlock);
+  host.process(nullptr, got.data(), kFfBlock, kFfRate, events);
+  ref.queueMidi(on);
+  ref.render(want.data(), 100, kFfRate);
+  ref.queueMidi(cc);
+  ref.render(want.data() + 100, 411, kFfRate);
+  ref.queueMidi(off);
+  ref.render(want.data() + 511, 1, kFfRate);
+  CHECK(got == want);
+  CHECK(host.machineForTest().cycles() == ref.cycles());
+  CHECK(host.machineForTest().midiQueueDepth() == ref.midiQueueDepth());
+}
+
+TEST_CASE("block MIDI: a zero-frame block never fast-forwards", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
+  host.setOffline(true);
+  FfDriver d(host);
+  REQUIRE(host.postInsert(sndA01()));
+  REQUIRE(d.untilDriveActive());
+  const uint64_t cycles = host.machineForTest().cycles();
+  const uint8_t on[] = {0x90, 60, 100};
+  const BlockMidiEvent events[] = {{0, on}};
+  float unused = 0.0f;
+  host.process(nullptr, &unused, 0, kFfRate, events);
+  CHECK(host.machineForTest().cycles() == cycles);
+  CHECK_FALSE(host.status().fastForwarding);
+  CHECK(host.machineForTest().midiQueueDepth() == 3);
+  d.step();  // a real block still fast-forwards
+  CHECK(host.status().fastForwarding);
 }
