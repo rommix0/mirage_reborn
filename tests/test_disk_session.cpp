@@ -17,6 +17,7 @@
 
 #include "mirage/disk_image.h"
 #include "mirage/disk_session.h"
+#include "mirage/machine.h"
 #include "mirage/realtime_host.h"
 #include "test_roms.h"
 
@@ -529,4 +530,47 @@ TEST_CASE("disk session saves a formatted blank disk and then follows its file")
   rig.pump();
   CHECK(rig.session.title() == "new.img");
   CHECK(readBytes(target).size() == size_t(DiskImage::kImageBytes));
+}
+
+TEST_CASE("disk session: adoptRestored names and saves the restored disk") {
+  TempDir tmp("mirage_session_adopt");
+  const auto file = tmp / "SND-A01.img";
+  // The project's machine: a disk the OS has written to (dirty), saved whole.
+  Machine saved(kIdleRom);
+  saved.insertDisk(DiskImage::fromBytes(std::vector<uint8_t>(DiskImage::kImageBytes, 0x11)));
+  saved.powerOn();
+  std::array<uint8_t, 1024> sector;
+  sector.fill(0xC3);
+  saved.disk()->writeSector(0, 0, sector);
+  REQUIRE(saved.disk()->dirty());
+
+  Rig rig;
+  CHECK(rig.session.title() == "No disk");
+  REQUIRE(rig.host.postRestore(rig.host.buildMachine(saved.saveState())));
+  rig.pump();
+  REQUIRE(rig.host.takeReturnedMachine() != nullptr);
+  rig.session.adoptRestored(file, DiskFormat::GieblerEdm, false);
+  CHECK(rig.session.hasDisk());
+  CHECK(rig.session.path() == file);
+  CHECK(rig.session.format() == DiskFormat::GieblerEdm);
+  CHECK(rig.session.title() == "SND-A01.img (modified)");
+  CHECK(rig.session.needsSaveBeforeReplacing());
+
+  REQUIRE(rig.session.startSave());
+  const SaveOutcome outcome = rig.finishSave();
+  REQUIRE(outcome.ok);
+  CHECK(outcome.path == file);
+  const auto bytes = readBytes(file);
+  CHECK(isGiebler(bytes));
+  std::vector<uint8_t> expected(DiskImage::kImageBytes, 0x11);
+  std::fill_n(expected.begin(), 1024, uint8_t(0xC3));
+  CHECK(DiskImage::fromFileBytes(bytes).toBytes() == expected);
+  rig.pump();  // the mark-saved
+  CHECK(rig.session.title() == "SND-A01.img");
+
+  // An untitled restored disk has no path until a Save As.
+  rig.session.adoptRestored({}, DiskFormat::Raw, true);
+  CHECK(rig.session.path().empty());
+  CHECK(rig.session.title() == "Untitled (blank)");
+  CHECK_FALSE(rig.session.startSave());
 }

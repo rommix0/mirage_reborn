@@ -48,6 +48,14 @@ struct RealtimeHost::Queues {
   SpscQueue<ReturnedDisk, kReturnQueueDisks> returns;  // audio -> UI
   SpscQueue<std::unique_ptr<WaveWrite>, kWaveQueueWrites> waves;  // UI -> audio
   SpscQueue<ReturnedWave, kWaveQueueWrites> waveReturns;          // audio -> UI
+  // A snapshot request (snapshot set) or a restore (machine set).
+  struct StateCommand {
+    std::unique_ptr<std::vector<uint8_t>> snapshot;
+    std::unique_ptr<Machine> machine;
+  };
+  SpscQueue<StateCommand, kStateQueueCommands> state;                      // state -> audio
+  SpscQueue<ReturnedSnapshot, kStateQueueCommands> snapshots;              // audio -> state
+  SpscQueue<std::unique_ptr<Machine>, kStateQueueCommands> oldMachines;    // audio -> state
   // process() scratch: this block's MIDI events and their frame offsets.
   std::array<MidiCommand, kMidiCommandsPerBlock> events{};
   std::array<BlockMidiEvent, kMidiCommandsPerBlock> placed{};
@@ -59,6 +67,7 @@ RealtimeHost::RealtimeHost(std::span<const uint8_t> bootRom, HostOptions options
       fastDisk_(options.fastDisk),
       backlog_(kMidiBacklogBytes) {
   romSha1_ = machine_->romSha1();
+  std::copy(bootRom.begin(), bootRom.end(), rom_.begin());  // 4096 bytes: Machine checked
   if (options.muteCalibration && isKnownBootRom(romSha1_)) {
     machine_->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
     calibrationMuteArmed_ = true;
@@ -74,7 +83,8 @@ RealtimeHost::~RealtimeHost() = default;
 
 void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
   machine_->prepare(maxFrames, hostRate);
-  maxFrames_ = maxFrames;
+  maxFrames_.store(maxFrames, kRelaxed);
+  preparedRate_.store(hostRate, kRelaxed);
   inputBuf_.resize(maxFrames);
 }
 
@@ -87,7 +97,11 @@ void RealtimeHost::renderSegment(const float* in, float* out, size_t n, double h
   // Chunks of at most the prepared size keep every Machine::render call inside
   // what prepare() reserved. Unprepared (maxFrames_ 0) there is no limit, and the
   // input buffer grows once here, like the Machine's own (the only allocation).
-  const size_t limit = maxFrames_ ? maxFrames_ : n;
+  // A restored machine may have been prepared smaller than the host (prepare()
+  // ran between buildMachine and the swap): its own size is the limit then.
+  size_t limit = maxFrames_.load(kRelaxed);
+  if (limit == 0) limit = n;
+  if (const size_t own = machine_->preparedFrames(); own != 0) limit = std::min(limit, own);
   const float gain = inputGain_.load(kRelaxed);
   if (in && inputBuf_.size() < std::min(n, limit)) inputBuf_.resize(std::min(n, limit));
   for (size_t done = 0; done < n;) {
@@ -121,13 +135,35 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
   runBlock(in, out, frames, hostRate, 0.0, events, false);
 }
 
+bool RealtimeHost::pumpWhileIdle() {
+  if (!claim()) return false;
+  flushStalled();
+  applyUi();
+  applyWaves();
+  applyState();
+  publishStatus();
+  release();
+  return true;
+}
+
 void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double hostRate,
                             double nowSeconds, std::span<const BlockMidiEvent> events,
                             bool timestamped) {
+  // pumpWhileIdle() holds the machine: silence, and nothing advances or is
+  // published (the status stays the pump's, which is current).
+  if (!claim()) {
+    std::fill_n(out, frames, 0.0f);
+    return;
+  }
+  struct Release {
+    RealtimeHost* h;
+    ~Release() { h->release(); }
+  } releaseAtEnd{this};
   blockPeak_ = 0.0f;
   flushStalled();
   applyUi();
   applyWaves();
+  applyState();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
     fastForwarding_ = false;
@@ -348,6 +384,41 @@ void RealtimeHost::applyWaves() {
   }
 }
 
+void RealtimeHost::applyState() {
+  // Take a request only when whatever it hands back has somewhere to go (from
+  // the producer side sizeApprox() can only overstate, so the pushes below
+  // cannot fail): a snapshot buffer or an old machine, and a pending swap
+  // insert. Until then the rest wait in the queue, so this thread never frees.
+  // At most a queue's worth per call: the producer may keep posting meanwhile.
+  Queues::StateCommand c;
+  for (size_t n = 0; n < kStateQueueCommands; ++n) {
+    if (q_->snapshots.sizeApprox() == kStateQueueCommands ||
+        q_->oldMachines.sizeApprox() == kStateQueueCommands || stalledCount_ == kStalledSlots ||
+        !q_->state.pop(c))
+      return;
+    if (c.snapshot) {
+      const bool ok = machine_->saveStateInto(*c.snapshot);
+      q_->snapshots.push(ReturnedSnapshot{std::move(c.snapshot), ok});
+    } else {
+      swapIn(std::move(c.machine));
+    }
+  }
+}
+
+void RealtimeHost::swapIn(std::unique_ptr<Machine> m) {
+  countRingOverflows();                           // the old machine's, before it goes
+  m->onMidiOut = std::move(machine_->onMidiOut);  // a move: no allocation
+  machine_.swap(m);
+  ringOverflowsSeen_ = machine_->midiOverflows();
+  releaseDue_.fill(false);
+  pressCycle_.fill(0);
+  ejectCycle_ = 0;
+  if (pendingInsert_) returnDisk(std::move(pendingInsert_), DiskReturn::Unused);
+  backlogHead_ = backlogCount_ = 0;
+  midiBytesFlushed_ += discardMidiInput();
+  q_->oldMachines.push(std::move(m));
+}
+
 void RealtimeHost::applyDue() {
   const uint64_t now = machine_->cycles();
   for (size_t k = 0; k < kPanelKeyCount; ++k) {
@@ -507,6 +578,45 @@ std::optional<ReturnedWave> RealtimeHost::takeReturnedWave() {
   ReturnedWave r{};
   if (!q_->waveReturns.pop(r)) return std::nullopt;
   return r;
+}
+
+bool RealtimeHost::postSnapshot(std::unique_ptr<std::vector<uint8_t>>&& reserved) {
+  if (!reserved) return false;
+  Queues::StateCommand c;
+  c.snapshot = std::move(reserved);
+  if (q_->state.push(std::move(c))) return true;
+  reserved = std::move(c.snapshot);  // a full queue leaves c untouched
+  return false;
+}
+
+std::optional<ReturnedSnapshot> RealtimeHost::takeReturnedSnapshot() {
+  ReturnedSnapshot r{};
+  if (!q_->snapshots.pop(r)) return std::nullopt;
+  return r;
+}
+
+std::unique_ptr<Machine> RealtimeHost::buildMachine(std::span<const uint8_t> snapshot) const {
+  auto m = std::make_unique<Machine>(rom_);
+  if (calibrationMuteArmed_) m->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  m->loadState(snapshot);
+  if (const size_t frames = maxFrames_.load(kRelaxed); frames != 0)
+    m->prepare(frames, preparedRate_.load(kRelaxed));
+  return m;
+}
+
+bool RealtimeHost::postRestore(std::unique_ptr<Machine>&& m) {
+  if (!m) return false;
+  Queues::StateCommand c;
+  c.machine = std::move(m);
+  if (q_->state.push(std::move(c))) return true;
+  m = std::move(c.machine);
+  return false;
+}
+
+std::unique_ptr<Machine> RealtimeHost::takeReturnedMachine() {
+  std::unique_ptr<Machine> m;
+  q_->oldMachines.pop(m);
+  return m;
 }
 
 std::optional<ReturnedDisk> RealtimeHost::takeReturnedDisk() {

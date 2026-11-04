@@ -90,6 +90,13 @@ struct ReturnedWave {
   std::unique_ptr<WaveWrite> write;
   WaveReturn why;
 };
+// A postSnapshot buffer handed back: ok, it holds Machine::saveState()'s bytes
+// as of the start of the block (or pump) that took it; not ok, it was too small
+// (its contents are unspecified): post one with twice the capacity.
+struct ReturnedSnapshot {
+  std::unique_ptr<std::vector<uint8_t>> bytes;
+  bool ok = false;
+};
 // One MIDI message at a frame of the block, as a DAW delivers it.
 struct BlockMidiEvent {
   uint32_t frame;
@@ -101,7 +108,8 @@ struct MidiOutByte {
 };
 
 // Runs a Machine for a real-time audio callback. The audio thread owns the
-// Machine: it is the only thread that touches it, inside process(). The UI
+// Machine: it is the only thread that touches it, inside process() (or, while
+// no process() runs, a thread in pumpWhileIdle(), which claims it). The UI
 // thread and the MIDI-input thread talk to it through lock-free single-producer
 // queues that process() drains at the start of each block, and things come
 // back the same way (disks to the UI, transmitted MIDI bytes to a MIDI-output
@@ -139,6 +147,9 @@ class RealtimeHost {
   static constexpr size_t kReturnQueueDisks = 64;
   // Wave writes in flight each way (UI -> audio, and back).
   static constexpr size_t kWaveQueueWrites = 16;
+  // Snapshot requests and restores in flight (state thread -> audio), and each
+  // kind's returns (audio -> state thread).
+  static constexpr size_t kStateQueueCommands = 8;
   // Fast-forward: the machine runs in chunks of kFastChunkCycles; in real time
   // it may use kFastBudgetFraction of a block's duration, offline at most
   // kFastOfflineCapCycles per block. kFadeInSeconds: the gain ramp 0 -> 1 over
@@ -164,7 +175,7 @@ class RealtimeHost {
   void setOffline(bool offline) { offline_.store(offline, std::memory_order_relaxed); }
 
   // prepare() allocates (Machine::prepare), so it must never run concurrently
-  // with process() or render(): call it before the first block and whenever
+  // with process(), render() or pumpWhileIdle(): call it before the first block and whenever
   // the device's block size or rate changes (JUCE calls audioDeviceAboutToStart
   // before the callbacks start, and again after stopping them).
   // It also reserves the buffer that holds the gain-applied input (maxFrames
@@ -172,7 +183,7 @@ class RealtimeHost {
   void prepare(size_t maxFrames, double hostRate);
   // Renders `frames` mono samples at hostRate:
   //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved),
-  //     then the wave writes;
+  //     then the wave writes, then the state queue (snapshots and restores);
   //  2. takes up to kMidiCommandsPerBlock MIDI commands, each placed at frame
   //     frames - llround((nowSeconds - t) * hostRate), clamped to
   //     [the previous event's frame, frames - 1];
@@ -277,6 +288,45 @@ class RealtimeHost {
   // UI thread: the next wave write handed back, oldest first; freed by the caller.
   [[nodiscard]] std::optional<ReturnedWave> takeReturnedWave();
 
+  // ---- State (a DAW project): snapshots and restores ----------------------
+  // The state queue has a single producer, the caller's state thread (the
+  // plugin serialises its getState/setState). Requests are served in order at
+  // the start of a block, after the UI queue and the wave writes (so a key or
+  // insert posted just before is in a snapshot), or by pumpWhileIdle().
+  //
+  // `reserved` is an empty buffer with capacity reserved off the audio thread.
+  // It comes back through takeReturnedSnapshot() holding the snapshot (ok) or,
+  // if it was too small, not ok: retry with 2 x capacity. False, leaving it
+  // untouched, when it is null or the queue is full.
+  bool postSnapshot(std::unique_ptr<std::vector<uint8_t>>&& reserved);
+  [[nodiscard]] std::optional<ReturnedSnapshot> takeReturnedSnapshot();
+  // State thread. A new Machine from this host's boot ROM, restored from
+  // `snapshot` (Machine::loadState: throws StateError as it does, e.g. "snapshot
+  // was taken with a different boot ROM"), with the calibration gate armed if
+  // it is armed here (before the load, so the gate starts closed mid-routine),
+  // and prepared at the last prepare() size and rate, if any. Allocates.
+  std::unique_ptr<Machine> buildMachine(std::span<const uint8_t> snapshot) const;
+  // Posts a Machine (from buildMachine) to replace the running one. At the
+  // start of a block (or pump) the audio thread wires its onMidiOut, swaps it
+  // in, clears the host's per-machine state (deferred key releases, the block
+  // MIDI backlog, the MIDI queue, counted in midiBytesFlushed, and the key and
+  // swap timers), hands a pending swap insert back as Unused and returns the old
+  // Machine. Render chunks never exceed the new machine's preparedFrames(), so
+  // a larger block size prepared between buildMachine and the swap cannot make
+  // it allocate.
+  // False, leaving `m` untouched, when it is null or the queue is full.
+  bool postRestore(std::unique_ptr<Machine>&& m);
+  // State thread: the machine a restore replaced (null when none yet). Getting
+  // it confirms the swap; freeing it is the caller's job.
+  [[nodiscard]] std::unique_ptr<Machine> takeReturnedMachine();
+  // Any thread but the audio thread, for when the DAW calls no process(). If
+  // no process() call holds the machine, claims it, does a block's start-of-block
+  // work (stalled disk returns, the UI queue, the wave writes, the state queue),
+  // publishes status, releases it and returns true. Otherwise returns false at
+  // once. A process() that finds the machine claimed writes zeros, advances and
+  // publishes nothing, and returns. Never blocks either side.
+  bool pumpWhileIdle();
+
   // MIDI-output thread: the next byte the OS transmitted, in cycle order. If
   // the queue (kMidiOutQueueBytes) is full the audio thread drops the byte and
   // counts it in midiDropped.
@@ -285,7 +335,7 @@ class RealtimeHost {
   HostStatus status() const;  // any thread
 
   // Tests only: the Machine, for use on the thread that calls process() while
-  // no process() call is running.
+  // no process() or pumpWhileIdle() call is running.
   Machine& machineForTest() { return *machine_; }
 
  private:
@@ -298,6 +348,11 @@ class RealtimeHost {
   void returnDisk(std::unique_ptr<DiskImage> disk, DiskReturn why, uint64_t writeCount = 0);
   void flushStalled();
   void applyWaves();  // the wave queue, after the UI queue
+  void applyState();  // the state queue, after the wave queue
+  void swapIn(std::unique_ptr<Machine> m);  // a restore; returns the old machine
+  // True if no one else holds the machine; then it is ours until release().
+  bool claim() { return !claimed_.exchange(true, std::memory_order_acquire); }
+  void release() { claimed_.store(false, std::memory_order_release); }
   void countRingOverflows();  // adds new Machine::midiOverflows() to midiDropped
   size_t discardMidiInput();  // empties the MIDI queue; returns the bytes discarded
   uint64_t midiBytesTaken_ = 0, midiBytesFlushed_ = 0;  // audio thread; published by publishStatus
@@ -319,6 +374,7 @@ class RealtimeHost {
   bool fastForward(size_t frames, double hostRate);
 
   std::array<uint8_t, 20> romSha1_{};
+  std::array<uint8_t, Machine::kBootRomSize> rom_{};  // for buildMachine
   // q_ is declared before machine_ so machine_ is destroyed first: the
   // Machine's onMidiOut callback dereferences q_.
   std::unique_ptr<Queues> q_;
@@ -333,7 +389,11 @@ class RealtimeHost {
   std::array<ReturnedDisk, kStalledSlots> stalled_{};  // returns waiting for queue room
   size_t stalledCount_ = 0;
   uint64_t ringOverflowsSeen_ = 0;  // Machine::midiOverflows() already counted
-  size_t maxFrames_ = 0;            // prepare()'s block size; 0 = never prepared
+  // prepare()'s block size (0 = never prepared) and rate. Atomic only because
+  // buildMachine reads them on the state thread; the pair may be torn by a
+  // concurrent prepare(), which the swap's chunk limit makes harmless.
+  std::atomic<size_t> maxFrames_{0};
+  std::atomic<double> preparedRate_{0.0};
   std::vector<float> inputBuf_;     // the gain-applied input; sized by prepare()
   float blockPeak_ = 0.0f;          // this block's input peak so far
   bool fastDisk_ = false, calibrationMuteArmed_ = false;
@@ -355,6 +415,14 @@ class RealtimeHost {
   std::atomic<float> inputGain_{1.0f}, inputPeakPub_{0.0f};
   std::atomic<bool> outputMutedPub_{false}, fastForwardingPub_{false};
   std::atomic<uint64_t> blocksPub_{0};
+
+  // The machine claim: held by process() for a whole block, or by
+  // pumpWhileIdle(). Taken with acquire and given back with release, so
+  // everything one holder did to the machine and the audio-side state (and as
+  // the consumer of the UI, wave, state and MIDI queues, and the producer of
+  // the return queues) happens-before whatever the next holder does: the two
+  // threads act as one audio thread, one at a time.
+  std::atomic<bool> claimed_{false};
 };
 
 }  // namespace mirage

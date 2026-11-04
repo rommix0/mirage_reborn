@@ -2,14 +2,19 @@
 // Machine; the UI and MIDI threads post through lock-free queues.
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_exception.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -21,6 +26,7 @@
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 #include "mirage/realtime_host.h"
+#include "mirage/state_io.h"
 #include "test_roms.h"
 
 using namespace mirage;
@@ -1772,4 +1778,279 @@ TEST_CASE("block MIDI: a zero-frame block never fast-forwards", "[assets]") {
   CHECK(host.machineForTest().midiQueueDepth() == 3);
   d.step();  // a real block still fast-forwards
   CHECK(host.status().fastForwarding);
+}
+
+// ---- Snapshots, machine swaps and the idle pump (Plan 5 Task 5) ---------------
+
+namespace {
+
+// Every HostStatus field except `blocks`, which counts this host's own process() calls.
+void requireSameStatus(const HostStatus& a, const HostStatus& b) {
+  REQUIRE(a.display.left == b.display.left);
+  REQUIRE(a.display.right == b.display.right);
+  REQUIRE(a.driveActive == b.driveActive);
+  REQUIRE(a.diskPresent == b.diskPresent);
+  REQUIRE(a.diskDirty == b.diskDirty);
+  REQUIRE(a.diskWrites == b.diskWrites);
+  REQUIRE(a.illegalOps == b.illegalOps);
+  REQUIRE(a.midiDropped == b.midiDropped);
+  REQUIRE(a.cycles == b.cycles);
+  REQUIRE(a.midiBytesTaken == b.midiBytesTaken);
+  REQUIRE(a.midiBytesFlushed == b.midiBytesFlushed);
+  REQUIRE(a.midiQueueDepth == b.midiQueueDepth);
+  REQUIRE(a.midiBacklog == b.midiBacklog);
+  REQUIRE(std::memcmp(&a.inputPeak, &b.inputPeak, sizeof(float)) == 0);
+  REQUIRE(a.outputMuted == b.outputMuted);
+  REQUIRE(a.fastForwarding == b.fastForwarding);
+}
+
+bool sameBits(const std::vector<float>& a, const std::vector<float>& b) {
+  return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+std::unique_ptr<std::vector<uint8_t>> reservedBuffer(size_t bytes) {
+  auto v = std::make_unique<std::vector<uint8_t>>();
+  v->reserve(bytes);
+  return v;
+}
+
+// Takes a snapshot of `host` through postSnapshot + pumpWhileIdle (no process()).
+std::vector<uint8_t> idleSnapshot(RealtimeHost& host) {
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));
+  REQUIRE(host.pumpWhileIdle());
+  auto r = host.takeReturnedSnapshot();
+  REQUIRE(r);
+  REQUIRE(r->ok);
+  return std::move(*r->bytes);
+}
+
+std::vector<float> sine(size_t frames, float amp = 0.3f) {
+  std::vector<float> v(frames);
+  for (size_t i = 0; i < frames; ++i) v[i] = amp * float(std::sin(0.05 * double(i)));
+  return v;
+}
+
+}  // namespace
+
+TEST_CASE("host: snapshot taken mid-boot restores and continues identically", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  const auto rom = mirage_test::bootRomBytes();
+  RealtimeHost a(rom), b(rom);
+  a.prepare(1024, 48000);
+  b.prepare(1024, 48000);
+  REQUIRE(a.postInsert(sndA01()));
+  const std::span<const BlockMidiEvent> none;
+  std::vector<float> outA(1024), outB(1024);
+  constexpr int kBootBlocks = 844;  // 9 s of 512-frame blocks at 48 kHz
+  for (int i = 0; i < kBootBlocks; ++i) a.process(nullptr, outA.data(), 512, 48000.0, none);
+  REQUIRE(a.status().cycles > 0);
+
+  REQUIRE(a.postSnapshot(reservedBuffer(1 << 20)));
+  a.process(nullptr, outA.data(), 512, 48000.0, none);  // the snapshot is taken at its start
+  auto snap = a.takeReturnedSnapshot();
+  REQUIRE(snap);
+  REQUIRE(snap->ok);
+  REQUIRE(snap->bytes->size() > size_t(DiskImage::kImageBytes));
+
+  auto m = b.buildMachine(*snap->bytes);
+  REQUIRE(m);
+  REQUIRE(b.postRestore(std::move(m)));
+  CHECK(b.takeReturnedMachine() == nullptr);  // not swapped until a block starts
+  b.process(nullptr, outB.data(), 512, 48000.0, none);
+  CHECK(b.takeReturnedMachine() != nullptr);
+  CHECK(std::memcmp(outA.data(), outB.data(), 512 * sizeof(float)) == 0);
+  requireSameStatus(a.status(), b.status());
+
+  // 200 blocks of 1024 frames run from 9.01 s to 13.28 s: a note at 12 s, off at 12.5 s.
+  const size_t start = size_t(kBootBlocks + 1) * 512;
+  const size_t onAt = 12 * 48000 - start, offAt = 12 * 48000 + 24000 - start;
+  const uint8_t on[] = {0x90, 60, 100}, off[] = {0x80, 60, 0};
+  bool sawSound = false;
+  for (size_t blk = 0; blk < 200; ++blk) {
+    std::vector<BlockMidiEvent> events;
+    if (onAt / 1024 == blk) events.push_back({uint32_t(onAt % 1024), on});
+    if (offAt / 1024 == blk) events.push_back({uint32_t(offAt % 1024), off});
+    a.process(nullptr, outA.data(), 1024, 48000.0, events);
+    b.process(nullptr, outB.data(), 1024, 48000.0, events);
+    REQUIRE(sameBits(outA, outB));
+    requireSameStatus(a.status(), b.status());
+    for (float s : outA) sawSound = sawSound || s != 0.0f;
+  }
+  CHECK(sawSound);
+  CHECK(a.machineForTest().saveState() == b.machineForTest().saveState());
+}
+
+TEST_CASE("host: snapshot and restore complete with no process() calls") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(256, 48000);
+  CHECK_FALSE(host.takeReturnedSnapshot().has_value());
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));
+  CHECK_FALSE(host.takeReturnedSnapshot().has_value());  // nothing has run yet
+  REQUIRE(host.pumpWhileIdle());
+  auto snap = host.takeReturnedSnapshot();
+  REQUIRE(snap);
+  CHECK(snap->ok);
+  CHECK(*snap->bytes == host.machineForTest().saveState());
+
+  // Too small: handed back with ok false and the same buffer, never grown.
+  auto small = reservedBuffer(16);
+  const auto* raw = small.get();
+  REQUIRE(host.postSnapshot(std::move(small)));
+  REQUIRE(host.pumpWhileIdle());
+  auto refused = host.takeReturnedSnapshot();
+  REQUIRE(refused);
+  CHECK_FALSE(refused->ok);
+  CHECK(refused->bytes.get() == raw);
+  CHECK(refused->bytes->capacity() == 16);
+  CHECK_FALSE(host.postSnapshot(nullptr));
+
+  // A disk swap in its gap: the restore hands the waiting insert back Unused
+  // (the restored machine has its own drive contents).
+  REQUIRE(host.postInsert(filledDisk(1)));
+  REQUIRE(host.postInsert(filledDisk(2)));
+  REQUIRE(host.pumpWhileIdle());
+  auto ejected = host.takeReturnedDisk();
+  REQUIRE(ejected);
+  CHECK(ejected->why == DiskReturn::Ejected);
+
+  auto m = host.buildMachine(*snap->bytes);
+  const Machine* fresh = m.get();
+  const Machine* old = &host.machineForTest();
+  REQUIRE(host.postRestore(std::move(m)));
+  CHECK_FALSE(host.postRestore(nullptr));
+  CHECK(host.takeReturnedMachine() == nullptr);
+  REQUIRE(host.pumpWhileIdle());
+  auto back = host.takeReturnedMachine();
+  CHECK(back.get() == old);
+  CHECK(&host.machineForTest() == fresh);
+  CHECK(host.status().blocks == 0);
+  CHECK_FALSE(host.status().diskPresent);  // the snapshot's empty drive
+  auto unused = host.takeReturnedDisk();
+  REQUIRE(unused);
+  CHECK(unused->why == DiskReturn::Unused);
+  CHECK(unused->disk->toBytes()[0] == 2);
+}
+
+TEST_CASE("host: pumpWhileIdle excludes process") {
+  // The jack rig makes every rendered block audible, so a silent block is one
+  // that found the machine claimed. A block that ran bumps status().blocks;
+  // the pump publishes status too but never changes the count.
+  RealtimeHost host(mirage_test::adcLoopRom(1));
+  constexpr size_t kFrames = 256;
+  host.prepare(kFrames, 48000);
+  const auto in = sine(kFrames);
+  std::vector<float> warm(kFrames);
+  for (int i = 0; i < 20; ++i) host.process(in.data(), warm.data(), kFrames, 48000.0, 0.0);
+
+  // 300 us, spinning: sleep_for is too coarse on Windows.
+  const auto gap = [] {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(300);
+    while (std::chrono::steady_clock::now() < until) std::this_thread::yield();
+  };
+  std::atomic<bool> stop{false};
+  uint64_t ran = 0, claimed = 0, silentRan = 0, loudClaimed = 0;  // Catch2 is not thread-safe
+  std::thread audio([&] {
+    std::vector<float> out(kFrames);
+    while (!stop.load()) {
+      const uint64_t before = host.status().blocks;
+      std::fill(out.begin(), out.end(), 1.0f);
+      host.process(in.data(), out.data(), kFrames, 48000.0, 0.0);
+      const bool silent = std::all_of(out.begin(), out.end(), [](float s) { return s == 0.0f; });
+      if (host.status().blocks == before) {
+        ++claimed;
+        if (!silent) ++loudClaimed;
+      } else {
+        ++ran;
+        if (silent) ++silentRan;
+      }
+      gap();  // between callbacks
+    }
+  });
+
+  uint64_t posted = 0, returned = 0, notOk = 0, pumped = 0, refused = 0;
+  for (int i = 0; i < 1000; ++i) {
+    if (i % 4 == 0 && host.postSnapshot(reservedBuffer(1 << 20))) ++posted;
+    if (host.pumpWhileIdle()) ++pumped;
+    else ++refused;
+    while (auto r = host.takeReturnedSnapshot()) {
+      ++returned;
+      if (!r->ok) ++notOk;
+    }
+    gap();
+  }
+  stop.store(true);
+  audio.join();
+  // With process() stopped, the pump always gets the machine; a few rounds
+  // empty the state queue even if its returns were full.
+  for (int i = 0; i < 4; ++i) {
+    REQUIRE(host.pumpWhileIdle());
+    while (auto r = host.takeReturnedSnapshot()) {
+      ++returned;
+      if (!r->ok) ++notOk;
+    }
+  }
+  INFO("posted " << posted << " pumped " << pumped << " refused " << refused << " ran " << ran
+                 << " claimed " << claimed);
+
+  CHECK(posted > 100);  // of 250 (a full queue refuses some)
+  CHECK(returned == posted);
+  CHECK(notOk == 0);
+  CHECK(pumped + refused == 1000);
+  CHECK(ran > 10);
+  CHECK(pumped > 10);
+  CHECK(claimed > 0);
+  CHECK(loudClaimed == 0);
+  CHECK(silentRan == 0);
+}
+
+TEST_CASE("host: a restored machine renders at a new rate after prepare") {
+  // The new machine is built (and prepared) at 64 frames, 48 kHz; the DAW then
+  // prepares the host for larger blocks at 96 kHz before the swap. 4096 frames
+  // would overrun what the new machine reserved if it were rendered in
+  // host-sized chunks.
+  const size_t frames = GENERATE(size_t(1024), size_t(4096));
+  RealtimeHost host(mirage_test::adcLoopRom(1));
+  host.prepare(64, 48000);
+  const auto in48 = sine(64);
+  std::vector<float> out48(64);
+  for (int i = 0; i < 80; ++i) host.process(in48.data(), out48.data(), 64, 48000.0, 0.0);
+
+  auto m = host.buildMachine(idleSnapshot(host));
+  const Machine* fresh = m.get();
+  REQUIRE(fresh->preparedFrames() == 64);
+  REQUIRE(host.postRestore(std::move(m)));
+  host.prepare(frames, 96000);
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));  // and a snapshot request behind it
+
+  const auto in = sine(frames);
+  std::vector<float> out(frames);
+  size_t allocations = 0, frees = 0;
+  float peak = 0.0f;
+  for (int i = 0; i < 50; ++i) {
+    {
+      AllocationScope scope;
+      host.process(in.data(), out.data(), frames, 96000.0, 0.0);
+      allocations += scope.count();
+      frees += scope.frees();
+    }
+    for (float s : out) peak = std::max(peak, std::fabs(s));
+  }
+  CHECK(allocations == 0);
+  CHECK(frees == 0);
+  CHECK(&host.machineForTest() == fresh);
+  CHECK(host.takeReturnedMachine() != nullptr);
+  auto snap = host.takeReturnedSnapshot();
+  REQUIRE(snap);
+  CHECK(snap->ok);
+  CHECK(peak > 0.01f);  // audio renders at 96 kHz
+}
+
+TEST_CASE("host: wrong ROM") {
+  RealtimeHost host(kIdleRom);
+  Machine other(romWith({0x20, 0xFE, 0x01}));  // one byte differs
+  other.powerOn();
+  const auto bytes = other.saveState();
+  REQUIRE_THROWS_MATCHES(host.buildMachine(bytes), StateError,
+                         Catch::Matchers::Message("snapshot was taken with a different boot ROM"));
 }

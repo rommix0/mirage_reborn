@@ -68,6 +68,14 @@ void DiskSession::eject() {
   }
 }
 
+void DiskSession::adoptRestored(const std::filesystem::path& path, DiskFormat format,
+                                bool untitled) {
+  path_ = untitled ? std::filesystem::path() : path;
+  format_ = format;
+  untitled_ = untitled;
+  savedWrites_.reset();
+}
+
 bool DiskSession::startSave(const std::filesystem::path& file) {
   const auto& target = file.empty() ? path_ : file;
   if (saving_ || target.empty()) return false;

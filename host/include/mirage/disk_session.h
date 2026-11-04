@@ -62,6 +62,12 @@ class DiskSession {
   // in flight or the host's queue is full. Like open(), does not prompt.
   bool newBlank();
   void eject();
+  // The disk that arrived inside a restored machine (RealtimeHost::postRestore):
+  // takes on its identity, as saved with the project, without posting an
+  // insert. title() and startSave() then behave as if it had been opened from
+  // `path` in `format` (or, untitled, made by newBlank()); whether it is
+  // modified comes from the restored disk's dirty flag.
+  void adoptRestored(const std::filesystem::path& path, DiskFormat format, bool untitled);
   // Starts a save to `file` (current path when empty, in the current format;
   // otherwise in the format its name picks). Completes in poll().
   // False (nothing started) when no target is known, a save is already in
