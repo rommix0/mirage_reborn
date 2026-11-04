@@ -34,7 +34,7 @@ struct RealtimeHost::Queues {
     Type type = Type::Key;
     PanelKey key = PanelKey::LoadUpper;
     bool down = false;
-    uint64_t writeCount = 0;
+    uint64_t writeCount = 0, generation = 0;  // MarkSaved
     std::unique_ptr<DiskImage> disk;  // Insert, Copy
   };
   struct MidiCommand {
@@ -373,7 +373,8 @@ void RealtimeHost::applyUi() {
         }
         break;
       case Type::MarkSaved:
-        if (DiskImage* d = machine_->disk(); d && d->writeCount() == c.writeCount) d->clearDirty();
+        if (DiskImage* d = machine_->disk(); d && c.generation == generation_ && d->writeCount() == c.writeCount)
+          d->clearDirty();
         break;
     }
   }
@@ -437,6 +438,7 @@ void RealtimeHost::swapIn(std::unique_ptr<Machine> m) {
   countRingOverflows();                           // the old machine's, before it goes
   m->onMidiOut = std::move(machine_->onMidiOut);  // a move: no allocation
   machine_.swap(m);
+  ++generation_;
   ringOverflowsSeen_ = machine_->midiOverflows();
   releaseDue_.fill(false);
   pressCycle_.fill(0);
@@ -462,7 +464,7 @@ void RealtimeHost::applyDue() {
 void RealtimeHost::returnDisk(std::unique_ptr<DiskImage> disk, DiskReturn why,
                               uint64_t writeCount) {
   if (!disk) return;
-  ReturnedDisk r{std::move(disk), why, writeCount};
+  ReturnedDisk r{std::move(disk), why, writeCount, generation_};
   // Behind any stalled ones, to keep the order. Callers make sure a slot is free.
   if (stalledCount_ == 0 && q_->returns.push(std::move(r))) return;
   stalled_[stalledCount_++] = std::move(r);
@@ -587,10 +589,11 @@ bool RealtimeHost::postCopyDisk(std::unique_ptr<DiskImage>&& dest) {
   return false;
 }
 
-bool RealtimeHost::postMarkSaved(uint64_t writeCount) {
+bool RealtimeHost::postMarkSaved(uint64_t writeCount, uint64_t generation) {
   Queues::UiCommand c;
   c.type = Queues::UiCommand::Type::MarkSaved;
   c.writeCount = writeCount;
+  c.generation = generation;
   return q_->ui.push(std::move(c));
 }
 

@@ -123,7 +123,7 @@ std::optional<SaveOutcome> DiskSession::poll() {
       r->disk->saveFile(saveTarget_, saveFormat_);
       // Clears dirty unless the OS wrote again since the copy. If the queue
       // is full the disk merely stays marked modified.
-      host_.postMarkSaved(r->writeCount);
+      host_.postMarkSaved(r->writeCount, r->generation);
       savedWrites_ = r->writeCount;
       path_ = saveTarget_;
       format_ = saveFormat_;

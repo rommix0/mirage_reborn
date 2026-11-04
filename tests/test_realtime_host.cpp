@@ -1932,6 +1932,54 @@ TEST_CASE("host: snapshot and restore complete with no process() calls") {
   CHECK(unused->disk->toBytes()[0] == 2);
 }
 
+TEST_CASE("host: a save's mark-saved never clears a restored machine's disk") {
+  // A save copies the disk (write count 1), a restore swaps in a machine whose
+  // dirty disk counts from 0 (the snapshot keeps no write count), its OS writes
+  // once, and only then does the save post its mark-saved: the counts match,
+  // but the restored disk's write is in no file.
+  RealtimeHost host(kIdleRom);
+  host.prepare(64, 48000);
+  REQUIRE(host.postInsert(filledDisk(0x11)));
+  block(host, 64);
+  const std::vector<uint8_t> sector(1024, 0x5A);
+  host.machineForTest().disk()->writeSector(3, 1, sector);
+  REQUIRE(host.postCopyDisk(blankDisk()));
+  block(host, 64);
+  auto copy = host.takeReturnedDisk();
+  REQUIRE(copy);
+  REQUIRE(copy->why == DiskReturn::Copy);
+  REQUIRE(copy->writeCount == 1);
+
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));
+  block(host, 64);
+  auto snap = host.takeReturnedSnapshot();
+  REQUIRE(snap);
+  REQUIRE(snap->ok);
+  REQUIRE(host.postRestore(host.buildMachine(*snap->bytes)));
+  block(host, 64);
+  REQUIRE(host.takeReturnedMachine());
+  REQUIRE(host.machineForTest().disk()->dirty());
+  REQUIRE(host.machineForTest().disk()->writeCount() == 0);
+  host.machineForTest().disk()->writeSector(4, 2, sector);
+  REQUIRE(host.machineForTest().disk()->writeCount() == 1);
+
+  REQUIRE(host.postMarkSaved(copy->writeCount, copy->generation));
+  block(host, 64);
+  CHECK(host.machineForTest().disk()->dirty());
+  CHECK(host.status().diskDirty);
+
+  // A save of the restored machine's disk still marks it saved.
+  REQUIRE(host.postCopyDisk(std::move(copy->disk)));
+  block(host, 64);
+  auto again = host.takeReturnedDisk();
+  REQUIRE(again);
+  REQUIRE(again->why == DiskReturn::Copy);
+  REQUIRE(host.postMarkSaved(again->writeCount, again->generation));
+  block(host, 64);
+  CHECK_FALSE(host.machineForTest().disk()->dirty());
+  CHECK_FALSE(host.status().diskDirty);
+}
+
 TEST_CASE("host: pumpWhileIdle excludes process") {
   // The jack rig makes every rendered block audible, so a silent block is one
   // that found the machine claimed. A block that ran bumps status().blocks;

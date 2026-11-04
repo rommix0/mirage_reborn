@@ -67,13 +67,16 @@ struct HostOptions {
 //  Ejected: taken out of the drive (an eject, or the first half of a swap).
 //  Unused: an insert that never went in (replaced or ejected during the swap gap).
 //  Copy: a postCopyDisk buffer now holding the inserted disk; writeCount is
-//    the disk's write count at the moment of the copy.
+//    the disk's write count at the moment of the copy, and generation names
+//    the machine it came from (each restore swaps in a new one). Both go back
+//    to postMarkSaved.
 //  NoDiskToCopy: a postCopyDisk buffer handed back untouched (the drive was empty).
 enum class DiskReturn : uint8_t { Ejected, Unused, Copy, NoDiskToCopy };
 struct ReturnedDisk {
   std::unique_ptr<DiskImage> disk;
   DiskReturn why;
   uint64_t writeCount = 0;
+  uint64_t generation = 0;  // restores applied before the disk came back
 };
 // WAV import (spec 6.7): bytes to copy into wave RAM at `address`, made on the
 // UI thread (convertForWaveRam) and handed back to it after the attempt.
@@ -273,8 +276,10 @@ class RealtimeHost {
   // Copy holding the inserted disk, or as NoDiskToCopy.
   bool postCopyDisk(std::unique_ptr<DiskImage>&& dest);
   // Clears the inserted disk's dirty flag if its write count still equals
-  // writeCount (no write since the copy that was saved).
-  bool postMarkSaved(uint64_t writeCount);
+  // writeCount (no write since the copy that was saved) and no restore has
+  // swapped in another machine since the copy (`generation`, the Copy's): a
+  // restored disk counts its writes from 0 again, so its count proves nothing.
+  bool postMarkSaved(uint64_t writeCount, uint64_t generation = 0);
   // UI thread: the next disk handed back, oldest first. Freeing it is the
   // caller's job (never the audio thread's).
   [[nodiscard]] std::optional<ReturnedDisk> takeReturnedDisk();
@@ -398,6 +403,7 @@ class RealtimeHost {
   std::array<ReturnedDisk, kStalledSlots> stalled_{};  // returns waiting for queue room
   size_t stalledCount_ = 0;
   uint64_t ringOverflowsSeen_ = 0;  // Machine::midiOverflows() already counted
+  uint64_t generation_ = 0;         // restores swapped in (ReturnedDisk::generation)
   // prepare()'s block size (0 = never prepared) and rate. Atomic only because
   // buildMachine reads them on the state thread; the pair may be torn by a
   // concurrent prepare(), which the swap's chunk limit makes harmless.
