@@ -7,26 +7,13 @@
 #include <vector>
 
 #include "AudioEngine.h"
+#include "DiskActions.h"
+#include "InputMeter.h"
 #include "PanelComponent.h"
 #include "Settings.h"
 #include "mirage/disk_session.h"
 #include "mirage/realtime_host.h"
 #include "mirage/wav_import.h"
-
-// The input level meter in the status strip: a bar on a dB scale (-60 to 0 dB
-// of the jack's full scale), red when the level reaches 1.0, and "no input" when
-// the open device has no active input channel.
-class InputMeter : public juce::Component {
- public:
-  // `peak`: linear, after the input gain (HostStatus::inputPeak). A rise shows at
-  // once and a fall decays, because the status holds only the last block's peak.
-  void update(float peak, bool hasInput);
-  void paint(juce::Graphics&) override;
-
- private:
-  float shown_ = 0.0f;
-  bool hasInput_ = false;
-};
 
 // The window's content: the replica panel above a status strip. The panel's
 // volume slider drives the engine's output gain; the strip's Input slider the
@@ -72,7 +59,7 @@ class MirageContent : public juce::Component, private juce::Timer {
   StripText text_;
 };
 
-// File menu: Open, New Blank Disk, Save, Save As and Eject work through a
+// File menu: Open, New Blank Disk, Save, Save As and Eject are DiskActions on a
 // DiskSession; Import WAV writes wave RAM through the host (ImportDialog). Open, New Blank Disk, Eject and Exit (and the close button) ask
 // first when the disk has unsaved changes. The title names the disk: "Mirage
 // <em dash> SND-A01.img (modified)".
@@ -131,18 +118,7 @@ class MainWindow : public juce::DocumentWindow,
 
   void showAudioSettings();
 
-  // Disk files.
-  void openDisk();
-  void newBlankDisk();
-  void insertDisk(const juce::File& file);
-  void saveDisk(std::function<void()> then = {});  // Save As when the disk has no file
-  void saveDiskAs(std::function<void()> then = {});
-  void startSave(const juce::File& file, std::function<void()> then);  // File(): its own file
-  void ejectDisk();
-  // Runs `then` at once if the disk has no unsaved changes. Otherwise asks
-  // "Save changes to X before <action>?" (Save / Don't Save / Cancel): Save
-  // runs `then` once the save succeeds, Don't Save runs it now, Cancel drops it.
-  void whenDiskSafe(const juce::String& action, std::function<void()> then);
+  // Disk files: the File menu's disk actions are actions_'s.
   void pollDisk();          // 10 Hz: finishes saves, frees returned disks
   void refreshDiskState();  // title, drive label, menu enablement
   juce::File diskFolder() const;  // where the file dialogs start
@@ -170,10 +146,9 @@ class MainWindow : public juce::DocumentWindow,
   std::vector<HeldKey> held_;  // keyboard keys holding panel keys
 
   mirage::DiskSession session_;
+  std::unique_ptr<DiskActions> actions_;
   juce::TimedCallback diskTimer_{[this] { pollDisk(); }};
-  std::unique_ptr<juce::FileChooser> chooser_;
-  std::function<void()> afterSave_;  // runs when the save in flight succeeds
-  bool promptOpen_ = false;          // the unsaved-changes prompt is showing
+  std::unique_ptr<juce::FileChooser> chooser_;  // Import WAV's
   bool menusHaveDisk_ = false, menusSaving_ = false;  // the state the menus last saw
   bool menusCanImport_ = false;
   juce::File lastWavDir_;  // this session's last WAV folder; the disk folder before that

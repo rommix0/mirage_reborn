@@ -28,33 +28,6 @@ juce::String fileName(const std::filesystem::path& p) { return text(p.filename()
 
 }  // namespace
 
-// ---- InputMeter ------------------------------------------------------------
-
-void InputMeter::update(float peak, bool hasInput) {
-  const float next = hasInput ? std::max(peak, shown_ * 0.7f) : 0.0f;
-  if (next == shown_ && hasInput == hasInput_) return;
-  shown_ = next;
-  hasInput_ = hasInput;
-  repaint();
-}
-
-void InputMeter::paint(juce::Graphics& g) {
-  auto r = getLocalBounds().toFloat().reduced(0.0f, 6.0f);
-  g.setColour(juce::Colour(0xff17171b));
-  g.fillRoundedRectangle(r, 2.0f);
-  if (!hasInput_) {
-    g.setColour(juce::Colour(0xff7c7c84));
-    g.setFont(juce::FontOptions(11.0f));
-    g.drawText("no input", getLocalBounds(), juce::Justification::centred);
-    return;
-  }
-  const float db = juce::Decibels::gainToDecibels(shown_, -60.0f);
-  const float fill = juce::jlimit(0.0f, 1.0f, (db + 60.0f) / 60.0f);
-  g.setColour(shown_ >= 1.0f ? juce::Colour(0xffe04848)
-                             : db > -6.0f ? juce::Colour(0xffe0b040) : juce::Colour(0xff58c070));
-  g.fillRoundedRectangle(r.withWidth(r.getWidth() * fill), 2.0f);
-}
-
 // ---- MirageContent ---------------------------------------------------------
 
 MirageContent::MirageContent(mirage::RealtimeHost& host, AudioEngine& engine)
@@ -171,7 +144,11 @@ MainWindow::MainWindow(mirage::RealtimeHost& host, AudioEngine& engine, Settings
       host_(host),
       engine_(engine),
       settings_(settings),
-      session_(host) {
+      session_(host),
+      actions_(std::make_unique<DiskActions>(
+          *this, session_, [this] { return diskFolder(); },
+          [this](const juce::File& dir) { settings_.setLastDiskDir(dir.getFullPathName()); },
+          [this] { refreshDiskState(); })) {
   setUsingNativeTitleBar(true);
   content_ = new MirageContent(host, engine);
   setContentOwned(content_, true);
@@ -198,6 +175,7 @@ MainWindow::~MainWindow() {
   // the dialog must not outlive the engine's AudioDeviceManager.
   delete audioSettings_.getComponent();
   delete importDialog_.getComponent();
+  actions_.reset();
   chooser_.reset();
   removeKeyListener(this);
   setMenuBar(nullptr);
@@ -207,7 +185,7 @@ MainWindow::~MainWindow() {
 void MainWindow::closeButtonPressed() { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
 
 void MainWindow::requestQuit() {
-  whenDiskSafe("quitting", [] { juce::JUCEApplication::quit(); });
+  actions_->whenSafeToReplace("quitting", [] { juce::JUCEApplication::quit(); });
 }
 
 void MainWindow::activeWindowStatusChanged() {
@@ -388,19 +366,19 @@ void MainWindow::getCommandInfo(juce::CommandID id, juce::ApplicationCommandInfo
 bool MainWindow::perform(const InvocationInfo& info) {
   switch (info.commandID) {
     case cmdOpenDisk:
-      openDisk();
+      actions_->open();
       return true;
     case cmdNewBlankDisk:
-      newBlankDisk();
+      actions_->newBlank();
       return true;
     case cmdSaveDisk:
-      saveDisk();
+      actions_->save();
       return true;
     case cmdSaveDiskAs:
-      saveDiskAs();
+      actions_->saveAs();
       return true;
     case cmdEjectDisk:
-      ejectDisk();
+      actions_->eject();
       return true;
     case cmdImportWav:
       importWav();
@@ -447,122 +425,8 @@ void MainWindow::showAudioSettings() {
 
 // ---- Disk files ------------------------------------------------------------
 
-void MainWindow::openDisk() {
-  if (session_.saving() || promptOpen_) return;
-  // Any file of exactly 450,560 bytes is a disk image, whatever its extension,
-  // and so is a Giebler .edm file (detected by content).
-  chooser_ = std::make_unique<juce::FileChooser>("Open Disk Image", diskFolder(), "*.img;*.edm;*");
-  juce::Component::SafePointer<MainWindow> safe(this);
-  chooser_->launchAsync(
-      juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-      [safe](const juce::FileChooser& fc) {
-        const auto file = fc.getResult();
-        if (safe == nullptr || file == juce::File()) return;
-        safe->settings_.setLastDiskDir(file.getParentDirectory().getFullPathName());
-        safe->whenDiskSafe("opening another disk", [w = safe.getComponent(), file] {
-          w->insertDisk(file);
-        });
-      });
-}
-
-void MainWindow::insertDisk(const juce::File& file) {
-  const auto error = session_.open(toPath(file));
-  if (!error.empty()) showError("Cannot open disk image", fromUtf8(error));
-  refreshDiskState();
-}
-
-void MainWindow::newBlankDisk() {
-  if (session_.saving() || promptOpen_) return;
-  whenDiskSafe("inserting a new blank disk", [this] {
-    if (!session_.newBlank())
-      showError("Cannot insert a blank disk", "The emulator is busy. Try again.");
-    refreshDiskState();
-  });
-}
-
-void MainWindow::saveDisk(std::function<void()> then) {
-  if (session_.path().empty()) return saveDiskAs(std::move(then));  // untitled: ask for a file
-  startSave({}, std::move(then));
-}
-
-void MainWindow::saveDiskAs(std::function<void()> then) {
-  if (session_.saving() || !session_.hasDisk()) return;
-  // The dialog's default extension is taken from the suggested name: .edm only
-  // when the session's format is Giebler .edm, else .img (a raw .edm would be
-  // converted by accepting its own name). A .edm name saves Giebler .edm,
-  // anything else a raw image (DiskSession::startSave).
-  const auto& path = session_.path();
-  const auto suggested =
-      diskFolder().getChildFile(path.empty() ? "Untitled" : text(path.stem()))
-          .withFileExtension(session_.format() == mirage::DiskFormat::GieblerEdm ? ".edm" : ".img");
-  chooser_ = std::make_unique<juce::FileChooser>("Save Disk Image As", suggested, "*.img;*.edm");
-  juce::Component::SafePointer<MainWindow> safe(this);
-  chooser_->launchAsync(juce::FileBrowserComponent::saveMode |
-                            juce::FileBrowserComponent::canSelectFiles |
-                            juce::FileBrowserComponent::warnAboutOverwriting,
-                        [safe, then = std::move(then)](const juce::FileChooser& fc) {
-                          const auto file = fc.getResult();
-                          if (safe == nullptr || file == juce::File()) return;
-                          safe->settings_.setLastDiskDir(
-                              file.getParentDirectory().getFullPathName());
-                          safe->startSave(file, then);
-                        });
-}
-
-void MainWindow::startSave(const juce::File& file, std::function<void()> then) {
-  const auto target = file == juce::File() ? std::filesystem::path() : toPath(file);
-  if (!session_.startSave(target)) {
-    showError("Cannot save disk image", "The disk could not be saved right now. Try again.");
-    return;
-  }
-  afterSave_ = std::move(then);
-  refreshDiskState();
-}
-
-void MainWindow::ejectDisk() {
-  whenDiskSafe("ejecting it", [this] {
-    session_.eject();
-    refreshDiskState();
-  });
-}
-
-void MainWindow::whenDiskSafe(const juce::String& action, std::function<void()> then) {
-  if (promptOpen_) return;
-  if (session_.saving()) {
-    // Ask again once the save in flight succeeds (the disk may be clean by then).
-    if (!afterSave_) afterSave_ = [this, action, then] { whenDiskSafe(action, then); };
-    return;
-  }
-  if (!session_.needsSaveBeforeReplacing()) return then();
-  promptOpen_ = true;
-  juce::Component::SafePointer<MainWindow> safe(this);
-  juce::AlertWindow::showAsync(
-      juce::MessageBoxOptions::makeOptionsYesNoCancel(
-          juce::MessageBoxIconType::QuestionIcon, "Unsaved changes",
-          "Save changes to " + (session_.path().empty() ? juce::String("the new disk")
-                                                        : fileName(session_.path())) +
-              " before " + action + "?",
-          "Save",
-          "Don't Save", "Cancel", this),
-      [safe, then = std::move(then)](int choice) {  // 1 Save, 2 Don't Save, 0 Cancel
-        if (safe == nullptr) return;
-        safe->promptOpen_ = false;
-        if (choice == 1)
-          safe->saveDisk(then);
-        else if (choice == 2)
-          then();
-      });
-}
-
 void MainWindow::pollDisk() {
-  if (auto outcome = session_.poll()) {
-    auto then = std::exchange(afterSave_, nullptr);
-    if (outcome->ok) {
-      if (then) then();
-    } else {
-      showError("Cannot save disk image", fromUtf8(outcome->message));
-    }
-  }
+  if (auto outcome = session_.poll()) actions_->showSaveOutcome(*outcome);
   pollWaves();
   refreshDiskState();
 }
@@ -591,8 +455,7 @@ juce::File MainWindow::diskFolder() const {
 }
 
 void MainWindow::showError(const juce::String& title, const juce::String& message) {
-  juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, title, message, {},
-                                         this);
+  actions_->showError(title, message);
 }
 
 // ---- WAV import ------------------------------------------------------------
