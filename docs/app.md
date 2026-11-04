@@ -427,7 +427,7 @@ Queues (all lock-free single-producer, single-consumer):
 | Saving | Audio thread copies the disk; the UI writes atomically, then sends "mark saved" with the write count | Concurrent OS writes are never lost from the dirty flag. |
 | Atomic `DiskImage::saveFile` | Moved here from Plan 3 because Save UI ships now | n/a |
 | MIDI panic | Flush the input queue and send CC 123 on all 16 channels | If an OS ignores CC 123, that's faithful behaviour. |
-| JUCE licence | JUCE 8 (AGPLv3 or JUCE's free Starter licence). The engine and host stay JUCE-free, so VST3 and licence choices stay open. | Noted in the README. |
+| JUCE licence | JUCE 8 (AGPLv3 or JUCE's free Starter licence), for the app and the VST3 plugin; the plugin also builds in the VST3 SDK that JUCE bundles (Steinberg's BSD-style licence). The engine and host contain no JUCE code. | Noted in the README. |
 | Faithful emulation | The host only presses panel keys, queues MIDI bytes, inserts or ejects disks and writes wave RAM for WAV import | No OS-specific code paths, no OS patching. |
 | Wave RAM halves | Import targets `$00000-$0FFFF` or `$10000-$1FFFF` of the 128 KB sample RAM; the dialog names them by the OS 3.2 sound that lives there (measured, see below) | Which half is "lower" is an OS convention; the address is hardware. |
 | WAV conversion | Mono mix (average), windowed-sinc low-pass and resample (cutoff 0.45 x the lower of the two rates), peak normalise on by default, round to unsigned 8-bit (`$80` = 0), no dither, `$00` written as `$01` | Keeps the Mirage's 8-bit grit; dither would add hiss. Easy to change by ear. |

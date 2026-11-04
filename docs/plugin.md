@@ -281,9 +281,10 @@ device threads.
 - **Two instances on one image:** the last Save wins.
 - **A host that withholds program changes from VST3 instruments** hides them from
   the Mirage. That is the host's limit.
-- **An OS SysEx over 65,535 bytes** sent by the Mirage (a long wavesample
-  dump) is dropped and counted in `MIDI dropped`: a JUCE `MidiBuffer` event
-  holds no more. Use the app to dump such a sound over MIDI.
+- **A SysEx dump from the Mirage's OS longer than 65,535 bytes** (for example
+  a wavesample dump) cannot leave the plugin: a JUCE `MidiBuffer` event holds no
+  more. It is dropped and counted in `MIDI dropped`. Make such dumps from
+  `Mirage.exe`, which sends them whole.
 - **A very long SysEx dump into the Mirage** (one block segment longer than about
   1.3 s) can let the machine's 4096-byte MIDI buffer run dry between top-ups,
   leaving gaps on the wire. The 256 KB backlog and "MIDI dropped" cover the

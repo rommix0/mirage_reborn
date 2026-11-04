@@ -209,6 +209,9 @@ plugin, audio engine off), emulated time stops with it.
   parsed into messages on the audio thread after the block and written to the
   block's output `MidiBuffer`. Each message goes at the frame its cycle stamp maps
   to, clamped to the block. Parsing must not allocate (a preallocated SysEx buffer).
+  *Implementation note:* a juce::MidiBuffer event holds at most 65,535 bytes, so
+  a longer SysEx (such as a wavesample dump) cannot leave the plugin; it is
+  dropped and counted in `MIDI dropped`. Such dumps are made from the app.
 - **Panic** (Machine menu) does what it does in the app: it flushes pending input
   and sends CC 123 on all 16 channels.
 - Program change, pitch bend, aftertouch and CCs reach the plugin as MIDI through
