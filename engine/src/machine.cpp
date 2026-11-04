@@ -207,7 +207,10 @@ void Machine::prepare(size_t maxFrames, double hostRate) {
   // + kPendingSurplus: after power-on the DOC scan rate drops from ~333 kHz to
   // 29.4 kHz, and pending_ then permanently holds ~260 surplus samples (the
   // latency render() keeps), so small blocks would otherwise reallocate.
-  constexpr size_t kPendingSurplus = 1024;
+  // The surplus is a time latency, so it grows with the host rate (~1040
+  // samples at 192 kHz): 1024 per 48 kHz, rounded up.
+  const size_t kPendingSurplus =
+      1024 * size_t(std::ceil(std::max(hostRate, 1.0) / 48000.0));
   pending_.reserve(2 * maxFrames + 64 + kPendingSurplus);
   if (hostRate >= kMinHostRate && hostRate <= kMaxHostRate) resampler_.setOutputRate(hostRate);
 }

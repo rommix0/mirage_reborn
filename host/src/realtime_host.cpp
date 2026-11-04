@@ -118,6 +118,7 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
   applyWaves();
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
+    fastForwarding_ = false;
     const size_t stale = discardMidiInput();  // stale by the time audio resumes
     midiDropped_.fetch_add(stale, kRelaxed);
     midiBytesTaken_ += stale;

@@ -80,15 +80,17 @@ TEST_CASE("machine: render at 64-frame blocks across power-on allocates nothing 
           "[assets]") {
   REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
-  Machine m(mirage_test::bootRomBytes());
-  m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
-  m.prepare(64, 48000);
-  std::vector<float> buf(64);
-  m.powerOn();
-  AllocationScope scope;
-  for (int i = 0; i < 1500; ++i) m.render(buf.data(), 64, 48000);  // 2 s
-  CHECK(scope.count() == 0);
-  CHECK(scope.frees() == 0);
+  for (double rate : {48000.0, 192000.0, 384000.0}) {
+    Machine m(mirage_test::bootRomBytes());
+    m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+    m.prepare(64, rate);
+    std::vector<float> buf(64);
+    m.powerOn();
+    AllocationScope scope;
+    for (int i = 0; i < int(2.0 * rate / 64); ++i) m.render(buf.data(), 64, rate);  // 2 s
+    CHECK(scope.count() == 0);
+    CHECK(scope.frees() == 0);
+  }
 }
 
 TEST_CASE("render allocates nothing after loadState either", "[assets]") {

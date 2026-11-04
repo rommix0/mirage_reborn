@@ -1175,8 +1175,18 @@ TEST_CASE("fast-forward: same machine state as a plain run", "[assets]") {
     host.setOffline(true);
     FfDriver d(host);
     REQUIRE(host.postInsert(sndA01()));
-    REQUIRE(d.bootToSettled());
+    bool sawFast = false;
+    {
+      int idle = 0;
+      for (int i = 0; i < 6000 && idle < 188; ++i) {
+        d.step();
+        sawFast = sawFast || host.status().fastForwarding;
+        idle = (d.settled() && !host.status().driveActive) ? idle + 1 : 0;
+      }
+      REQUIRE(idle >= 188);
+    }
     CHECK(host.status().blocks > 0);
+    CHECK(sawFast);
 
     Machine m(mirage_test::bootRomBytes());
     m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
@@ -1282,30 +1292,29 @@ TEST_CASE("gate arming: unknown ROM", "[assets]") {
   CHECK(peakKnown < 1e-3f);    // gated (the DC blocker and resampler leave ~-88 dBFS)
 }
 
-TEST_CASE("fast-forward: offline fast-forward stops at the cap", "[assets]") {
-  REQUIRE_ASSET(romPath());
-  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
+TEST_CASE("fast-forward: offline fast-forward stops at the cap") {
+  // Motor on (VIA PB4 low) and a tight loop: the drive never goes idle, so
+  // only the cap ends the fast-forward.
+  const auto rom = romWith({0x86, 0x1F, 0xB7, 0xE2, 0x02, 0x7F, 0xE2, 0x00, 0x20, 0xFE});
+  RealtimeHost host(rom, HostOptions{false, true});
   host.setOffline(true);
   FfDriver d(host);
-  REQUIRE(host.postInsert(std::make_unique<DiskImage>(DiskImage::blank())));
+  d.step();  // runs the first instructions normally, or already fast-forwards
   const uint64_t frameCycles = kFfBlock * kCpuClockHz / 48000 + 64;
-  uint64_t prev = 0;
-  int fast = 0;
-  for (int i = 0; i < 400; ++i) {
-    d.step();
-    const uint64_t c = host.status().cycles;
-    CHECK(c - prev <=
-          RealtimeHost::kFastOfflineCapCycles + RealtimeHost::kFastChunkCycles + frameCycles);
-    fast += host.status().fastForwarding ? 1 : 0;
-    prev = c;
+  for (int i = 0; i < 2; ++i) {
+    const uint64_t before = host.status().cycles;
+    const float peak = d.step();
+    const uint64_t ran = host.status().cycles - before;
+    CHECK(host.status().driveActive);
+    CHECK(host.status().fastForwarding);
+    CHECK(peak == 0.0f);
+    CHECK(ran >= RealtimeHost::kFastOfflineCapCycles);
+    CHECK(ran <= RealtimeHost::kFastOfflineCapCycles + RealtimeHost::kFastChunkCycles + frameCycles);
   }
-  CHECK(fast > 0);  // the retry loop's motor-on stretches were fast-forwarded
 }
 
+#ifdef NDEBUG  // timing tests: registered in Release only
 TEST_CASE("fast-forward: real-time fast-forward stays within half the block", "[assets]") {
-#ifndef NDEBUG
-  SKIP("timing test: Release only");
-#endif
   REQUIRE_ASSET(romPath());
   RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
   FfDriver d(host);
@@ -1323,6 +1332,8 @@ TEST_CASE("fast-forward: real-time fast-forward stays within half the block", "[
   CHECK(worst < kFfBlockSeconds);
   CHECK(fast > 0);
 }
+
+#endif  // NDEBUG
 
 TEST_CASE("fast-forward: input during a fast-forward is kept") {
   // Motor on (VIA PB4 low, a Restore with h=0), then the ACIA receiver: bytes
@@ -1448,10 +1459,8 @@ TEST_CASE("fast-forward: process allocates nothing, real time and offline", "[as
   }
 }
 
+#ifdef NDEBUG
 TEST_CASE("fast-forward: a factory boot is playable fast (Release)", "[assets]") {
-#ifndef NDEBUG
-  SKIP("timing test: Release only");
-#endif
   REQUIRE_ASSET(romPath());
   REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
   using Clock = std::chrono::steady_clock;
@@ -1509,3 +1518,4 @@ TEST_CASE("fast-forward: a factory boot is playable fast (Release)", "[assets]")
   WARN("panel Load Lower: " << elapsed() - loadStart - 94 * kFfBlockSeconds << " s");
   CHECK(sawActive);
 }
+#endif  // NDEBUG

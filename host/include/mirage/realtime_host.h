@@ -170,7 +170,7 @@ class RealtimeHost {
   //     passed and makes any swap insert that is due;
   //  5. publishes status().
   // With HostOptions::fastDisk, if the drive is active or the output gate is
-  // closed after step 1, the block's MIDI is queued at once (in order) and the
+  // closed once the MIDI has been placed (step 2), the block's MIDI is queued at once (in order) and the
   // machine runs in kFastChunkCycles chunks (applyDue() after each) until the
   // trigger ends, the budget is used (real time: half the block's duration of
   // wall-clock) or, offline, kFastOfflineCapCycles have run. If the trigger
