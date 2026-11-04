@@ -24,8 +24,10 @@ juce::PropertiesFile& pluginSettings();
 
 // The boot ROM (design §4.7), loaded once and shared by every instance: the ROM
 // path in the plugin's settings, mirage.bin beside the .vst3 bundle, the app's
-// saved romPath (read only), then MIRAGE_ROM. Only files of exactly 4096 bytes
-// are read. `found` is set to the file used. nullopt when none is found (the
+// saved romPath (read only), then MIRAGE_ROM. Before all of these, a test/dev
+// override: the environment variable MIRAGE_PLUGIN_ROM (a path to a ROM file),
+// which plugin_host_smoke sets so its run does not depend on the user's
+// settings. Only files of exactly 4096 bytes are read. `found` is set to the file used. nullopt when none is found (the
 // editor then asks for it).
 std::optional<juce::MemoryBlock> findBootRom(juce::File& found);
 // The editor's chooser: loads `file` (4096 bytes) as the shared ROM and saves

@@ -58,6 +58,7 @@ std::optional<juce::MemoryBlock> findBootRom(juce::File& found) {
   const std::lock_guard lock(s->romMutex);
   if (!s->rom) {
     const juce::File candidates[] = {
+        fileAt(juce::SystemStats::getEnvironmentVariable("MIRAGE_PLUGIN_ROM", {})),
         fileAt(s->props.getUserSettings()->getValue("romPath")),
         besideBundle(),
         appRom(),

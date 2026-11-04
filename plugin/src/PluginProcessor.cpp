@@ -81,6 +81,17 @@ juce::String MirageProcessor::restoreProblem() const {
   return restoreProblem_;
 }
 
+juce::String MirageProcessor::saveProblem() const {
+  const std::lock_guard lock(problemMutex_);
+  return saveProblem_;
+}
+
+void MirageProcessor::setSaveProblem(const juce::String& why) {
+  if (why.isNotEmpty()) juce::Logger::writeToLog("Mirage: " + why);
+  const std::lock_guard lock(problemMutex_);
+  saveProblem_ = why;
+}
+
 void MirageProcessor::prepareToPlay(double sampleRate, int maximumExpectedSamplesPerBlock) {
   const std::lock_guard lock(stateMutex_);
   preparedRate_ = sampleRate;
@@ -189,13 +200,15 @@ bool MirageProcessor::await(const std::function<bool()>& done) {
     if (const auto b = host_->status().blocks; b != blocks) {
       blocks = b;
       lastChange = now;
+      pumpingSince.reset();  // blocks run again: a later fallback gets its full second
     }
     // Blocks stopped for 200 ms: the audio is off. Still running after 2 s: the
-    // request is deferred (a disk swap's gap, a key held), so pump anyway.
+    // request is deferred (a disk swap's gap, a key held), so pump anyway. Gives
+    // up after 1 s of failed pumps, or 5 s in all.
     if (neverRan || now - lastChange >= 200ms || now - start >= 2s) {
       if (!pumpingSince) pumpingSince = now;
       if (host_->pumpWhileIdle() && done()) return true;
-      if (now - *pumpingSince >= 1s) return false;
+      if (now - *pumpingSince >= 1s || now - start >= 5s) return false;
     }
     std::this_thread::sleep_for(1ms);
   }
@@ -254,6 +267,10 @@ void MirageProcessor::getStateInformation(juce::MemoryBlock& destData) {
       got.reset();
     }
     if (!got || !got->ok) {  // no snapshot within the wait: the last state rather than none
+      setSaveProblem("The Mirage could not be saved into the project: the audio thread did not answer. " +
+                     (lastBlob_.isEmpty()
+                          ? juce::String("The project holds no state.")
+                          : "The project holds the state from " + lastBlobTime_.toString(true, true) + "."));
       destData = lastBlob_;
       return;
     }
@@ -276,6 +293,8 @@ void MirageProcessor::getStateInformation(juce::MemoryBlock& destData) {
   d.editorW = editorW_.load();
   d.editorH = editorH_.load();
   destData = lastBlob_ = encodePluginState(d);
+  lastBlobTime_ = juce::Time::getCurrentTime();
+  setSaveProblem({});
 }
 
 void MirageProcessor::setStateInformation(const void* data, int sizeInBytes) {
@@ -326,6 +345,7 @@ void MirageProcessor::restoreLocked(const juce::MemoryBlock& blob) {
   restorePending_ = true;
   lastSnapshotSize_ = size;
   lastBlob_ = blob;
+  lastBlobTime_ = juce::Time::getCurrentTime();
   pendingIdentity_ = DiskIdentity{d->diskPath, d->diskFormat, d->diskUntitled};
   if (await([this] { return confirmRestores(); })) finishRestore();
   // Otherwise the 10 Hz timer confirms it; the blob stays pending until then.
@@ -335,9 +355,11 @@ void MirageProcessor::timerCallback() {
   std::unique_lock lock(stateMutex_, std::try_to_lock);
   if (!lock.owns_lock() || !session_) return;  // a state call is running: next tick
   session_->poll();
+  // Always: this also frees restores that a later, unrestorable blob superseded.
+  const bool confirmed = confirmRestores();
   if (!restorePending_)
     adoptIdentity();
-  else if (confirmRestores())
+  else if (confirmed)
     finishRestore();
 }
 

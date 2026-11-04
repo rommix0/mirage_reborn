@@ -61,6 +61,10 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   // Why the project's Mirage could not be restored; empty when it was (or there
   // was nothing to restore). Any thread.
   juce::String restoreProblem() const;
+  // Why the last getStateInformation could not take a snapshot (the audio
+  // thread did not answer) and handed the DAW an older state, or none; empty
+  // once a later one succeeds. Any thread.
+  juce::String saveProblem() const;
 
   juce::AudioProcessorValueTreeState params;
 
@@ -73,6 +77,7 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   // 200 ms (audio stopped), or after 2 s in any case; pumps are retried for 1 s.
   // False if `done` never came true.
   bool await(const std::function<bool()>& done);
+  void setSaveProblem(const juce::String& why);  // logged when not empty
   bool confirmRestores();  // frees the machines restores replaced; true when none is pending
   void finishRestore();    // a confirmed restore: no longer pending; adopt its disk identity
   void adoptIdentity();    // pendingIdentity_ into the DiskSession, unless a save is in flight
@@ -80,7 +85,9 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   juce::SharedResourcePointer<PluginShared> shared_;
   std::unique_ptr<mirage::RealtimeHost> host_;
   std::unique_ptr<mirage::DiskSession> session_;
-  std::atomic<mirage::RealtimeHost*> live_{nullptr};  // host_ once prepared; read by the audio thread
+  // host_, published as soon as startMachine builds it (prepared first if
+  // prepareToPlay already ran); read by the audio thread.
+  std::atomic<mirage::RealtimeHost*> live_{nullptr};
   std::atomic<float>* volume_ = nullptr;              // the parameters' raw values
   std::atomic<float>* inputGain_ = nullptr;
 
@@ -100,11 +107,12 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   juce::MemoryBlock keptBlob_;
   bool restorePending_ = false;
   std::atomic<bool> silent_{false};  // an unrestorable blob: run no machine
-  juce::String restoreProblem_;
-  mutable std::mutex problemMutex_;
+  juce::String restoreProblem_, saveProblem_;
+  mutable std::mutex problemMutex_;  // guards both problem strings
   size_t snapshotsOut_ = 0, restoresOut_ = 0;  // posted, not yet returned
   size_t lastSnapshotSize_ = 768 * 1024;  // a snapshot with a disk is about 610 KB
   juce::MemoryBlock lastBlob_;  // the last state handed out or restored
+  juce::Time lastBlobTime_;     // when it was made
   // The disk identity of a restored machine, waiting for DiskSession to adopt it.
   struct DiskIdentity {
     juce::String path;

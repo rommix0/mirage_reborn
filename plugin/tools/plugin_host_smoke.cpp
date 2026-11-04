@@ -230,6 +230,30 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
     pass("state round trip is bit-identical");
   }
 
+  // 5b. The disk identity survives a restore: the state of an instance restored
+  // with a disk path and format hands them back.
+  {
+    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                         .getNonexistentChildFile("plugin_smoke_SND-A01", ".img");
+    check(diskFile.copyFileTo(tmp), "cannot copy SND-A01 to " + tmp.getFullPathName());
+    PluginStateData d;
+    d.machine = juce::MemoryBlock(booted.data(), booted.size());
+    d.diskPath = tmp.getFullPathName();
+    d.diskFormat = (int)mirage::DiskFormat::Raw;
+    auto c = make();
+    setState(*c, encodePluginState(d));
+    prepare(*c);
+    render(*c, 0.5);
+    const auto back = getState(*c);
+    const auto got = decodePluginState(back.getData(), back.getSize());
+    c->releaseResources();
+    c.reset();
+    tmp.deleteFile();
+    check(got.has_value() && got->diskPath == d.diskPath && got->diskFormat == d.diskFormat && !got->diskUntitled,
+          "the disk identity did not survive (got path '" + (got ? got->diskPath : juce::String()) + "')");
+    pass("disk identity survives a restore");
+  }
+
   // 6. Blobs that cannot be restored: silence, and the same bytes back.
   {
     const auto good = getState(*a);
@@ -270,6 +294,15 @@ int main(int argc, char** argv) {
     std::cerr << "usage: plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img>" << std::endl;
     return 2;
   }
+  // The plugin finds its ROM through this override first (PluginSettings.h), so
+  // the run does not depend on the user's settings. Set before the first
+  // instance: the plugin caches the ROM.
+  const auto rom = juce::File(juce::String::fromUTF8(argv[2])).getFullPathName();
+#ifdef _WIN32
+  SetEnvironmentVariableW(L"MIRAGE_PLUGIN_ROM", rom.toWideCharPointer());
+#else
+  setenv("MIRAGE_PLUGIN_ROM", rom.toRawUTF8(), 1);
+#endif
   juce::ScopedJuceInitialiser_GUI juce;
   try {
     run(juce::File(juce::String::fromUTF8(argv[1])), juce::File(juce::String::fromUTF8(argv[2])),
