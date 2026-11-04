@@ -1107,3 +1107,405 @@ TEST_CASE("host input works before prepare (the buffer grows on first use)") {
   CHECK(host.machineForTest().filters().output(7) == Catch::Approx(0.5).margin(0.01));
   CHECK(host.status().inputPeak == Catch::Approx(0.5f));
 }
+
+// ---- fast-forward (HostOptions::fastDisk) and the calibration gate ----------
+
+namespace {
+
+constexpr size_t kFfBlock = 512;
+constexpr double kFfRate = 48000.0;
+constexpr double kFfBlockSeconds = double(kFfBlock) / kFfRate;
+constexpr uint8_t kSettledLeft = 0xDB, kSettledRight = 0x06;  // "2." "1"
+
+std::unique_ptr<DiskImage> sndA01() {
+  return std::make_unique<DiskImage>(
+      DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+}
+
+// Steps a host in 512-frame blocks at 48 kHz on a virtual clock.
+struct FfDriver {
+  RealtimeHost& host;
+  double now = 0.0;
+  std::vector<float> out = std::vector<float>(kFfBlock);
+  explicit FfDriver(RealtimeHost& h) : host(h) { host.prepare(kFfBlock, kFfRate); }
+  float step() {
+    host.process(out.data(), kFfBlock, kFfRate, now);
+    now += kFfBlockSeconds;
+    float p = 0;
+    for (float s : out) p = std::fmax(p, std::fabs(s));
+    return p;
+  }
+  void steps(int n) {
+    for (int i = 0; i < n; ++i) step();
+  }
+  bool settled() const {
+    const HostStatus s = host.status();
+    return s.display.left == kSettledLeft && s.display.right == kSettledRight;
+  }
+  // Runs until the display is settled and the drive has been idle for 2 s of blocks.
+  bool bootToSettled(int maxBlocks = 6000) {
+    int idle = 0;
+    for (int i = 0; i < maxBlocks && idle < 188; ++i) {
+      step();
+      idle = (settled() && !host.status().driveActive) ? idle + 1 : 0;
+    }
+    return idle >= 188;
+  }
+  // Steps until the drive is on (the ROM starts it a little after power-on).
+  bool untilDriveActive(int maxBlocks = 1000) {
+    for (int i = 0; i < maxBlocks && !host.status().driveActive; ++i) step();
+    return host.status().driveActive;
+  }
+  // Press, hold 12 blocks (>= kMinKeyHoldCycles), release, 12 blocks.
+  void tap(PanelKey k) {
+    host.postKey(k, true);
+    steps(12);
+    host.postKey(k, false);
+    steps(12);
+  }
+};
+
+}  // namespace
+
+TEST_CASE("fast-forward: same machine state as a plain run", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  for (bool mute : {false, true}) {
+    RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{mute, true});
+    host.setOffline(true);
+    FfDriver d(host);
+    REQUIRE(host.postInsert(sndA01()));
+    REQUIRE(d.bootToSettled());
+    CHECK(host.status().blocks > 0);
+
+    Machine m(mirage_test::bootRomBytes());
+    m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+    m.powerOn();
+    Machine& h = host.machineForTest();
+    const uint64_t target = h.cycles();
+    m.runCycles(target - 1);
+    while (m.cycles() < target) m.runCycles(1);
+    REQUIRE(m.cycles() == target);
+
+    const Regs &a = m.cpu().regs(), &b = h.cpu().regs();
+    CHECK(a.a == b.a);
+    CHECK(a.b == b.b);
+    CHECK(a.dp == b.dp);
+    CHECK(a.cc == b.cc);
+    CHECK(a.x == b.x);
+    CHECK(a.y == b.y);
+    CHECK(a.u == b.u);
+    CHECK(a.s == b.s);
+    CHECK(a.pc == b.pc);
+    bool ramSame = true, sampleSame = true;
+    for (uint32_t addr = 0x8000; addr < 0xC000; ++addr)
+      ramSame = ramSame && m.peek(uint16_t(addr)) == h.peek(uint16_t(addr));
+    for (uint32_t addr = 0; addr < Machine::kSampleRamSize; ++addr)
+      sampleSame = sampleSame && m.sampleRam(addr) == h.sampleRam(addr);
+    CHECK(ramSame);
+    CHECK(sampleSame);
+    CHECK(m.display().left == h.display().left);
+    CHECK(m.display().right == h.display().right);
+    REQUIRE(m.disk() != nullptr);
+    CHECK(m.disk()->writeCount() == h.disk()->writeCount());
+    CHECK(m.fdc().sectorsRead() == h.fdc().sectorsRead());
+    CHECK(h.fdc().sectorsRead() > 0);
+  }
+}
+
+TEST_CASE("fast-forward: off by default", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  RealtimeHost host(mirage_test::bootRomBytes());
+  CHECK_FALSE(host.calibrationMuteArmed());
+  FfDriver d(host);
+  REQUIRE(host.postInsert(sndA01()));
+  Machine m(mirage_test::bootRomBytes());
+  m.insertDisk(DiskImage::loadFile(assetPath("Factory Library/IMG/SND-A01.img")));
+  m.powerOn();
+  m.prepare(kFfBlock, kFfRate);
+  std::vector<float> ref(kFfBlock);
+  bool same = true, everActive = false, everFast = false;
+  float peak = 0;
+  for (int i = 0; i < 400; ++i) {  // 4.3 s: the calibration and the disk start
+    d.step();
+    m.render(ref.data(), kFfBlock, kFfRate);
+    same = same && d.out == ref;
+    everActive = everActive || host.status().driveActive;
+    everFast = everFast || host.status().fastForwarding;
+    for (float s : d.out) peak = std::fmax(peak, std::fabs(s));
+  }
+  CHECK(same);
+  CHECK(everActive);
+  CHECK_FALSE(everFast);
+  CHECK_FALSE(host.status().outputMuted);
+  CHECK(host.status().blocks == 400);
+  CHECK(peak > 0.0f);  // the calibration tones are audible
+}
+
+TEST_CASE("gate arming: unknown ROM", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  auto rom = mirage_test::bootRomBytes();
+  REQUIRE(rom[0x5B8] == 0x12);  // the unreached NOP filler
+  RealtimeHost known(rom, HostOptions{true, false});
+  CHECK(known.calibrationMuteArmed());
+  rom[0x5B8] = 0x00;
+  RealtimeHost unknown(rom, HostOptions{true, false});
+  CHECK_FALSE(unknown.calibrationMuteArmed());
+  CHECK_FALSE(RealtimeHost(rom, HostOptions{false, false}).calibrationMuteArmed());
+
+  // Compare the blocks the known ROM's gate held closed from edge to edge.
+  float peakKnown = 0, peakUnknown = 0;
+  bool sawMuted = false;
+  std::vector<float> pk, pu;
+  std::vector<bool> muted;
+  FfDriver a(known), b(unknown);
+  REQUIRE(known.postInsert(sndA01()));
+  REQUIRE(unknown.postInsert(sndA01()));
+  for (int i = 0; i < 1000; ++i) {  // 10.7 s: through the OS-called calibration
+    pk.push_back(a.step());
+    pu.push_back(b.step());
+    muted.push_back(known.status().outputMuted);
+    CHECK_FALSE(unknown.status().outputMuted);
+  }
+  // Blocks with the gate closed from the block before to the block after: the
+  // 5 ms close ramp is over and the 10 ms open ramp has not begun.
+  for (size_t i = 1; i + 1 < muted.size(); ++i) {
+    if (!(muted[i - 1] && muted[i] && muted[i + 1])) continue;
+    sawMuted = true;
+    peakKnown = std::fmax(peakKnown, pk[i]);
+    peakUnknown = std::fmax(peakUnknown, pu[i]);
+  }
+  CHECK(sawMuted);
+  CHECK(peakUnknown > 0.01f);  // audible
+  CHECK(peakKnown < 1e-3f);    // gated (the DC blocker and resampler leave ~-88 dBFS)
+}
+
+TEST_CASE("fast-forward: offline fast-forward stops at the cap", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
+  host.setOffline(true);
+  FfDriver d(host);
+  REQUIRE(host.postInsert(std::make_unique<DiskImage>(DiskImage::blank())));
+  const uint64_t frameCycles = kFfBlock * kCpuClockHz / 48000 + 64;
+  uint64_t prev = 0;
+  int fast = 0;
+  for (int i = 0; i < 400; ++i) {
+    d.step();
+    const uint64_t c = host.status().cycles;
+    CHECK(c - prev <=
+          RealtimeHost::kFastOfflineCapCycles + RealtimeHost::kFastChunkCycles + frameCycles);
+    fast += host.status().fastForwarding ? 1 : 0;
+    prev = c;
+  }
+  CHECK(fast > 0);  // the retry loop's motor-on stretches were fast-forwarded
+}
+
+TEST_CASE("fast-forward: real-time fast-forward stays within half the block", "[assets]") {
+#ifndef NDEBUG
+  SKIP("timing test: Release only");
+#endif
+  REQUIRE_ASSET(romPath());
+  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
+  FfDriver d(host);
+  REQUIRE(host.postInsert(std::make_unique<DiskImage>(DiskImage::blank())));
+  using Clock = std::chrono::steady_clock;
+  double worst = 0;
+  int fast = 0;
+  for (int i = 0; i < 600; ++i) {
+    const auto t0 = Clock::now();
+    d.step();
+    worst = std::fmax(worst, std::chrono::duration<double>(Clock::now() - t0).count());
+    fast += host.status().fastForwarding ? 1 : 0;
+  }
+  WARN("worst block " << worst * 1000 << " ms of " << kFfBlockSeconds * 1000 << " ms");
+  CHECK(worst < kFfBlockSeconds);
+  CHECK(fast > 0);
+}
+
+TEST_CASE("fast-forward: input during a fast-forward is kept") {
+  // Motor on (VIA PB4 low, a Restore with h=0), then the ACIA receiver: bytes
+  // land at $8000,X+.
+  std::vector<uint8_t> prog = {0x86, 0x1F, 0xB7, 0xE2, 0x02, 0x7F, 0xE2, 0x00,
+                               0x86, 0x00, 0xB7, 0xE8, 0x00};
+  prog.insert(prog.end(), kAciaReceiver.begin(), kAciaReceiver.end());
+  RealtimeHost host(romFrom({prog}), HostOptions{false, true});
+  FfDriver d(host);
+  REQUIRE(host.postInsert(std::make_unique<DiskImage>(DiskImage::blank())));
+  d.step();
+  REQUIRE(d.untilDriveActive(20));
+  d.step();
+  REQUIRE(host.status().fastForwarding);
+  const uint64_t taken = host.status().midiBytesTaken;
+  const uint8_t note[] = {0x90, 0x3C, 0x64};
+  REQUIRE(host.postMidi(note, d.now));
+  d.step();
+  CHECK(host.status().midiBytesTaken == taken + 3);
+  CHECK(host.status().fastForwarding);
+  for (int i = 0; i < 200 && host.machineForTest().peek(0x8002) != 0x64; ++i) d.step();
+  Machine& m = host.machineForTest();
+  CHECK(m.peek(0x8000) == 0x90);
+  CHECK(m.peek(0x8001) == 0x3C);
+  CHECK(m.peek(0x8002) == 0x64);
+
+  // A key pressed and released in one fast-forwarded block is held long enough.
+  RealtimeHost h2(romFrom({prog}), HostOptions{false, true});
+  FfDriver d2(h2);
+  REQUIRE(h2.postInsert(std::make_unique<DiskImage>(DiskImage::blank())));
+  REQUIRE(d2.untilDriveActive(20));
+  d2.step();
+  const uint64_t pressed = h2.status().cycles;
+  REQUIRE(h2.postKey(PanelKey::Enter, true));
+  REQUIRE(h2.postKey(PanelKey::Enter, false));
+  bool released = false;
+  for (int i = 0; i < 100 && !released; ++i) {
+    d2.step();
+    released = !h2.machineForTest().keyDown(PanelKey::Enter);
+    if (released) CHECK(h2.status().cycles - pressed >= RealtimeHost::kMinKeyHoldCycles);
+  }
+  CHECK(released);
+}
+
+TEST_CASE("fast-forward: fade-in after the trigger ends", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{false, true});
+  host.setOffline(true);
+  FfDriver d(host);
+  REQUIRE(host.postInsert(sndA01()));
+  REQUIRE(d.bootToSettled());
+  const uint8_t on[] = {0x90, 60, 100};
+  d.tap(PanelKey::LoadLower);
+  d.tap(PanelKey::K1);
+  REQUIRE(host.postMidi(on, d.now));
+  d.steps(2);  // sounding
+
+  // Press Enter. The load starts within a block or two; find the block that
+  // starts with the drive on and ends with it off (the trigger ended inside it,
+  // so it was rendered), and replay it on a copy of the state before it to get
+  // the unfaded block.
+  host.postKey(PanelKey::Enter, true);
+  bool checked = false;
+  float refPeak = 0, rampDrop = 0;
+  for (int i = 0; i < 3000 && !checked; ++i) {
+    if (i == 12) host.postKey(PanelKey::Enter, false);
+    std::vector<uint8_t> s0;
+    const bool trigger = host.status().driveActive;
+    if (trigger) {
+      s0 = host.machineForTest().saveState();
+      // A note in the block's MIDI: the OS plays it once the load is over.
+    }
+    d.step();
+    if (!trigger || host.status().driveActive) continue;
+    REQUIRE(host.status().fastForwarding);
+    Machine ref(mirage_test::bootRomBytes());
+    ref.loadState(s0);
+    ref.prepare(kFfBlock, kFfRate);
+    while (ref.driveActive() || ref.outputMuted()) ref.runCycles(RealtimeHost::kFastChunkCycles);
+    std::vector<float> un(kFfBlock);
+    ref.render(un.data(), kFfBlock, kFfRate);
+    const size_t len = size_t(RealtimeHost::kFadeInSeconds * kFfRate);
+    CHECK(d.out[0] == 0.0f);
+    for (size_t k = 0; k < kFfBlock; ++k) {
+      const float g = k < len ? float(double(k) / double(len)) : 1.0f;
+      REQUIRE(d.out[k] == Catch::Approx(un[k] * g).margin(1e-9));
+      if (k >= len) refPeak = std::fmax(refPeak, std::fabs(un[k]));
+      else rampDrop = std::fmax(rampDrop, std::fabs(un[k] - d.out[k]));
+    }
+    checked = true;
+  }
+  REQUIRE(checked);
+  // The OS's note is mostly gone after a load, but what is left (about -72 dBFS)
+  // is real signal: the ramp took part of it away and the tail is untouched.
+  CHECK(refPeak > 1e-4f);
+  CHECK(rampDrop > 1e-5f);
+}
+
+TEST_CASE("fast-forward: process allocates nothing, real time and offline", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  for (bool offline : {false, true}) {
+    RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{true, true});
+    host.setOffline(offline);
+    FfDriver d(host);
+    REQUIRE(host.postInsert(sndA01()));
+    const uint8_t on[] = {0x90, 60, 100};
+    size_t allocations = 0, frees = 0, fast = 0;
+    for (int i = 0; i < 900; ++i) {
+      if (i == 5) REQUIRE(host.postMidi(on, d.now));
+      {
+        AllocationScope scope;
+        d.step();
+        allocations += scope.count();
+        frees += scope.frees();
+      }
+      fast += host.status().fastForwarding ? 1 : 0;
+    }
+    CHECK(allocations == 0);
+    CHECK(frees == 0);
+    CHECK(fast > 0);
+  }
+}
+
+TEST_CASE("fast-forward: a factory boot is playable fast (Release)", "[assets]") {
+#ifndef NDEBUG
+  SKIP("timing test: Release only");
+#endif
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath("Factory Library/IMG/SND-A01.img"));
+  using Clock = std::chrono::steady_clock;
+  RealtimeHost host(mirage_test::bootRomBytes(), HostOptions{true, true});
+  FfDriver d(host);
+  const auto t0 = Clock::now();
+  auto elapsed = [&] { return std::chrono::duration<double>(Clock::now() - t0).count(); };
+  // One paced block: sleep to the block's wall-clock slot, then process.
+  int n = 0;
+  auto paced = [&] {
+    std::this_thread::sleep_until(t0 + std::chrono::duration<double>(n++ * kFfBlockSeconds));
+    d.now = elapsed();
+    return d.step();
+  };
+  REQUIRE(host.postInsert(sndA01()));
+  bool posted = false;
+  double playable = -1, settledAt = -1;
+  while (elapsed() < 20.0 && playable < 0) {
+    const float p = paced();
+    if (!posted && d.settled() && !host.status().driveActive) {
+      settledAt = elapsed();
+      const uint8_t on[] = {0x90, 60, 100};
+      REQUIRE(host.postMidi(on, d.now));
+      posted = true;
+    }
+    if (posted && p > 0.05f) playable = elapsed();
+  }
+  WARN("boot to first audible note: " << playable << " s (display settled at " << settledAt
+                                       << " s)");
+  REQUIRE(playable > 0);
+  CHECK(playable < 3.0);
+
+  // Panel Load Lower: Load Lower, 1, Enter, until the drive has stopped.
+  const uint8_t off[] = {0x80, 60, 0};
+  host.postMidi(off, d.now);
+  auto tapPaced = [&](PanelKey k) {
+    host.postKey(k, true);
+    for (int i = 0; i < 12; ++i) paced();
+    host.postKey(k, false);
+    for (int i = 0; i < 12; ++i) paced();
+  };
+  tapPaced(PanelKey::LoadLower);
+  tapPaced(PanelKey::K1);
+  host.postKey(PanelKey::Enter, true);
+  for (int i = 0; i < 12; ++i) paced();
+  const double loadStart = elapsed();
+  host.postKey(PanelKey::Enter, false);
+  bool sawActive = false;
+  int idle = 0;
+  while (elapsed() < loadStart + 20.0 && idle < 94) {
+    paced();
+    sawActive = sawActive || host.status().driveActive;
+    idle = (sawActive && !host.status().driveActive) ? idle + 1 : 0;
+  }
+  WARN("panel Load Lower: " << elapsed() - loadStart - 94 * kFfBlockSeconds << " s");
+  CHECK(sawActive);
+}

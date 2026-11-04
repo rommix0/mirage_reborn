@@ -42,6 +42,21 @@ struct HostStatus {
   // count as 0 (as at the jack), so the peak is always finite. 0 when the last
   // block had no input (or its rate was unusable).
   float inputPeak = 0.0f;
+  // outputMuted: Machine::outputMuted() at the end of the block. fastForwarding:
+  // the last block was fast-forwarded, entirely or in part. blocks: process()
+  // calls that ran the machine (not those skipped for an unusable rate).
+  bool outputMuted = false, fastForwarding = false;
+  uint64_t blocks = 0;
+};
+
+// Opt-in behaviours, both off by default (the standalone never turns them on).
+//  muteCalibration: arm the output gate over the ROM's filter-calibration
+//    routine, only if the ROM is the known one (isKnownBootRom).
+//  fastDisk: while the drive motor is on or the gate is closed, run the machine
+//    faster than real time with silent output (see process()).
+struct HostOptions {
+  bool muteCalibration = false;
+  bool fastDisk = false;
 };
 
 // Why a disk came back from the audio thread (takeReturnedDisk).
@@ -112,15 +127,29 @@ class RealtimeHost {
   static constexpr size_t kReturnQueueDisks = 64;
   // Wave writes in flight each way (UI -> audio, and back).
   static constexpr size_t kWaveQueueWrites = 16;
+  // Fast-forward: the machine runs in chunks of kFastChunkCycles; in real time
+  // it may use kFastBudgetFraction of a block's duration, offline at most
+  // kFastOfflineCapCycles per block. kFadeInSeconds: the gain ramp 0 -> 1 over
+  // the rendered output after a fast-forward.
+  static constexpr uint64_t kFastChunkCycles = kCpuClockHz / 1000;
+  static constexpr uint64_t kFastOfflineCapCycles = 60 * kCpuClockHz;
+  static constexpr double kFastBudgetFraction = 0.5;
+  static constexpr double kFadeInSeconds = 0.010;
 
   // Throws std::invalid_argument unless bootRom is 4096 bytes. The machine is
   // powered on with the drive empty.
-  explicit RealtimeHost(std::span<const uint8_t> bootRom);
+  explicit RealtimeHost(std::span<const uint8_t> bootRom, HostOptions options = {});
   ~RealtimeHost();  // frees anything still queued, in either direction
   RealtimeHost(const RealtimeHost&) = delete;
   RealtimeHost& operator=(const RealtimeHost&) = delete;
 
   std::array<uint8_t, 20> romSha1() const { return romSha1_; }  // any thread
+  // True when the calibration gate is armed (options.muteCalibration and a
+  // known ROM). Any thread.
+  bool calibrationMuteArmed() const { return calibrationMuteArmed_; }
+  // Any thread. Offline pacing for the fast-forward (bounded by cycles per
+  // block, not wall-clock); only matters with fastDisk.
+  void setOffline(bool offline) { offline_.store(offline, std::memory_order_relaxed); }
 
   // prepare() allocates (Machine::prepare), so it must never run concurrently
   // with process() or render(): call it before the first block and whenever
@@ -140,6 +169,13 @@ class RealtimeHost {
   //  4. at the end of every segment, releases any key whose minimum hold has
   //     passed and makes any swap insert that is due;
   //  5. publishes status().
+  // With HostOptions::fastDisk, if the drive is active or the output gate is
+  // closed after step 1, the block's MIDI is queued at once (in order) and the
+  // machine runs in kFastChunkCycles chunks (applyDue() after each) until the
+  // trigger ends, the budget is used (real time: half the block's duration of
+  // wall-clock) or, offline, kFastOfflineCapCycles have run. If the trigger
+  // ended the block is then rendered normally, faded in; otherwise it is
+  // silence. Emulated state is the same as without fast-forward.
   // An invalid hostRate (0, NaN, out of Machine's range) still applies the UI
   // queue and the wave writes and publishes status, but writes silence and
   // advances nothing. MIDI commands waiting meanwhile are discarded and counted
@@ -244,6 +280,10 @@ class RealtimeHost {
   // Renders in[0..n) -> out[0..n) (in null: nothing plugged in) through the gain
   // buffer in chunks, and raises blockPeak_.
   void renderSegment(const float* in, float* out, size_t n, double hostRate);
+  bool fastTrigger() const;
+  // Runs chunks while the trigger holds and the budget lasts; true if the
+  // trigger ended.
+  bool fastForward(size_t frames, double hostRate);
 
   std::array<uint8_t, 20> romSha1_{};
   // q_ is declared before machine_ so machine_ is destroyed first: the
@@ -263,6 +303,12 @@ class RealtimeHost {
   size_t maxFrames_ = 0;            // prepare()'s block size; 0 = never prepared
   std::vector<float> inputBuf_;     // the gain-applied input; sized by prepare()
   float blockPeak_ = 0.0f;          // this block's input peak so far
+  bool fastDisk_ = false, calibrationMuteArmed_ = false;
+  std::atomic<bool> offline_{false};
+  bool fading_ = false;             // a fade-in is pending on the rendered output
+  size_t fadePos_ = 0;              // frames faded so far
+  bool fastForwarding_ = false;     // the current block was fast-forwarded
+  uint64_t blocks_ = 0;
 
   // Published status (relaxed: each is a separate value; see HostStatus).
   std::atomic<uint16_t> display_{0};  // left | right << 8
@@ -272,6 +318,8 @@ class RealtimeHost {
   std::atomic<uint64_t> midiTakenPub_{0}, midiFlushedPub_{0};
   std::atomic<size_t> midiDepthPub_{0};
   std::atomic<float> inputGain_{1.0f}, inputPeakPub_{0.0f};
+  std::atomic<bool> outputMutedPub_{false}, fastForwardingPub_{false};
+  std::atomic<uint64_t> blocksPub_{0};
 };
 
 }  // namespace mirage

@@ -1,9 +1,11 @@
 #include "mirage/realtime_host.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <utility>
 
+#include "mirage/boot_rom.h"
 #include "mirage/spsc_queue.h"
 
 namespace mirage {
@@ -51,9 +53,15 @@ struct RealtimeHost::Queues {
   std::array<size_t, kMidiCommandsPerBlock> offsets{};
 };
 
-RealtimeHost::RealtimeHost(std::span<const uint8_t> bootRom)
-    : q_(std::make_unique<Queues>()), machine_(std::make_unique<Machine>(bootRom)) {
+RealtimeHost::RealtimeHost(std::span<const uint8_t> bootRom, HostOptions options)
+    : q_(std::make_unique<Queues>()),
+      machine_(std::make_unique<Machine>(bootRom)),
+      fastDisk_(options.fastDisk) {
   romSha1_ = machine_->romSha1();
+  if (options.muteCalibration && isKnownBootRom(romSha1_)) {
+    machine_->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+    calibrationMuteArmed_ = true;
+  }
   machine_->onMidiOut = [this](uint8_t byte, uint64_t cycle) {
     if (!q_->midiOut.push(MidiOutByte{byte, cycle})) midiDropped_.fetch_add(1, kRelaxed);
   };
@@ -133,9 +141,28 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
     midiBytesTaken_ += q_->events[count++].size;
   }
 
+  // Fast-forward: queue the block's MIDI at once, run chunks, and if the
+  // trigger ended render the block normally (its MIDI is already placed).
+  fastForwarding_ = false;
+  bool silent = false;
+  if (fastDisk_ && fastTrigger()) {
+    fastForwarding_ = true;
+    for (size_t i = 0; i < count; ++i)
+      machine_->queueMidi(std::span<const uint8_t>(q_->events[i].bytes.data(), q_->events[i].size));
+    count = 0;
+    silent = !fastForward(frames, hostRate);
+    fading_ = true;
+    fadePos_ = 0;
+  }
+  ++blocks_;
+
   // Render up to each event, queue it, carry on; due releases and swap
   // inserts are applied at the end of every segment.
   size_t pos = 0;
+  if (silent) {
+    std::fill_n(out, frames, 0.0f);
+    pos = frames;
+  }
   for (size_t i = 0; i < count; ++i) {
     if (q_->offsets[i] > pos) {
       renderSegment(in ? in + pos : nullptr, out + pos, q_->offsets[i] - pos, hostRate);
@@ -149,7 +176,33 @@ void RealtimeHost::process(const float* in, float* out, size_t frames, double ho
     renderSegment(in ? in + pos : nullptr, out + pos, frames - pos, hostRate);
     applyDue();
   }
+  if (fading_ && !silent) {
+    const double len = std::max(1.0, kFadeInSeconds * hostRate);
+    for (size_t i = 0; i < frames && fading_; ++i, ++fadePos_) {
+      out[i] *= float(std::min(1.0, double(fadePos_) / len));
+      fading_ = double(fadePos_ + 1) < len;
+    }
+  }
   publishStatus();
+}
+
+bool RealtimeHost::fastTrigger() const { return machine_->driveActive() || machine_->outputMuted(); }
+
+bool RealtimeHost::fastForward(size_t frames, double hostRate) {
+  const bool offline = offline_.load(kRelaxed);
+  const auto start = std::chrono::steady_clock::now();
+  const double budget = kFastBudgetFraction * double(frames) / hostRate;
+  uint64_t ran = 0;
+  while (fastTrigger()) {
+    if (offline ? ran >= kFastOfflineCapCycles
+                : std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >=
+                      budget)
+      return false;
+    machine_->runCycles(kFastChunkCycles);
+    ran += kFastChunkCycles;
+    applyDue();
+  }
+  return true;
 }
 
 void RealtimeHost::applyUi() {
@@ -301,6 +354,9 @@ void RealtimeHost::publishStatus() {
   midiFlushedPub_.store(midiBytesFlushed_, std::memory_order_release);
   midiTakenPub_.store(midiBytesTaken_, std::memory_order_release);
   inputPeakPub_.store(blockPeak_, kRelaxed);
+  outputMutedPub_.store(machine_->outputMuted(), kRelaxed);
+  fastForwardingPub_.store(fastForwarding_, kRelaxed);
+  blocksPub_.store(blocks_, kRelaxed);
 }
 
 bool RealtimeHost::postMidi(std::span<const uint8_t> bytes, double timeSeconds) {
@@ -415,6 +471,9 @@ HostStatus RealtimeHost::status() const {
   s.midiBytesFlushed = midiFlushedPub_.load(std::memory_order_acquire);
   s.midiQueueDepth = midiDepthPub_.load(kRelaxed);
   s.inputPeak = inputPeakPub_.load(kRelaxed);
+  s.outputMuted = outputMutedPub_.load(kRelaxed);
+  s.fastForwarding = fastForwardingPub_.load(kRelaxed);
+  s.blocks = blocksPub_.load(kRelaxed);
   return s;
 }
 
