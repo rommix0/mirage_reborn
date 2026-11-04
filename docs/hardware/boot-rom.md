@@ -440,7 +440,7 @@ only for the OS (§10).
 | `$F52D` | T2=5000, IER=`$A6`, DP=`$80` | `$9F74` |
 | `$F541` | IER=`$7F`, ACIA reset, ORB `$00`→`$30`, ORA-nh=`$18` (display off) | `$9F6B` |
 | `$F55B`, `$F564` | Copy Y bytes X→U; swap Y bytes X↔U | `$9FE0` |
-| `$F571` | Filter calibration. Requires B=`$10`; otherwise "O.S." and a reboot. Sets ORB=`$10` (mux 0). Writes filter CVs through `$F5DC` (X=`$E418` → `$E418`, `$E408`, `$E410`). Times the oscillation of the DOC A/D (`$ECE2`) against the thresholds `$90`/`$70` and adjusts the CV until the count is in `$80..$85`, then stores `B-$7A` at `$18,U`. | `$B976` (X=`$E418`, B=`$10`, U=`$B050`) |
+| `$F571`-`$F5E6` | Filter calibration. The whole routine is `$F571-$F5E6` (wait loop `$F5BE`, CV writes `$F5DC`); the only jump out of it is `JMP $FC91`, the "O.S." error. The plugin's output gate (`Machine::setOutputMuteRange`, `kCalibrationRoutineFirst/Last` in `host/include/mirage/boot_rom.h`) keys on exactly this PC range; `$F5E7`, just after it, is the separate per-note routine and is outside it. Requires B=`$10`; otherwise "O.S." and a reboot. Sets ORB=`$10` (mux 0). Writes filter CVs through `$F5DC` (X=`$E418` → `$E418`, `$E408`, `$E410`). Times the oscillation of the DOC A/D (`$ECE2`) against the thresholds `$90`/`$70` and adjusts the CV until the count is in `$80..$85`, then stores `B-$7A` at `$18,U`. | `$B976` (X=`$E418`, B=`$10`, U=`$B050`) |
 | `$F5E7`, `$F5F1`, `$F6DD` | Register writes with interrupts masked (`ORCC #$50` … `ANDCC #$AF`). Arguments come on the stack or in Y-relative operands. Probably DOC voice parameters (to be confirmed with the OS). | `$8AE4`, `$8C7C`, `$8BB9` |
 
 Heads-up for first boot (Task 9) and filters (Task 11). Each A/D wait loop in

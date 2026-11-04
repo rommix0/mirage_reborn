@@ -4,6 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <span>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -11,6 +14,7 @@
 
 #include "asset_paths.h"
 #include "booted_machine.h"
+#include "mirage/boot_rom.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 
@@ -458,4 +462,134 @@ TEST_CASE("machine trace skips steps spent waiting in SYNC") {
   REQUIRE(pcs.size() == 2);
   CHECK(pcs[0] == 0xF000);
   CHECK(pcs[1] == 0xF004);
+}
+
+// ---- the calibration output gate (Plan 5 Task 2) ---------------------------
+
+namespace {
+
+constexpr double kGateHost = 48000.0;
+
+struct GateRun {
+  std::vector<float> out;
+  uint64_t first = 0, last = 0;  // cycles() of the first and last instruction fetched in the range
+  uint64_t cycles = 0;
+  std::vector<uint8_t> ram, sampleRam;
+  DisplayState display;
+  bool everMuted = false;
+};
+
+GateRun gateBoot(std::span<const uint8_t> rom, const std::filesystem::path& disk, bool armed,
+                 double seconds, bool trace) {
+  GateRun g;
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  if (armed) m.setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  if (trace)
+    m.setTrace([&g, &m](uint16_t pc, const Regs&) {
+      if (pc >= kCalibrationRoutineFirst && pc <= kCalibrationRoutineLast) {
+        if (g.first == 0) g.first = m.cycles();
+        g.last = m.cycles();
+      }
+    });
+  m.powerOn();
+  m.prepare(256, kGateHost);
+  const size_t blocks = size_t(seconds * kGateHost / 256.0);
+  g.out.resize(blocks * 256);
+  for (size_t b = 0; b < blocks; ++b) {
+    m.render(g.out.data() + b * 256, 256, kGateHost);
+    g.everMuted = g.everMuted || m.outputMuted();
+  }
+  g.cycles = m.cycles();
+  for (uint32_t a = 0x8000; a < 0xC000; ++a) g.ram.push_back(m.peek(uint16_t(a)));
+  for (uint32_t a = 0; a < Machine::kSampleRamSize; ++a) g.sampleRam.push_back(m.sampleRam(a));
+  g.display = m.display();
+  return g;
+}
+
+size_t sampleAt(uint64_t cycle, double extraMs) {
+  return size_t((double(cycle) / double(kCpuClockHz) + extraMs / 1000.0) * kGateHost);
+}
+
+bool allZero(const std::vector<float>& v, size_t from, size_t to) {
+  for (size_t i = from; i < to; ++i)
+    if (v[i] != 0.0f) return false;
+  return true;
+}
+
+float peak(const std::vector<float>& v, size_t from, size_t to) {
+  float p = 0;
+  for (size_t i = from; i < to; ++i) p = std::max(p, std::abs(v[i]));
+  return p;
+}
+
+bool sameRange(const std::vector<float>& a, const std::vector<float>& b, size_t from, size_t to) {
+  return std::memcmp(a.data() + from, b.data() + from, (to - from) * sizeof(float)) == 0;
+}
+
+void checkGateSilent(const std::filesystem::path& disk, double seconds, bool full) {
+  LOAD_ROM(rom);
+  const GateRun a = gateBoot(rom, disk, false, seconds, true);
+  const GateRun b = gateBoot(rom, disk, true, seconds, false);
+  REQUIRE(a.first != 0);
+  const size_t s0 = sampleAt(a.first, 14), s1 = sampleAt(a.last, 19);
+  REQUIRE(s1 < a.out.size());
+  CHECK(allZero(b.out, s0, s1));
+  CHECK(peak(a.out, s0, s1) > 0.1f);
+  if (!full) return;
+  const size_t pre = sampleAt(a.first, 0), post = sampleAt(a.last, 60);
+  CHECK(sameRange(a.out, b.out, 0, pre));
+  CHECK(sameRange(a.out, b.out, post, a.out.size()));
+  CHECK(a.cycles == b.cycles);
+  CHECK(a.ram == b.ram);
+  CHECK(a.sampleRam == b.sampleRam);
+  CHECK(a.display.left == b.display.left);
+  CHECK(a.display.right == b.display.right);
+}
+
+}  // namespace
+
+TEST_CASE("calibration gate: muted for the whole calibration, unchanged elsewhere", "[assets]") {
+  const auto disk = assetPath("Factory Library/IMG/SND-A01.img");
+  REQUIRE_ASSET(disk);
+  checkGateSilent(disk, 9.0, true);
+}
+
+TEST_CASE("calibration gate: masos and Soundprocess are muted the same way", "[assets]") {
+  const auto masos = assetPath("EnsoniqOS/masos");
+  const auto sp = assetPath("Soundprocess/Soundprocess OS/Soundprocess OS.img");
+  REQUIRE_ASSET(masos);
+  REQUIRE_ASSET(sp);
+  checkGateSilent(masos, 9.0, false);
+  checkGateSilent(sp, 9.0, false);
+}
+
+TEST_CASE("calibration gate: disarmed by default and by clear", "[assets]") {
+  LOAD_ROM(rom);
+  const auto disk = assetPath("Factory Library/IMG/SND-A01.img");
+  REQUIRE_ASSET(disk);
+  Machine m(rom);
+  m.insertDisk(DiskImage::loadFile(disk));
+  m.powerOn();
+  bool any = false;
+  for (int i = 0; i < 700; ++i) {  // 7 s in 10 ms steps: through the first calibration
+    m.runCycles(kSecond / 100);
+    any = any || m.outputMuted();
+  }
+  CHECK_FALSE(any);
+
+  Machine n(rom);
+  n.insertDisk(DiskImage::loadFile(disk));
+  n.setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  n.powerOn();
+  bool sawMuted = false;
+  for (int i = 0; i < 700 && !sawMuted; ++i) {
+    n.runCycles(kSecond / 100);
+    sawMuted = n.outputMuted();
+  }
+  REQUIRE(sawMuted);
+  n.clearOutputMuteRange();
+  CHECK_FALSE(n.outputMuted());
+  n.runCycles(kSecond / 100);
+  CHECK_FALSE(n.outputMuted());
 }

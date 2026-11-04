@@ -98,6 +98,7 @@ Machine::Machine(std::span<const uint8_t> bootRom)
     for (int ch = 0; ch < FilterBank::kVoices; ++ch) v[ch] = float(sums[ch]) * kVoiceScale;
     float mix = 0.0f;
     filters_.process(in, doc_.sampleRate(), mix);
+    updateGate();
     if (rendering_) pushMix(mix);
     if (onMix) onMix(mix);
   };
@@ -136,6 +137,7 @@ void Machine::powerOn() {
   jack_ = 0.0f;
   jackConnected_ = false;
   dcIn_ = dcOut_ = lastOut_ = 0.0f;
+  openGate();
   renderCycleFrac_ = 0.0;
   pending_.clear();
   updateFirq();
@@ -165,6 +167,21 @@ void Machine::runCycles(uint64_t eCycles) {
   credit_ = uint32_t(done - eCycles);
 }
 
+void Machine::updateGate() {
+  if (!muteArmed_) return;
+  const uint16_t pc = cpu_.regs().pc;
+  const float scan = float(double(kCpuClockHz) / doc_.sampleRate());  // cycles per scan
+  if (pc >= muteFirst_ && pc <= muteLast_) {
+    gateHolding_ = true;
+    gateLastInCycle_ = cycles_;
+    gateGain_ = std::max(0.0f, gateGain_ - scan / float(kMuteCloseCycles));
+  } else if (gateHolding_) {
+    if (cycles_ - gateLastInCycle_ >= kMuteHoldCycles) gateHolding_ = false;
+  } else if (gateGain_ < 1.0f) {
+    gateGain_ = std::min(1.0f, gateGain_ + scan / float(kMuteOpenCycles));
+  }
+}
+
 void Machine::pushMix(float mix) {
   // One-pole DC blocker y = x - x1 + R y1 (corner kDcBlockHz at the scan rate),
   // then the fixed output gain.
@@ -174,7 +191,7 @@ void Machine::pushMix(float mix) {
   dcIn_ = mix;
   dcOut_ = y;
   resampler_.setInputRate(rate);
-  resampler_.push(y * kOutputGain);
+  resampler_.push(y * kOutputGain * gateGain_);
   float s;
   while (resampler_.pop(s)) pending_.push_back(softClip(s));
 }
@@ -607,6 +624,15 @@ void Machine::loadState(std::span<const uint8_t> data) {
   updateIrq();
   updateNmi();
   updateFirq();
+  openGate();
+  if (muteArmed_) {
+    const uint16_t pc = cpu_.regs().pc;
+    if (pc >= muteFirst_ && pc <= muteLast_) {
+      gateGain_ = 0.0f;
+      gateHolding_ = true;
+      gateLastInCycle_ = cycles_;
+    }
+  }
 }
 
 }  // namespace mirage

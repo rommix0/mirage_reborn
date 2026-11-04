@@ -194,6 +194,30 @@ class Machine : private Bus {
   // True after a render with an input buffer, false after one without (saved
   // state; it also decides what A/D mux 1 reads).
   bool jackConnected() const { return jackConnected_; }
+  // Output gate (off by default; the standalone never arms it). While the PC
+  // is in first..last (inclusive) at a DOC scan, the gain applied to that
+  // scan's mix (after the DC blocker and kOutputGain, before the output
+  // resampler) falls to 0 over kMuteCloseCycles; once the PC has been out of
+  // the range for kMuteHoldCycles it rises back to 1 over kMuteOpenCycles. It
+  // is updated on every scan, in render() and runCycles() alike, and changes no
+  // emulated state. clearOutputMuteRange() disarms it and opens it at once.
+  // powerOn() keeps the range and opens the gate. Not saved: loadState() leaves
+  // it closed and holding if the restored PC is in an armed range, open
+  // otherwise.
+  static constexpr uint32_t kMuteCloseCycles = 10'000;  // 5 ms
+  static constexpr uint32_t kMuteHoldCycles = 40'000;   // 20 ms
+  static constexpr uint32_t kMuteOpenCycles = 20'000;   // 10 ms
+  void setOutputMuteRange(uint16_t first, uint16_t last) {
+    muteFirst_ = first;
+    muteLast_ = last;
+    muteArmed_ = true;
+  }
+  void clearOutputMuteRange() {
+    muteArmed_ = false;
+    openGate();
+  }
+  // True while the gate is not fully open: closing, closed, holding or opening.
+  bool outputMuted() const { return gateGain_ < 1.0f || gateHolding_; }
   // Output scale of render(), before the soft clip.
   static constexpr float kOutputGain = 0.5f;
   // Linear to +-0.75, then 0.75 + 0.25 tanh((|x| - 0.75) / 0.25): odd,
@@ -246,6 +270,8 @@ class Machine : private Bus {
   void updateFirq();
   // render(): one raw mix sample from a DOC scan into the audio stream.
   void pushMix(float mix);
+  void updateGate();  // per DOC scan
+  void openGate() { gateGain_ = 1.0f; gateHolding_ = false; }
   void saveAudio(StateWriter&) const;
   void loadAudio(StateReader&);  // commits only on success
   void saveJack(StateWriter&) const;
@@ -287,6 +313,13 @@ class Machine : private Bus {
   std::vector<float> pending_;        // resampled samples not yet handed out
   float lastOut_ = 0.0f;              // last sample handed out (held on an underrun)
   bool rendering_ = false;            // inside render(): pushMix feeds pending_
+
+  // Output gate (not saved; see setOutputMuteRange).
+  bool muteArmed_ = false;
+  uint16_t muteFirst_ = 0, muteLast_ = 0;
+  float gateGain_ = 1.0f;
+  bool gateHolding_ = false;     // the PC was in the range less than kMuteHoldCycles ago
+  uint64_t gateLastInCycle_ = 0;  // cycles() at the last scan with the PC in the range
 
   // Audio input jack (saved). inputResampler_ takes host samples (input rate =
   // the host rate) and gives one sample per DOC scan (output rate = the scan

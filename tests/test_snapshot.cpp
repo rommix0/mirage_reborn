@@ -12,6 +12,7 @@
 
 #include "asset_paths.h"
 #include "booted_machine.h"
+#include "mirage/boot_rom.h"
 #include "mirage/clocks.h"
 #include "mirage/machine.h"
 #include "mirage/state_io.h"
@@ -546,4 +547,58 @@ TEST_CASE("snapshot: an unplugged jack is saved as unplugged, and the old flag i
   bad.resize(bad.size() - 7);
   CHECK_THROWS_AS(b.loadState(bad), StateError);
   CHECK(b.saveState() == unplugged);
+}
+
+// ---- the calibration output gate over a snapshot (Plan 5 Task 2) -----------
+
+namespace {
+
+std::unique_ptr<Machine> gateMidCalibration(bool armed) {
+  auto m = std::make_unique<Machine>(bootRomBytes());
+  m->insertDisk(DiskImage::loadFile(assetPath(imagePath())));
+  if (armed) m->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  m->powerOn();
+  bool in = false;
+  for (int i = 0; i < 8000 && !in; ++i) {  // stop with the PC inside the routine
+    m->runCycles(kSecond / 1000);
+    const uint16_t pc = m->cpu().regs().pc;
+    in = pc >= kCalibrationRoutineFirst && pc <= kCalibrationRoutineLast;
+  }
+  REQUIRE(in);
+  return m;
+}
+
+}  // namespace
+
+TEST_CASE("calibration gate: derived after loadState", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath(imagePath()));
+  const auto snap = gateMidCalibration(false)->saveState();
+  CHECK(snap == gateMidCalibration(true)->saveState());  // not saved, no version change
+  CHECK(getU32(snap, 4) == 5);
+
+  Machine armed(bootRomBytes());
+  armed.setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  armed.loadState(snap);
+  CHECK(armed.outputMuted());
+  std::vector<float> buf(256, 1.0f);
+  armed.prepare(256, kHost);
+  armed.render(buf.data(), 256, kHost);
+  for (float x : buf) REQUIRE(x == 0.0f);
+
+  Machine off(bootRomBytes());
+  off.loadState(snap);
+  CHECK_FALSE(off.outputMuted());
+}
+
+TEST_CASE("calibration gate: a note after boot is untouched", "[assets]") {
+  REQUIRE_ASSET(romPath());
+  REQUIRE_ASSET(assetPath(imagePath()));
+  auto plain = bootedMachine(kImage);
+  auto armed = bootedMachine(kImage);
+  armed->setOutputMuteRange(kCalibrationRoutineFirst, kCalibrationRoutineLast);
+  const std::vector<float> a = renderNote(*plain);
+  const std::vector<float> b = renderNote(*armed);
+  CHECK(sameBits(a, b));
+  CHECK_FALSE(armed->outputMuted());
 }
