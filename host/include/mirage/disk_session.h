@@ -66,8 +66,9 @@ class DiskSession {
   // takes on its identity, as saved with the project, without posting an
   // insert. title() and startSave() then behave as if it had been opened from
   // `path` in `format` (or, untitled, made by newBlank()); whether it is
-  // modified comes from the restored disk's dirty flag.
-  void adoptRestored(const std::filesystem::path& path, DiskFormat format, bool untitled);
+  // modified comes from the restored disk's dirty flag. False, changing
+  // nothing, while a save is in flight (its copy is of the replaced disk).
+  bool adoptRestored(const std::filesystem::path& path, DiskFormat format, bool untitled);
   // Starts a save to `file` (current path when empty, in the current format;
   // otherwise in the format its name picks). Completes in poll().
   // False (nothing started) when no target is known, a save is already in

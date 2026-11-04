@@ -1949,17 +1949,22 @@ TEST_CASE("host: pumpWhileIdle excludes process") {
     while (std::chrono::steady_clock::now() < until) std::this_thread::yield();
   };
   std::atomic<bool> stop{false};
-  uint64_t ran = 0, claimed = 0, silentRan = 0, loudClaimed = 0;  // Catch2 is not thread-safe
+  // Catch2 is not thread-safe: the worker only counts.
+  uint64_t ran = 0, claimed = 0, silentRan = 0, loudClaimed = 0, claimedAdvanced = 0;
+  const uint8_t cc[] = {0xB0, 1, 64};  // the ROM never reads the ACIA: it piles up, never overflows
+  const BlockMidiEvent events[] = {{0, cc}};
   std::thread audio([&] {
     std::vector<float> out(kFrames);
     while (!stop.load()) {
-      const uint64_t before = host.status().blocks;
+      const HostStatus before = host.status();
       std::fill(out.begin(), out.end(), 1.0f);
-      host.process(in.data(), out.data(), kFrames, 48000.0, 0.0);
+      host.process(in.data(), out.data(), kFrames, 48000.0, events);
       const bool silent = std::all_of(out.begin(), out.end(), [](float s) { return s == 0.0f; });
-      if (host.status().blocks == before) {
+      const HostStatus after = host.status();
+      if (after.blocks == before.blocks) {
         ++claimed;
         if (!silent) ++loudClaimed;
+        if (after.cycles != before.cycles) ++claimedAdvanced;
       } else {
         ++ran;
         if (silent) ++silentRan;
@@ -2002,14 +2007,16 @@ TEST_CASE("host: pumpWhileIdle excludes process") {
   CHECK(claimed > 0);
   CHECK(loudClaimed == 0);
   CHECK(silentRan == 0);
+  CHECK(claimedAdvanced == 0);
+  CHECK(host.status().midiDropped == 3 * claimed);  // each claimed block's event, and nothing else
 }
 
 TEST_CASE("host: a restored machine renders at a new rate after prepare") {
   // The new machine is built (and prepared) at 64 frames, 48 kHz; the DAW then
-  // prepares the host for larger blocks at 96 kHz before the swap. 4096 frames
-  // would overrun what the new machine reserved if it were rendered in
-  // host-sized chunks.
-  const size_t frames = GENERATE(size_t(1024), size_t(4096));
+  // prepares the host for larger blocks at 96 kHz before the swap. The new
+  // machine reserved 2 x 64 + 64 + 8192 output samples; 16384 frames would
+  // overrun that if it were rendered in host-sized chunks.
+  const size_t frames = GENERATE(size_t(1024), size_t(16384));
   RealtimeHost host(mirage_test::adcLoopRom(1));
   host.prepare(64, 48000);
   const auto in48 = sine(64);
@@ -2053,4 +2060,102 @@ TEST_CASE("host: wrong ROM") {
   const auto bytes = other.saveState();
   REQUIRE_THROWS_MATCHES(host.buildMachine(bytes), StateError,
                          Catch::Matchers::Message("snapshot was taken with a different boot ROM"));
+}
+
+TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(256, 48000);
+  std::atomic<bool> stop{false};
+  uint64_t prepares = 0;  // Catch2 is not thread-safe: the worker only counts
+  std::thread device([&] {
+    for (uint64_t i = 0; !stop.load(); ++i) {
+      // Growing sizes: every prepare() reallocates the buffers a pump reads or writes.
+      host.prepare(64 + size_t(i % 4096) * 16, i % 3 ? 48000.0 : 96000.0);
+      ++prepares;
+    }
+  });
+  uint64_t posted = 0, returned = 0, notOk = 0, pumped = 0;
+  auto drain = [&] {
+    while (auto r = host.takeReturnedSnapshot()) {
+      ++returned;
+      if (!r->ok) ++notOk;
+    }
+  };
+  for (int i = 0; i < 1000; ++i) {
+    if (host.postSnapshot(reservedBuffer(1 << 20))) ++posted;
+    if (host.pumpWhileIdle()) ++pumped;
+    drain();
+  }
+  stop.store(true);
+  device.join();
+  for (int i = 0; i < 4; ++i) {
+    REQUIRE(host.pumpWhileIdle());
+    drain();
+  }
+  INFO("posted " << posted << " pumped " << pumped << " prepares " << prepares);
+  CHECK(posted > 100);
+  CHECK(returned == posted);
+  CHECK(notOk == 0);
+  CHECK(pumped > 0);
+  CHECK(prepares > 10);
+}
+
+TEST_CASE("host: a snapshot waits for a swap insert to finish") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(256, 48000);
+  REQUIRE(host.postInsert(filledDisk(1)));
+  block(host, 256);
+  REQUIRE(host.postInsert(filledDisk(2)));  // an Open over the inserted disk: eject, gap, insert
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));
+  block(host, 256);
+  CHECK_FALSE(host.takeReturnedSnapshot().has_value());  // the drive is empty, mid-swap
+  std::optional<ReturnedSnapshot> snap;
+  int blocks = 1;
+  for (; blocks < 200 && !snap; ++blocks) {
+    block(host, 256);
+    snap = host.takeReturnedSnapshot();
+  }
+  REQUIRE(snap);
+  REQUIRE(snap->ok);
+  CHECK(double(blocks) * 256 / 48000 >= 0.5);  // not before the 0.5 s gap ended
+  const auto m = host.buildMachine(*snap->bytes);
+  REQUIRE(m->disk() != nullptr);
+  CHECK(m->disk()->toBytes()[0] == 2);  // the new disk
+}
+
+TEST_CASE("host: a snapshot waits for a deferred key release") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(256, 48000);
+  REQUIRE(host.postKey(PanelKey::Enter, true));
+  REQUIRE(host.postKey(PanelKey::Enter, false));  // deferred for the minimum hold
+  REQUIRE(host.postSnapshot(reservedBuffer(1 << 20)));
+  block(host, 256);
+  CHECK_FALSE(host.takeReturnedSnapshot().has_value());
+  std::optional<ReturnedSnapshot> snap;
+  for (int i = 0; i < 100 && !snap; ++i) {
+    block(host, 256);
+    snap = host.takeReturnedSnapshot();
+  }
+  REQUIRE(snap);
+  REQUIRE(snap->ok);
+  CHECK_FALSE(host.buildMachine(*snap->bytes)->keyDown(PanelKey::Enter));
+}
+
+TEST_CASE("host: a pumped snapshot releases deferred keys and leaves a swap insert out") {
+  RealtimeHost host(kIdleRom);
+  host.prepare(256, 48000);
+  REQUIRE(host.postKey(PanelKey::Enter, true));
+  REQUIRE(host.postKey(PanelKey::Enter, false));
+  auto first = idleSnapshot(host);  // no time passes: the release is made now
+  CHECK_FALSE(host.buildMachine(first)->keyDown(PanelKey::Enter));
+  CHECK_FALSE(host.machineForTest().keyDown(PanelKey::Enter));
+
+  REQUIRE(host.postInsert(filledDisk(1)));
+  REQUIRE(host.pumpWhileIdle());
+  REQUIRE(host.postInsert(filledDisk(2)));  // swap: the first comes out, the second waits
+  auto second = idleSnapshot(host);
+  CHECK(host.buildMachine(second)->disk() == nullptr);  // taken as is, mid-gap
+  auto ejected = host.takeReturnedDisk();
+  REQUIRE(ejected);
+  CHECK(ejected->why == DiskReturn::Ejected);
 }

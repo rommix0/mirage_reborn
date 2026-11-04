@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <thread>
 #include <utility>
 
 #include "mirage/boot_rom.h"
@@ -82,10 +83,14 @@ RealtimeHost::RealtimeHost(std::span<const uint8_t> bootRom, HostOptions options
 RealtimeHost::~RealtimeHost() = default;
 
 void RealtimeHost::prepare(size_t maxFrames, double hostRate) {
+  // Waits out a pumpWhileIdle() on another thread (a process() meanwhile gets
+  // silence). The holder never waits on anything, so this ends.
+  while (!claim()) std::this_thread::yield();
   machine_->prepare(maxFrames, hostRate);
   maxFrames_.store(maxFrames, kRelaxed);
   preparedRate_.store(hostRate, kRelaxed);
   inputBuf_.resize(maxFrames);
+  release();
 }
 
 void RealtimeHost::setInputGain(float gain) {
@@ -140,7 +145,7 @@ bool RealtimeHost::pumpWhileIdle() {
   flushStalled();
   applyUi();
   applyWaves();
-  applyState();
+  applyState(true);
   publishStatus();
   release();
   return true;
@@ -153,6 +158,11 @@ void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double h
   // published (the status stays the pump's, which is current).
   if (!claim()) {
     std::fill_n(out, frames, 0.0f);
+    if (!timestamped) {  // the DAW's events are lost, as at an unusable rate
+      size_t lost = 0;
+      for (const auto& e : events) lost += e.bytes.size();
+      midiDropped_.fetch_add(lost, kRelaxed);
+    }
     return;
   }
   struct Release {
@@ -163,7 +173,7 @@ void RealtimeHost::runBlock(const float* in, float* out, size_t frames, double h
   flushStalled();
   applyUi();
   applyWaves();
-  applyState();
+  applyState(false);
   if (!(hostRate >= Machine::kMinHostRate && hostRate <= Machine::kMaxHostRate)) {  // NaN too
     std::fill_n(out, frames, 0.0f);
     fastForwarding_ = false;
@@ -384,18 +394,36 @@ void RealtimeHost::applyWaves() {
   }
 }
 
-void RealtimeHost::applyState() {
+void RealtimeHost::applyState(bool idle) {
   // Take a request only when whatever it hands back has somewhere to go (from
   // the producer side sizeApprox() can only overstate, so the pushes below
   // cannot fail): a snapshot buffer or an old machine, and a pending swap
   // insert. Until then the rest wait in the queue, so this thread never frees.
   // At most a queue's worth per call: the producer may keep posting meanwhile.
-  Queues::StateCommand c;
   for (size_t n = 0; n < kStateQueueCommands; ++n) {
     if (q_->snapshots.sizeApprox() == kStateQueueCommands ||
-        q_->oldMachines.sizeApprox() == kStateQueueCommands || stalledCount_ == kStalledSlots ||
-        !q_->state.pop(c))
+        q_->oldMachines.sizeApprox() == kStateQueueCommands || stalledCount_ == kStalledSlots)
       return;
+    const Queues::StateCommand* next = q_->state.peek();
+    if (!next) return;
+    if (next->snapshot) {
+      // Whatever was posted before the request goes into it.
+      applyUi();
+      applyWaves();
+      if (idle) {
+        // No emulated time passes in a pump: deferred releases happen now.
+        // A swap insert waiting out its gap stays out (the drive is empty).
+        for (size_t k = 0; k < kPanelKeyCount; ++k) {
+          if (releaseDue_[k]) machine_->setKey(PanelKey(k), false);
+          releaseDue_[k] = false;
+        }
+      } else if (pendingInsert_ ||
+                 std::find(releaseDue_.begin(), releaseDue_.end(), true) != releaseDue_.end()) {
+        return;  // a later block, once the insert or release has happened
+      }
+    }
+    Queues::StateCommand c;
+    q_->state.pop(c);
     if (c.snapshot) {
       const bool ok = machine_->saveStateInto(*c.snapshot);
       q_->snapshots.push(ReturnedSnapshot{std::move(c.snapshot), ok});

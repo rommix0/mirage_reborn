@@ -208,9 +208,12 @@ void Machine::prepare(size_t maxFrames, double hostRate) {
   // 29.4 kHz, and pending_ then permanently holds ~260 surplus samples (the
   // latency render() keeps), so small blocks would otherwise reallocate.
   // The surplus is a time latency, so it grows with the host rate (~1040
-  // samples at 192 kHz): 1024 per 48 kHz, rounded up.
-  const size_t kPendingSurplus =
-      1024 * size_t(std::ceil(std::max(hostRate, 1.0) / 48000.0));
+  // samples at 192 kHz): 1024 per 48 kHz. It is sized for kMaxHostRate whatever
+  // hostRate is (8192 samples, 32 KB), so a machine prepared at one rate never
+  // reallocates at a higher one: a plugin builds a restored machine at the
+  // current rate, and the DAW may re-prepare at a higher rate before the swap.
+  constexpr size_t kPendingSurplus = 1024 * size_t((kMaxHostRate + 47999.0) / 48000.0);
+  static_assert(kPendingSurplus == 8192);
   pending_.reserve(2 * maxFrames + 64 + kPendingSurplus);
   preparedFrames_ = maxFrames;
   if (hostRate >= kMinHostRate && hostRate <= kMaxHostRate) resampler_.setOutputRate(hostRate);

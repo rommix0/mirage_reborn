@@ -39,6 +39,14 @@ class SpscQueue {
     return true;
   }
 
+  // Consumer only: the oldest item, left in the queue, or null when empty.
+  // Valid until the consumer's next pop.
+  const T* peek() const {
+    const size_t head = head_.load(std::memory_order_relaxed);
+    if (head == tail_.load(std::memory_order_acquire)) return nullptr;
+    return &slots_[head & kMask];
+  }
+
   // Item count as seen from either thread; may be stale by the time it is read.
   size_t sizeApprox() const {
     const size_t head = head_.load(std::memory_order_acquire);

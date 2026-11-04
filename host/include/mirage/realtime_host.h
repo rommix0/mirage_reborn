@@ -175,11 +175,12 @@ class RealtimeHost {
   void setOffline(bool offline) { offline_.store(offline, std::memory_order_relaxed); }
 
   // prepare() allocates (Machine::prepare), so it must never run concurrently
-  // with process(), render() or pumpWhileIdle(): call it before the first block and whenever
+  // with process() or render(): call it before the first block and whenever
   // the device's block size or rate changes (JUCE calls audioDeviceAboutToStart
   // before the callbacks start, and again after stopping them).
   // It also reserves the buffer that holds the gain-applied input (maxFrames
-  // samples).
+  // samples). It claims the machine for its duration, waiting (yielding) while
+  // a pumpWhileIdle() on another thread holds it, so the two never overlap.
   void prepare(size_t maxFrames, double hostRate);
   // Renders `frames` mono samples at hostRate:
   //  1. applies the UI queue (keys, insert, eject, reset, panic, copy, mark saved),
@@ -298,6 +299,13 @@ class RealtimeHost {
   // It comes back through takeReturnedSnapshot() holding the snapshot (ok) or,
   // if it was too small, not ok: retry with 2 x capacity. False, leaving it
   // untouched, when it is null or the queue is full.
+  // The UI queue and wave writes are applied again just before it is taken.
+  // In a block, a request waits (with everything behind it) while a swap
+  // insert is waiting out its gap or a key release is deferred for the minimum
+  // hold, so a snapshot never holds a half-done swap or a stuck key; both
+  // settle within kSwapGapCycles of emulated time. In pumpWhileIdle(), where
+  // no time passes, deferred key releases are made at once and a waiting swap
+  // insert is left out: that snapshot has the drive empty.
   bool postSnapshot(std::unique_ptr<std::vector<uint8_t>>&& reserved);
   [[nodiscard]] std::optional<ReturnedSnapshot> takeReturnedSnapshot();
   // State thread. A new Machine from this host's boot ROM, restored from
@@ -324,7 +332,8 @@ class RealtimeHost {
   // work (stalled disk returns, the UI queue, the wave writes, the state queue),
   // publishes status, releases it and returns true. Otherwise returns false at
   // once. A process() that finds the machine claimed writes zeros, advances and
-  // publishes nothing, and returns. Never blocks either side.
+  // publishes nothing, counts its block MIDI events in midiDropped, and returns.
+  // Never blocks either side.
   bool pumpWhileIdle();
 
   // MIDI-output thread: the next byte the OS transmitted, in cycle order. If
@@ -348,7 +357,7 @@ class RealtimeHost {
   void returnDisk(std::unique_ptr<DiskImage> disk, DiskReturn why, uint64_t writeCount = 0);
   void flushStalled();
   void applyWaves();  // the wave queue, after the UI queue
-  void applyState();  // the state queue, after the wave queue
+  void applyState(bool idle);  // the state queue, after the wave queue; idle: in a pump
   void swapIn(std::unique_ptr<Machine> m);  // a restore; returns the old machine
   // True if no one else holds the machine; then it is ours until release().
   bool claim() { return !claimed_.exchange(true, std::memory_order_acquire); }

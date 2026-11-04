@@ -549,7 +549,7 @@ TEST_CASE("disk session: adoptRestored names and saves the restored disk") {
   REQUIRE(rig.host.postRestore(rig.host.buildMachine(saved.saveState())));
   rig.pump();
   REQUIRE(rig.host.takeReturnedMachine() != nullptr);
-  rig.session.adoptRestored(file, DiskFormat::GieblerEdm, false);
+  REQUIRE(rig.session.adoptRestored(file, DiskFormat::GieblerEdm, false));
   CHECK(rig.session.hasDisk());
   CHECK(rig.session.path() == file);
   CHECK(rig.session.format() == DiskFormat::GieblerEdm);
@@ -568,8 +568,15 @@ TEST_CASE("disk session: adoptRestored names and saves the restored disk") {
   rig.pump();  // the mark-saved
   CHECK(rig.session.title() == "SND-A01.img");
 
+  // Refused while a save is in flight: nothing changes.
+  REQUIRE(rig.session.startSave());
+  CHECK_FALSE(rig.session.adoptRestored(tmp / "other.img", DiskFormat::Raw, true));
+  CHECK(rig.session.path() == file);
+  CHECK(rig.session.format() == DiskFormat::GieblerEdm);
+  REQUIRE(rig.finishSave().ok);
+
   // An untitled restored disk has no path until a Save As.
-  rig.session.adoptRestored({}, DiskFormat::Raw, true);
+  REQUIRE(rig.session.adoptRestored({}, DiskFormat::Raw, true));
   CHECK(rig.session.path().empty());
   CHECK(rig.session.title() == "Untitled (blank)");
   CHECK_FALSE(rig.session.startSave());
