@@ -31,12 +31,16 @@ checklist in [`docs/plugin.md`](docs/plugin.md). Windows only so far.
 
 ## Running a release
 
-Unzip `Mirage-0.2.0-win64.zip` and start `Mirage.exe`; nothing needs
+Unzip `Mirage-0.3.0-win64.zip` and start `Mirage.exe`; nothing needs
 installing. It finds the boot ROM (`mirage.bin`) next to the exe. *File → Open
 Disk Image...* a Mirage disk (for example `SND-A01.img` from the Factory
 Library) and it boots from it, then play it from a MIDI keyboard chosen in
 *MIDI*. To boot another disk later: *Open*, then *Machine → Reset*.
 `Mirage guide.md` in the zip is the full guide (`docs/app.md`).
+
+For the plugin, copy the `Mirage.vst3` folder and `mirage.bin` side by side
+into `C:\Program Files\Common Files\VST3` (or point your DAW at the unzipped
+folder). `Mirage plugin guide.md` is its guide (`docs/plugin.md`).
 
 ## Building and testing
 
@@ -62,12 +66,13 @@ are git-ignored. From `emulator/` in Git Bash:
 ```
 git clone . build-dist/src
 cmake -S build-dist/src -B build-dist/out -G "Visual Studio 16 2019" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded "-DMIRAGE_ASSET_ROOT=$(cd .. && pwd -W)/disks and manuals" "-DMIRAGE_ROM=$(pwd -W)/mirage.bin"
-cmake --build build-dist/out --config Release --target MirageApp mirage_cli --parallel
-mkdir -p dist/Mirage-0.2.0-win64 && cd dist/Mirage-0.2.0-win64
+cmake --build build-dist/out --config Release --target MirageApp MiragePlugin_VST3 mirage_cli --parallel
+mkdir -p dist/Mirage-0.3.0-win64 && cd dist/Mirage-0.3.0-win64
 cp ../../build-dist/out/app/MirageApp_artefacts/Release/Mirage.exe ../../build-dist/out/Release/mirage_cli.exe .
-cp ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
+cp -r ../../build-dist/out/plugin/MiragePlugin_artefacts/Release/VST3/Mirage.vst3 .
+cp ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../docs/plugin.md "Mirage plugin guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
 cp ../../mirage.bin .
-cd .. && powershell -Command "Compress-Archive -Path Mirage-0.2.0-win64 -DestinationPath Mirage-0.2.0-win64.zip -Force"
+cd .. && powershell -Command "Compress-Archive -Path Mirage-0.3.0-win64 -DestinationPath Mirage-0.3.0-win64.zip -Force"
 ```
 
 The zip carries a copy of your `mirage.bin` (the ROM is never committed to the
@@ -189,7 +194,7 @@ boot calibration tones and makes disk loads near-instant; the DAW project stores
 the whole machine. Build and install:
 
 ```
-cmake --build emulator/build --config Release --target MiragePlugin --parallel
+cmake --build emulator/build --config Release --target MiragePlugin_VST3 --parallel
 ```
 
 The plugin is `emulator/build/plugin/MiragePlugin_artefacts/Release/VST3/Mirage.vst3`.

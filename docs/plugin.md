@@ -19,7 +19,7 @@ From the folder that contains `emulator/`:
 
 ```
 cmake -S emulator -B emulator/build -G "Visual Studio 16 2019" -A x64
-cmake --build emulator/build --config Release --target MiragePlugin --parallel
+cmake --build emulator/build --config Release --target MiragePlugin_VST3 --parallel
 ```
 
 The plugin is built whenever the app is (`-DMIRAGE_BUILD_APP=ON`, the default).

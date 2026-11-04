@@ -16,7 +16,7 @@ FetchContent_MakeAvailable(JUCE)
 
 juce_add_gui_app(MirageApp
   PRODUCT_NAME "Mirage"
-  VERSION 0.2.0
+  VERSION 0.3.0
   COMPANY_NAME "Mirage Emulator")
 
 target_sources(MirageApp PRIVATE
