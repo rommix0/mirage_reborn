@@ -313,12 +313,14 @@ void MirageProcessor::getStateInformation(juce::MemoryBlock& destData) {
   }
   PluginStateData d;
   if (host_) {
-    // Reserved here, filled by the audio thread (or a pump); twice the size if too small.
+    // Reserved here, filled by the audio thread (or a pump); twice the size if
+    // too small. Sized (zero-filled) and then emptied rather than reserved: its
+    // pages are touched here, so the audio thread's write takes no page faults.
     std::optional<mirage::ReturnedSnapshot> got;
     auto buf = std::make_unique<std::vector<uint8_t>>();
     for (size_t capacity = lastSnapshotSize_ + 64 * 1024;; capacity *= 2) {
+      buf->resize(capacity);
       buf->clear();
-      buf->reserve(capacity);
       if (!host_->postSnapshot(std::move(buf))) break;
       ++snapshotsOut_;
       // Snapshots return in order: ours is the last; older ones (from a call
