@@ -1,15 +1,18 @@
 // plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img> [--editor-png <out.png>]
+// plugin_host_smoke <Mirage.vst3> --midi-out
 // Loads the built plugin through JUCE's own VST3 hosting and checks its buses,
 // its state before prepareToPlay, a restored SND-A01 playing a note, a state
 // round trip into a second instance (bit-identical output) and the blobs it
 // cannot restore (silence, and the same bytes back). With --editor-png it
 // instead opens the editor of a restored SND-A01 in a window all but off
 // screen, sizes it to 1200 px wide, checks it keeps its aspect ratio and writes
-// a capture of the window to <out.png>. Exit 0 on success, 1 on a failed check
-// (the reason on stderr), 2 for usage.
+// a capture of the window to <out.png>. With --midi-out it runs a synthetic ROM
+// that transmits known MIDI (midiOut()); it needs no asset. Exit 0 on success,
+// 1 on a failed check (the reason on stderr), 2 for usage.
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -445,20 +448,159 @@ void editorPng(const juce::File& pluginFile, const juce::File& romFile, const ju
   p->releaseResources();
 }
 
+// The synthetic ROM of --midi-out. It transmits, as fast as the ACIA takes
+// them (one byte per 640 cycles), kMidiOutHead, a SysEx of 65,535 bytes (the
+// most a juce::MidiBuffer event holds), one of 65,536 (the plugin drops it),
+// then kMidiOutTail, and idles. A SysEx's data bytes count 00..7F, wrapping.
+const std::vector<uint8_t> kMidiOutHead = {0x90, 0x3C, 0x64, 0xB0, 0x07, 0x64, 0xC0, 0x05, 0x80, 0x3C, 0x40};
+const std::vector<uint8_t> kMidiOutTail = {0x90, 0x40, 0x64, 0x43, 0x50,  // the second by running status
+                                           0xF0, 0x7D, 0x01, 0x02, 0x03, 0xF7, 0x80, 0x40, 0x00};
+constexpr size_t kLongSysex = 65535;
+constexpr double kByteCycles = 640;  // the ACIA at 31,250 baud
+
+std::vector<uint8_t> midiOutRom() {
+  std::vector<uint8_t> rom(mirage::Machine::kBootRomSize, 0x12);  // NOP
+  const auto put = [&](uint16_t at, std::initializer_list<uint8_t> code) {
+    std::copy(code.begin(), code.end(), rom.begin() + (at - 0xF000));
+  };
+  put(0xF000, {0x86, 0x03, 0xB7, 0xE1, 0x00,  // LDA #$03; STA $E100 (ACIA reset)
+               0x10, 0xCE, 0x8F, 0x00,        // LDS #$8F00
+               0x8E, 0xF2, 0x00,              // LDX #head
+               0xBD, 0xF1, 0x00,              // JSR sendtab
+               0x10, 0x8E, 0xFF, 0xFD,        // LDY #65533
+               0xBD, 0xF1, 0x20,              // JSR sendlong
+               0x10, 0x8E, 0xFF, 0xFE,        // LDY #65534
+               0xBD, 0xF1, 0x20,              // JSR sendlong
+               0x8E, 0xF3, 0x00,              // LDX #tail
+               0xBD, 0xF1, 0x00,              // JSR sendtab
+               0x20, 0xFE});                  // BRA *
+  put(0xF100, {0xE6, 0x80,                    // sendtab: LDB ,X+
+               0xC1, 0xFF,                    // CMPB #$FF (the end)
+               0x27, 0x05,                    // BEQ ret
+               0xBD, 0xF1, 0x40,              // JSR send
+               0x20, 0xF5,                    // BRA sendtab
+               0x39});                        // ret: RTS
+  put(0xF120, {0xC6, 0xF0, 0xBD, 0xF1, 0x40,  // sendlong: LDB #$F0; JSR send
+               0x4F,                          // CLRA
+               0x1F, 0x89,                    // loop: TFR A,B
+               0xC4, 0x7F,                    // ANDB #$7F
+               0xBD, 0xF1, 0x40,              // JSR send
+               0x4C,                          // INCA
+               0x31, 0x3F,                    // LEAY -1,Y
+               0x26, 0xF4,                    // BNE loop
+               0xC6, 0xF7, 0xBD, 0xF1, 0x40,  // LDB #$F7; JSR send
+               0x39});                        // RTS
+  put(0xF140, {0x34, 0x02,                    // send: PSHS A
+               0xB6, 0xE1, 0x00,              // wait: LDA $E100
+               0x85, 0x02,                    // BITA #$02 (TDRE)
+               0x27, 0xF9,                    // BEQ wait
+               0xF7, 0xE1, 0x01,              // STB $E101
+               0x35, 0x82});                  // PULS A,PC
+  std::copy(kMidiOutHead.begin(), kMidiOutHead.end(), rom.begin() + 0x200);
+  rom[0x200 + kMidiOutHead.size()] = 0xFF;
+  std::copy(kMidiOutTail.begin(), kMidiOutTail.end(), rom.begin() + 0x300);
+  rom[0x300 + kMidiOutTail.size()] = 0xFF;
+  rom[0xFFE] = 0xF0;  // the reset vector: $F000
+  rom[0xFFF] = 0x00;
+  return rom;
+}
+
+// MIDI out lands whole and in order, each message inside its block, in frame
+// order, and near the moment its last byte was sent.
+void midiOut(const juce::File& pluginFile) {
+  struct Expected {
+    std::vector<uint8_t> bytes;
+    size_t lastByte;  // the index of its last byte in all the ROM transmits
+  };
+  std::vector<Expected> expected;
+  size_t sent = 0;
+  const auto add = [&](const std::vector<uint8_t>& bytes, size_t lastByte) { expected.push_back({bytes, lastByte}); };
+  add({0x90, 0x3C, 0x64}, 2);
+  add({0xB0, 0x07, 0x64}, 5);
+  add({0xC0, 0x05}, 7);
+  add({0x80, 0x3C, 0x40}, 10);
+  sent = kMidiOutHead.size();
+  std::vector<uint8_t> sysex(kLongSysex);
+  sysex.front() = 0xF0;
+  for (size_t i = 1; i + 1 < kLongSysex; ++i) sysex[i] = uint8_t((i - 1) & 0x7F);
+  sysex.back() = 0xF7;
+  add(sysex, sent + kLongSysex - 1);
+  sent += kLongSysex + kLongSysex + 1;  // and the one dropped
+  add({0x90, 0x40, 0x64}, sent + 2);
+  add({0x90, 0x43, 0x50}, sent + 4);
+  add({0xF0, 0x7D, 0x01, 0x02, 0x03, 0xF7}, sent + 10);
+  add({0x80, 0x40, 0x00}, sent + 13);
+  sent += kMidiOutTail.size();
+
+  auto p = makeInstance(pluginFile);
+  prepare(*p);
+  juce::AudioBuffer<float> buf(2, kBlock);
+  juce::MidiBuffer midi;
+  size_t got = 0;
+  double worst = 0;
+  // Every byte's time, and a tenth of a second more.
+  const auto blocks = (int)(((double)sent * kByteCycles / mirage::kCpuClockHz + 0.1) * kRate / kBlock);
+  for (int block = 0; block < blocks; ++block) {
+    buf.clear();
+    midi.clear();
+    p->processBlock(buf, midi);
+    int prev = 0;
+    for (const auto m : midi) {
+      const juce::String at = "block " + juce::String(block) + " frame " + juce::String(m.samplePosition);
+      check(m.samplePosition >= 0 && m.samplePosition < kBlock, "a message outside its block (" + at + ")");
+      check(m.samplePosition >= prev, "messages out of frame order (" + at + ")");
+      prev = m.samplePosition;
+      check(got < expected.size(), "an unexpected extra message (" + at + ")");
+      const auto& e = expected[got++];
+      check((size_t)m.numBytes == e.bytes.size() && std::equal(e.bytes.begin(), e.bytes.end(), m.data),
+            "message " + juce::String((int)got) + " is not the one sent (" + juce::String(m.numBytes) + " bytes, " +
+                at + ")");
+      // When its last byte was sent, as a sample: within 2 ms (a byte takes
+      // 0.32 ms; the output resampler's delay is about 1 ms).
+      const double want = (double)(e.lastByte + 1) * kByteCycles / mirage::kCpuClockHz * kRate;
+      const double off = std::abs((double)block * kBlock + m.samplePosition - want);
+      worst = std::max(worst, off);
+      check(off < 0.002 * kRate, "message " + juce::String((int)got) + " is " + juce::String(off, 1) +
+                                     " samples from when it was sent (" + at + ")");
+    }
+  }
+  check(got == expected.size(),
+        "got " + juce::String((int)got) + " of " + juce::String((int)expected.size()) + " messages");
+  p->releaseResources();
+  pass(juce::String((int)got) + " MIDI-out messages whole, in order and at their frames (at most " +
+       juce::String(worst, 1) + " samples off); a 65,535-byte SysEx passed, a 65,536-byte one was dropped");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   mirage::cli::makeNonInteractive();  // a Debug assertion reports on stderr, never in a dialog
   const bool editor = argc == 6 && std::string(argv[4]) == "--editor-png";
-  if (argc != 4 && !editor) {
-    std::cerr << "usage: plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img> [--editor-png <out.png>]"
+  const bool midi = argc == 3 && std::string(argv[2]) == "--midi-out";
+  if (argc != 4 && !editor && !midi) {
+    std::cerr << "usage: plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img> [--editor-png <out.png>]\n"
+                 "       plugin_host_smoke <Mirage.vst3> --midi-out"
               << std::endl;
     return 2;
   }
+  // --midi-out: the synthetic ROM, in a temporary file (the plugin accepts an
+  // unknown ROM).
+  const TempFile romGuard{midi ? juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                     .getNonexistentChildFile("plugin_smoke_midi_out", ".bin")
+                               : juce::File()};
+  if (midi) {
+    const auto bytes = midiOutRom();
+    if (!romGuard.file.replaceWithData(bytes.data(), bytes.size())) {
+      std::cerr << "FAIL: cannot write " << romGuard.file.getFullPathName() << std::endl;
+      return 1;
+    }
+  }
   // The plugin finds its ROM through this override first (PluginSettings.h), so
   // the run does not depend on the user's settings. Set before the first
-  // instance: the plugin caches the ROM.
-  const auto rom = juce::File(juce::String::fromUTF8(argv[2])).getFullPathName();
+  // instance: the plugin caches the ROM, once per process (so --midi-out is a
+  // run of its own).
+  const auto rom =
+      midi ? romGuard.file.getFullPathName() : juce::File(juce::String::fromUTF8(argv[2])).getFullPathName();
 #ifdef _WIN32
   SetEnvironmentVariableW(L"MIRAGE_PLUGIN_ROM", rom.toWideCharPointer());
 #else
@@ -467,7 +609,9 @@ int main(int argc, char** argv) {
   juce::ScopedJuceInitialiser_GUI juce;
   try {
     const auto arg = [&](int i) { return juce::File(juce::String::fromUTF8(argv[i])); };
-    if (editor)
+    if (midi)
+      midiOut(arg(1));
+    else if (editor)
       editorPng(arg(1), arg(2), arg(3), arg(5));
     else
       run(arg(1), arg(2), arg(3));

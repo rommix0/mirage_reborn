@@ -80,3 +80,10 @@ add_test(NAME plugin_editor_png_smoke
                  -DEDITOR_PNG=${CMAKE_BINARY_DIR}/plugin_editor_smoke.png
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
 set_tests_properties(plugin_editor_png_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+
+# MIDI out from a synthetic ROM, in a run of its own (the plugin caches its ROM
+# per process): whole messages, in order, at their frames.
+add_test(NAME plugin_midi_out_smoke
+         COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:plugin_host_smoke>
+                 -DPLUGIN_DLL=$<TARGET_FILE:MiragePlugin_VST3> -DMIDI_OUT=ON
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
