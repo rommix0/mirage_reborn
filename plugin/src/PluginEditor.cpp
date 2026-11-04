@@ -174,7 +174,9 @@ MirageEditor::StripText MirageEditor::buildText() const {
   if (host_) {
     const auto s = host_->status();
     if (s.illegalOps != 0) problems.add("illegal ops: " + juce::String((juce::int64)s.illegalOps));
-    if (s.midiDropped != 0) problems.add("MIDI dropped: " + juce::String((juce::int64)s.midiDropped));
+    // Bytes, plus one per MIDI-out message the plugin could not pass on (midiDropped()).
+    if (const auto dropped = s.midiDropped + proc_.midiDropped(); dropped != 0)
+      problems.add("MIDI dropped: " + juce::String((juce::int64)dropped));
     if (!host_->calibrationMuteArmed()) problems.add("calibration not muted (unknown ROM)");
   }
   problems.add(proc_.restoreProblem());

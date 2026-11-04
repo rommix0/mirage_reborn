@@ -90,6 +90,11 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   // Gives up the project's Mirage that could not be restored: power-cycles the
   // machine, which runs again, then runs `then`. Through withSession.
   void discardSavedState(std::function<void()> then);
+  // MIDI the plugin itself dropped, for the strip's "MIDI dropped" (added to
+  // HostStatus::midiDropped): the bytes of block events past the per-block
+  // limit, plus one per MIDI-out message it could not pass on (a SysEx longer
+  // than a juce::MidiBuffer event holds). Any thread.
+  uint64_t midiDropped() const { return midiDropped_.load(std::memory_order_relaxed); }
   int editorWidth() const { return editorW_.load(); }
   int editorHeight() const { return editorH_.load(); }
   void setEditorSize(int w, int h) {
@@ -150,6 +155,8 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   const void* midiOutStorage_ = nullptr;  // its data, wherever it is now (see processBlock)
   juce::MidiBuffer* midiOutDest_ = nullptr;
   int midiOutFrame_ = 0;
+  uint64_t midiLost_ = 0;                  // see midiDropped(), less the parser's count
+  std::atomic<uint64_t> midiDropped_{0};  // published at the end of each block
 
   // State (under stateMutex_). keptBlob_: a project blob returned as it is
   // from getStateInformation while its restore is pending or impossible.

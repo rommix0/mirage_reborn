@@ -13,12 +13,14 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Block MIDI events beyond this many in one block are dropped (a DAW never
-// sends nearly so many). Reserved in prepareToPlay.
+// Block MIDI events beyond this many in one block are dropped and counted (a
+// DAW never sends nearly so many). Reserved in prepareToPlay.
 constexpr size_t kMaxBlockEvents = 8192;
-// MIDI out per block: a 64 KB SysEx plus a full 8 KB MIDI-out queue of single bytes,
-// each stored with 6 bytes of MidiBuffer header.
-constexpr size_t kMidiOutSysex = 64 * 1024;
+// The longest MIDI-out SysEx passed on: the most a juce::MidiBuffer event holds
+// (its size is a uint16). A longer one is dropped and counted.
+constexpr size_t kMidiOutSysex = 65535;
+// MIDI out per block: that SysEx plus a full 8 KB MIDI-out queue of single
+// bytes, each stored with 6 bytes of MidiBuffer header.
 constexpr size_t kMidiOutBytes = kMidiOutSysex + mirage::RealtimeHost::kMidiOutQueueBytes * 7;
 // A snapshot is "MIRG", u32 version, then the boot ROM's SHA-1.
 constexpr size_t kSnapshotShaOffset = 8;
@@ -171,7 +173,7 @@ void MirageProcessor::prepareToPlay(double sampleRate, int maximumExpectedSample
   events_.reserve(kMaxBlockEvents);
   if (!midiOutParser_) midiOutParser_ = std::make_unique<mirage::MidiByteParser>(kMidiOutSysex);
   emitMidiOut_ = [this](std::span<const uint8_t> m) {
-    midiOutDest_->addEvent(m.data(), (int)m.size(), midiOutFrame_);
+    if (!midiOutDest_->addEvent(m.data(), (int)m.size(), midiOutFrame_)) ++midiLost_;
   };
   midiOut_.ensureSize(kMidiOutBytes);
   midiOutStorage_ = midiOut_.data.getRawDataPointer();
@@ -218,8 +220,11 @@ void MirageProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 
   events_.clear();
   for (const auto meta : midi) {
-    // ponytail: events past kMaxBlockEvents are dropped; raise it if a DAW ever sends more.
-    if (events_.size() == events_.capacity()) break;
+    // ponytail: events past kMaxBlockEvents are dropped (counted); raise it if a DAW ever sends more.
+    if (events_.size() == events_.capacity()) {
+      midiLost_ += (uint64_t)meta.numBytes;
+      continue;
+    }
     events_.push_back({(uint32_t)std::max(0, meta.samplePosition),
                        std::span<const uint8_t>(meta.data, (size_t)meta.numBytes)});
   }
@@ -248,6 +253,7 @@ void MirageProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     midiOutParser_->feed(b.byte, emitMidiOut_);
   }
   if (midiOutDest_ != &midi) midi.swapWith(midiOut_);
+  midiDropped_.store(midiLost_ + midiOutParser_->dropped(), std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* MirageProcessor::createEditor() {
