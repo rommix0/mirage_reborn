@@ -62,6 +62,7 @@ ctest --test-dir emulator/build -C Debug --parallel 8 --output-on-failure
 - **Never write to the user's library images** under `disks and manuals`; tests copy to temp files.
 - Fidelity is judged **by ear by the owner** (no real Mirage to compare
   against). Automated tests can't hear; give the owner a checklist in `docs/app.md`.
+- Licence: AGPL-3.0-or-later (`LICENSE`), required by JUCE's free option and the VST3 SDK's GPLv3 option. Keep new code compatible; never commit the ROM or disk images.
 - C++20, MSVC 2019 x64, CMake. LF line endings (`.gitattributes`). Commit
   messages use `feat:`/`fix:`/`docs:`/`test:`/`build:`/`chore:` prefixes with an
   optional scope, for example `feat(engine): ...`.

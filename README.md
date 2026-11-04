@@ -70,14 +70,15 @@ cmake --build build-dist/out --config Release --target MirageApp MiragePlugin_VS
 mkdir -p dist/Mirage-0.3.0-win64 && cd dist/Mirage-0.3.0-win64
 cp ../../build-dist/out/app/MirageApp_artefacts/Release/Mirage.exe ../../build-dist/out/Release/mirage_cli.exe .
 cp -r ../../build-dist/out/plugin/MiragePlugin_artefacts/Release/VST3/Mirage.vst3 .
-cp ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../docs/plugin.md "Mirage plugin guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
+cp ../../LICENSE ../../README.md . && cp ../../docs/app.md "Mirage guide.md" && cp ../../docs/plugin.md "Mirage plugin guide.md" && cp ../../app/resources/fonts/OFL-Michroma.txt .
 cp ../../mirage.bin .
 cd .. && powershell -Command "Compress-Archive -Path Mirage-0.3.0-win64 -DestinationPath Mirage-0.3.0-win64.zip -Force"
 ```
 
 The zip carries a copy of your `mirage.bin` (the ROM is never committed to the
-repo); think before sharing it. `OFL-Michroma.txt` goes with it because the
-panel font embedded in the exe asks for its licence to travel with it.
+repo) and is not covered by `LICENSE`; leave it out of any zip you publish.
+`LICENSE` goes with the binaries as the AGPL requires, and `OFL-Michroma.txt`
+because the panel font embedded in the exe asks for its licence to travel with it.
 
 ## MIRAGE_ASSET_ROOT and MIRAGE_ROM
 
@@ -204,10 +205,18 @@ paths. It takes the first boot ROM it finds: the one chosen in the plugin
 then the build's `MIRAGE_ROM`; otherwise it asks. Guide (with the
 `MIRAGE_PLUGIN_ROM` test override): [`docs/plugin.md`](docs/plugin.md).
 
-Licence: the app and the plugin use JUCE 8 (AGPLv3, or JUCE's free Starter
-licence); the plugin also builds in the VST3 SDK that JUCE bundles
-(Steinberg's BSD-style licence). The engine and `mirage_host` contain no JUCE
-code.
+## Licence
+
+Copyright (C) 2026 rommix0. Mirage Reborn is free software under the GNU Affero
+General Public License, version 3 or (at your option) any later version; see
+[`LICENSE`](LICENSE). Source: <https://github.com/rommix0/mirage_reborn>.
+
+The app and the plugin use JUCE 8 under its AGPLv3 option. The plugin also
+builds in the VST3 SDK that JUCE bundles, under its GPLv3 option (its
+`pluginterfaces` are Steinberg VST3 Licence or GPLv3; its `base` and
+`public.sdk` files are BSD-style). The engine and `mirage_host` contain no JUCE
+code. The licence does not cover the Mirage boot ROM or any disk image: they
+are not part of this project and are never committed here.
 
 Panel lettering: the "Mirage" wordmark is traced from a photo of a DSK panel
 (`tools/fonts/trace_wordmark.py`) and the "DIGITAL SAMPLING KEYBOARD" legend
