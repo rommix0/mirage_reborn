@@ -4,7 +4,8 @@
 of the Mirage front panel, a disk drive you load `.img` files into, MIDI in and
 out, an audio output and an audio input you can sample from. The machine is emulated at realistic speed, so a
 disk load takes as long as it did on the hardware (no turbo, owner decision of
-2026-10-18).
+2026-10-18). The VST3 plugin differs: it makes disk access near-instant by
+running faster than real time while the drive runs (`docs/plugin.md`).
 
 ## Build and run
 
@@ -419,7 +420,7 @@ Queues (all lock-free single-producer, single-consumer):
 | Decision | Choice | Why / cost if wrong |
 |---|---|---|
 | Output headroom | Keep `kOutputGain` 0.5 and add a soft clip in `render()`: linear up to ±0.75, then `0.75 + 0.25·tanh((|x|−0.75)/0.25)`, never past ±1.0 | One voice peaks at about 0.26, so normal play is untouched. Chords can't hard-clip the device. CLI WAVs match the app. Easy to retune by ear (`machine.h` comment). |
-| Boot calibration tones (filter self-oscillation, about 1 s, right after the ROM hands off to the OS, about 4-5 s after inserting the disk) | **Not muted** | This is what the emulated hardware emits. Muting would need a boot-phase detector, which is an OS-specific heuristic. Flag it at the acceptance listen. |
+| Boot calibration tones (filter self-oscillation, about 1 s, right after the ROM hands off to the OS, about 4-5 s after inserting the disk) | **Not muted** | This is what the emulated hardware emits. Muting would need a boot-phase detector, which is an OS-specific heuristic. Flag it at the acceptance listen. The VST3 plugin differs: it mutes the ROM's calibration routine with an output gate (see `plugin.md`). |
 | MIDI input timing | Events placed in the block by timestamp, MidiMessageCollector-style, clamped and non-decreasing | Adds up to one block of latency but no jitter. |
 | Minimum key hold | A panel key stays down at least 100 ms of emulated time | A fast mouse click could fall between the OS's keypad scans. |
 | Disk swap | Eject now; insert 0.5 s of emulated time later | The OS sees PB6 drop. |
@@ -868,7 +869,7 @@ sample.
   selection, menu shortcuts and panel keyboard shortcuts are not exercised by
   automated tests (the queues,
   the MIDI parser, `DiskSession`, the panel layout and the soft clip are).
-- The boot calibration tones are deliberately not muted (see the decisions).
+- The boot calibration tones are deliberately not muted (see the decisions). The VST3 plugin mutes them (`docs/plugin.md`).
 - The status strip's "(modified)" can lag by a block or two.
 - Windows only so far; the Windows file chooser shows a single filter,
   `*.img;*.edm;*`.
@@ -891,7 +892,7 @@ sample.
   byte (an unanswered start writes zeros), and only the Mirage's own track
   layout (ids 0-5, sizes 3, 3, 3, 3, 3, 2) counts as formatted
   (`docs/hardware/fdc.md`).
-- Formatting runs at the real speed (about 106 s for fmt2). There is no turbo.
+- Formatting runs at the real speed (about 106 s for fmt2). There is no turbo (the plugin fast-forwards, see `docs/plugin.md`).
 - The DOC's CA3 line is high in the two refresh slots as an assumption: the
   DOC's pin behaviour there is not documented, and Soundprocess needs it high
   to play (`docs/hardware/boot-rom.md` 13.7). A CPU-written halt with M0 set

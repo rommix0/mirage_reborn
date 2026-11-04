@@ -25,6 +25,7 @@ All four plans are done and the owner has passed acceptances 1-8 by ear
 | `app/`             | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel                                  |
 | `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys                                   |
 | `tests/`           | Catch2 unit and end-to-end tests (`ctest`)                                                       |
+| `plugin/`          | the JUCE 8 VST3 plugin, `Mirage.vst3`, the same machine inside a DAW ([`docs/plugin.md`](docs/plugin.md)) |
 | `docs/`            | the design specs, the plans, the hardware notes and the app guide ([`docs/app.md`](docs/app.md)) |
 
 ## Running a release
@@ -179,6 +180,21 @@ warned about). Settings are kept in `%APPDATA%\MirageEmulator\MirageEmulator.set
 `Mirage.exe --panel-png out.png` renders the front panel to a PNG and exits;
 `Mirage.exe --import-dialog-png in.wav out.png` does the same for the Import WAV
 dialog.
+
+## The VST3 plugin (`plugin/`)
+
+`Mirage.vst3` is the same machine as a VST3 instrument (Windows x64). It mutes the
+boot calibration tones and makes disk loads near-instant; the DAW project stores
+the whole machine. Build and install:
+
+```
+cmake --build emulator/build --config Release --target MiragePlugin --parallel
+```
+
+The plugin is `emulator/build/plugin/MiragePlugin_artefacts/Release/VST3/Mirage.vst3`.
+Copy it to `C:\Program Files\Common Files\VST3` or add its folder to your DAW's VST3
+paths. It finds the boot ROM as `mirage.bin` next to it, from the app's saved
+path, or asks. Guide: [`docs/plugin.md`](docs/plugin.md).
 
 Licence: the app uses JUCE 8 (AGPLv3, or JUCE's free Starter licence). The
 engine and `mirage_host` contain no JUCE code, so the licence choice for any

@@ -87,6 +87,7 @@ With a MIDI keyboard:
 
 **Not in version 1:**
 - The VST3 plugin. It comes later as a second wrapper around the same engine.
+  *Done in Plan 5: see `2026-11-03-vst3-plugin-design.md` and `docs/plugin.md`.*
 - macOS/Linux builds. The toolkit allows them later.
 - A circuit-exact model of the CEM3328 filters.
 - ~~Recording from the computer's audio input.~~ *Reversed by the owner,
@@ -343,6 +344,9 @@ header or reordering exists, the builder documents and handles it. Saving an
   replica panel stays faithful.
 
 ### 6.9 Machine state (for the later VST3)
+
+*Done in Plan 5: the plugin stores this snapshot in the DAW project; see
+`2026-11-03-vst3-plugin-design.md` §5 and `docs/plugin.md`.*
 
 *(Builder-check answer, my call.)* A plugin must come back exactly as it was
 when a DAW project reopens: OS in RAM, loaded sounds, edits, and the

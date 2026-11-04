@@ -15,9 +15,11 @@ far. Plans 1-4 are done and the owner has passed acceptances 1-8 by ear.
 | `tools/mirage_cli` | Headless runs: `run` (disk, keys, notes, MIDI, `--import`, `--audio-in`, `--wav`, `--save-disk`, snapshots, trace) and `disasm`. |
 | `tests/` | Catch2 v3 unit and end-to-end tests, run with `ctest`. |
 | `docs/specs/` | The binding designs. Read before changing behaviour. |
-| `docs/plans/` | Plans 1-4 and `plan-1-followups.md` (decisions and their costs). |
+| `docs/plans/` | Plans 1-5 and `plan-1-followups.md` (decisions and their costs). |
 | `docs/hardware/` | Reverse-engineered hardware facts: `boot-rom.md`, `clocks-and-midi.md`, `fdc.md`, `filters.md`. |
 | `docs/app.md` | App guide: menus, threading model, decisions, acceptance checklists, known limitations. |
+| `plugin/` | The JUCE VST3 plugin `Mirage.vst3` (target `MiragePlugin`) and its smoke test; reuses the app's panel. |
+| `docs/plugin.md` | Plugin guide: build and install, ROM lookup, state, decisions, known limitations, acceptance-9 checklist. |
 
 ## Build and test
 
@@ -44,8 +46,9 @@ ctest --test-dir emulator/build -C Debug --parallel 8 --output-on-failure
   a failure. The one exception is WAV import, which writes wave RAM only.
 - **Never add HFE support** (owner decision, permanent).
 - **The standalone stays faithful:** realistic disk timing (no turbo), and the
-  boot filter-calibration tones are not muted. A future VST3 must instead mute
-  the calibration and make floppy access instant.
+  boot filter-calibration tones are not muted. The VST3 plugin (`plugin/`,
+  `docs/plugin.md`) instead mutes the calibration and makes floppy access instant,
+  with an output gate and a fast-forward that never change emulated state.
 - **Evidence order for hardware behaviour:** the boot ROM and OS disassembly win
   over MAME. MAME's `enmirage.cpp` and chip cores are references only, never
   copied (keeps the engine GPL-free). Record findings in `docs/hardware/`.
