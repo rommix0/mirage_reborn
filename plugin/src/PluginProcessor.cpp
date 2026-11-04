@@ -6,6 +6,8 @@
 #include <string>
 #include <thread>
 
+#include "PluginEditor.h"
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -62,10 +64,19 @@ MirageProcessor::~MirageProcessor() { stopTimer(); }
 
 bool MirageProcessor::startMachine() {
   const std::lock_guard lock(stateMutex_);
-  if (host_) return true;
+  // A project's Mirage kept unrestored (silent_: no machine runs) may need
+  // another ROM: rebuild from the one found now.
+  const bool unrestored = !keptBlob_.isEmpty() && !restorePending_;
+  if (host_ && !unrestored) return true;
   juce::File file;
   const auto rom = findBootRom(file);
-  if (!rom) return false;
+  if (!rom) return host_ != nullptr;
+  if (host_) {
+    live_.store(nullptr, std::memory_order_release);
+    retired_.push_back({std::move(host_), std::move(session_)});
+    snapshotsOut_ = restoresOut_ = 0;  // the replaced host's
+    pendingIdentity_.reset();
+  }
   host_ = std::make_unique<mirage::RealtimeHost>(
       std::span<const uint8_t>(static_cast<const uint8_t*>(rom->getData()), rom->getSize()),
       mirage::HostOptions{.muteCalibration = true, .fastDisk = true});
@@ -74,6 +85,41 @@ bool MirageProcessor::startMachine() {
   live_.store(host_.get(), std::memory_order_release);
   if (!keptBlob_.isEmpty() && !restorePending_) restoreLocked(juce::MemoryBlock(keptBlob_));
   return true;
+}
+
+void MirageProcessor::withSession(std::function<void(mirage::DiskSession&)> work) {
+  if (!trySession(work) && session_) deferred_.push_back(std::move(work));
+}
+
+bool MirageProcessor::trySession(const std::function<void(mirage::DiskSession&)>& work) {
+  if (!session_) return false;
+  if (sessionHeld_) {
+    work(*session_);
+    return true;
+  }
+  if (!deferred_.empty()) return false;  // after the queued work
+  std::unique_lock lock(stateMutex_, std::try_to_lock);
+  if (!lock.owns_lock()) return false;
+  const juce::ScopedValueSetter held(sessionHeld_, true);
+  work(*session_);
+  return true;
+}
+
+void MirageProcessor::discardSavedState(std::function<void()> then) {
+  withSession([this, then = std::move(then)](mirage::DiskSession&) {
+    keptBlob_.reset();
+    restorePending_ = false;
+    pendingIdentity_.reset();
+    setRestoreProblem({});
+    host_->postReset();
+    if (then) then();
+  });
+}
+
+void MirageProcessor::setRestoreProblem(const juce::String& why) {
+  silent_.store(why.isNotEmpty(), std::memory_order_relaxed);  // unrestorable: run no machine
+  const std::lock_guard lock(problemMutex_);
+  restoreProblem_ = why;
 }
 
 juce::String MirageProcessor::restoreProblem() const {
@@ -182,7 +228,7 @@ void MirageProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 }
 
 juce::AudioProcessorEditor* MirageProcessor::createEditor() {
-  return new juce::GenericAudioProcessorEditor(*this);
+  return new MirageEditor(*this);
 }
 
 // ---- State -----------------------------------------------------------------
@@ -306,15 +352,9 @@ void MirageProcessor::restoreLocked(const juce::MemoryBlock& blob) {
   keptBlob_ = blob;  // handed back as it is until the restore is confirmed (or for good)
   restorePending_ = false;
   pendingIdentity_.reset();
-  const auto setProblem = [this](const juce::String& why) {
-    silent_.store(why.isNotEmpty(), std::memory_order_relaxed);  // unrestorable: run no machine
-    const std::lock_guard lock(problemMutex_);
-    restoreProblem_ = why;
-  };
-
   const auto d = decodePluginState(blob.getData(), blob.getSize());
   if (!d)
-    return setProblem("This project's Mirage cannot be read: the saved state is damaged or from a newer "
+    return setRestoreProblem("This project's Mirage cannot be read: the saved state is damaged or from a newer "
                       "version of the plugin.");
   setParameterValue(params, "volume", d->volume);
   setParameterValue(params, "inputGain", d->inputGain);
@@ -322,25 +362,25 @@ void MirageProcessor::restoreLocked(const juce::MemoryBlock& blob) {
   editorH_ = d->editorH;
   if (d->machine.isEmpty()) {  // saved before any ROM was found: nothing to restore
     keptBlob_.reset();
-    return setProblem({});
+    return setRestoreProblem({});
   }
-  if (!host_) return setProblem("Choose the Mirage boot ROM to restore this project's Mirage.");
+  if (!host_) return setRestoreProblem("Choose the Mirage boot ROM to restore this project's Mirage.");
   const auto* bytes = static_cast<const uint8_t*>(d->machine.getData());
   const size_t size = d->machine.getSize();
   const auto sha = host_->romSha1();
   if (size >= kSnapshotShaOffset + sha.size() && !std::equal(sha.begin(), sha.end(), bytes + kSnapshotShaOffset))
-    return setProblem("This project's Mirage was saved with boot ROM " +
+    return setRestoreProblem("This project's Mirage was saved with boot ROM " +
                       juce::String::toHexString(bytes + kSnapshotShaOffset, (int)sha.size(), 0) +
                       "; choose that ROM to restore it.");
   std::unique_ptr<mirage::Machine> m;
   try {
     m = host_->buildMachine(std::span<const uint8_t>(bytes, size));
   } catch (const std::exception& e) {
-    return setProblem("This project's Mirage cannot be restored: " + juce::String(e.what()));
+    return setRestoreProblem("This project's Mirage cannot be restored: " + juce::String(e.what()));
   }
   if (!host_->postRestore(std::move(m)))
-    return setProblem("This project's Mirage cannot be restored: the plugin is busy.");
-  setProblem({});
+    return setRestoreProblem("This project's Mirage cannot be restored: the plugin is busy.");
+  setRestoreProblem({});
   ++restoresOut_;
   restorePending_ = true;
   lastSnapshotSize_ = size;
@@ -352,15 +392,38 @@ void MirageProcessor::restoreLocked(const juce::MemoryBlock& blob) {
 }
 
 void MirageProcessor::timerCallback() {
+  if (host_) {
+    while (auto r = host_->takeReturnedWave()) {
+      if (r->why == mirage::WaveReturn::RefusedDriveBusy) {
+        importNotice_ = "Not imported: the drive was busy";
+        continue;
+      }
+      // Pages within the half, decimal and in hex as the OS shows them (as the app).
+      const auto& w = *r->write;
+      const int first = int(w.address & 0xFFFF) / 256;
+      const int last = int((w.address & 0xFFFF) + w.bytes.size() - 1) / 256;
+      auto hex = [](int v, int digits) { return juce::String::toHexString(v).toUpperCase().paddedLeft('0', digits); };
+      importNotice_ = "Imported " + juce::String((juce::int64)w.bytes.size()) + " bytes at $" + hex(int(w.address), 5) +
+                      " (pages " + juce::String(first) + "-" + juce::String(last) + ", hex " + hex(first, 2) + "-" +
+                      hex(last, 2) + ")";
+    }
+  }
   std::unique_lock lock(stateMutex_, std::try_to_lock);
   if (!lock.owns_lock() || !session_) return;  // a state call is running: next tick
-  session_->poll();
+  const juce::ScopedValueSetter held(sessionHeld_, true);
+  if (auto outcome = session_->poll()) saveOutcome_ = std::move(outcome);
   // Always: this also frees restores that a later, unrestorable blob superseded.
   const bool confirmed = confirmRestores();
   if (!restorePending_)
     adoptIdentity();
   else if (confirmed)
     finishRestore();
+  // The editor's disk work that found the lock busy, in order.
+  while (!deferred_.empty() && session_) {
+    auto work = std::move(deferred_.front());
+    deferred_.pop_front();
+    work(*session_);
+  }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new MirageProcessor(); }

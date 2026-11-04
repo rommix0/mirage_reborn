@@ -1,14 +1,20 @@
-// plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img>
+// plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img> [--editor-png <out.png>]
 // Loads the built plugin through JUCE's own VST3 hosting and checks its buses,
 // its state before prepareToPlay, a restored SND-A01 playing a note, a state
 // round trip into a second instance (bit-identical output) and the blobs it
-// cannot restore (silence, and the same bytes back). Exit 0 on success, 1 on a
-// failed check (the reason on stderr), 2 for usage.
+// cannot restore (silence, and the same bytes back). With --editor-png it
+// instead opens the editor of a restored SND-A01 in a window all but off
+// screen, sizes it to 1200 px wide, checks it keeps its aspect ratio and writes
+// a capture of the window to <out.png>. Exit 0 on success, 1 on a failed check
+// (the reason on stderr), 2 for usage.
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_gui_basics/juce_gui_basics.h>
 
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -133,10 +139,36 @@ bool hasParameterNamed(juce::AudioPluginInstance& p, const juce::String& name) {
   return false;
 }
 
-void run(const juce::File& pluginFile, const juce::File& romFile, const juce::File& diskFile) {
+std::unique_ptr<juce::AudioPluginInstance> makeInstance(const juce::File& pluginFile) {
+  juce::VST3PluginFormat format;
+  juce::OwnedArray<juce::PluginDescription> types;
+  format.findAllTypesForFile(types, pluginFile.getFullPathName());
+  check(types.size() == 1, "expected one plugin in " + pluginFile.getFullPathName() + ", found " +
+                               juce::String(types.size()));
+  juce::String error;
+  auto p = format.createInstanceFromDescription(*types[0], kRate, kBlock, error);
+  check(p != nullptr, "cannot create the plugin: " + error);
+  return p;
+}
+
+juce::MemoryBlock loadRom(const juce::File& romFile) {
   juce::MemoryBlock rom;
   check(romFile.loadFileAsData(rom) && rom.getSize() == mirage::Machine::kBootRomSize,
         romFile.getFullPathName() + ": cannot read a 4096-byte boot ROM");
+  return rom;
+}
+
+// SND-A01 booted headless to 16 s: its first sound is playable.
+std::vector<uint8_t> bootSnapshot(std::span<const uint8_t> romBytes, const juce::File& diskFile) {
+  mirage::Machine m(romBytes);
+  m.insertDisk(mirage::DiskImage::loadFile(diskFile.getFullPathName().toStdString()));
+  m.powerOn();
+  m.runCycles(16 * mirage::kCpuClockHz);
+  return m.saveState();
+}
+
+void run(const juce::File& pluginFile, const juce::File& romFile, const juce::File& diskFile) {
+  const auto rom = loadRom(romFile);
   const std::span<const uint8_t> romBytes(static_cast<const uint8_t*>(rom.getData()), rom.getSize());
 
   // decodePluginState on its own: a round trip, and what it must refuse.
@@ -167,17 +199,7 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
     pass("decodePluginState");
   }
 
-  juce::VST3PluginFormat format;
-  juce::OwnedArray<juce::PluginDescription> types;
-  format.findAllTypesForFile(types, pluginFile.getFullPathName());
-  check(types.size() == 1, "expected one plugin in " + pluginFile.getFullPathName() + ", found " +
-                               juce::String(types.size()));
-  const auto make = [&] {
-    juce::String error;
-    auto p = format.createInstanceFromDescription(*types[0], kRate, kBlock, error);
-    check(p != nullptr, "cannot create the plugin: " + error);
-    return p;
-  };
+  const auto make = [&] { return makeInstance(pluginFile); };
 
   // 1. Buses, MIDI and parameters.
   auto a = make();
@@ -202,14 +224,7 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
   }
 
   // 3. SND-A01 booted headless to 16 s, restored into the plugin.
-  std::vector<uint8_t> booted;
-  {
-    mirage::Machine m(romBytes);
-    m.insertDisk(mirage::DiskImage::loadFile(diskFile.getFullPathName().toStdString()));
-    m.powerOn();
-    m.runCycles(16 * mirage::kCpuClockHz);
-    booted = m.saveState();
-  }
+  const auto booted = bootSnapshot(romBytes, diskFile);
   setState(*a, snapshotBlob(booted));
 
   // 4. It plays.
@@ -286,12 +301,133 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
   a->releaseResources();
 }
 
+// Dispatches this thread's window messages for `ms`. Both JUCE copies, the
+// tool's and the plugin's, post theirs to this thread.
+void pump(int ms) {
+  const auto end = juce::Time::getMillisecondCounter() + (juce::uint32)ms;
+  while (juce::Time::getMillisecondCounter() < end) {
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+    Sleep(5);
+  }
+}
+
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+// The window's client area as the compositor draws it. The plugin's editor is
+// a child window of another JUCE copy, so createComponentSnapshot cannot see it.
+juce::Image captureWindow(HWND hwnd) {
+  RECT r{};
+  GetClientRect(hwnd, &r);
+  const int w = r.right - r.left, h = r.bottom - r.top;
+  check(w > 0 && h > 0, "the editor window has no area");
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = -h;  // top-down rows
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  void* bits = nullptr;
+  HBITMAP bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  const auto old = SelectObject(mem, bmp);
+  const bool printed = PrintWindow(hwnd, mem, PW_CLIENTONLY | PW_RENDERFULLCONTENT) != 0;
+  GdiFlush();
+  juce::Image img(juce::Image::RGB, w, h, false);
+  {
+    const juce::Image::BitmapData d(img, juce::Image::BitmapData::writeOnly);
+    const auto* src = static_cast<const juce::uint8*>(bits);
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const auto* px = src + ((size_t)y * (size_t)w + (size_t)x) * 4;  // B, G, R, unused
+        d.setPixelColour(x, y, juce::Colour(px[2], px[1], px[0]));
+      }
+  }
+  SelectObject(mem, old);
+  DeleteObject(bmp);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+  check(printed, "PrintWindow failed");
+  return img;
+}
+
+int distinctColours(const juce::Image& img) {
+  std::set<juce::uint32> seen;
+  for (int y = 0; y < img.getHeight(); y += 3)
+    for (int x = 0; x < img.getWidth(); x += 3) seen.insert(img.getPixelAt(x, y).getARGB());
+  return (int)seen.size();
+}
+
+// The editor of an instance restored as in run() (SND-A01 at 16 s), with the
+// disk's identity (a temporary copy named SND-A01.img), on the desktop with
+// one pixel on screen and sized to 1200 px wide. Its capture is written to `png`.
+void editorPng(const juce::File& pluginFile, const juce::File& romFile, const juce::File& diskFile,
+               const juce::File& png) {
+  const auto rom = loadRom(romFile);
+  const auto booted =
+      bootSnapshot(std::span<const uint8_t>(static_cast<const uint8_t*>(rom.getData()), rom.getSize()), diskFile);
+  const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                       .getNonexistentChildFile("plugin_editor_smoke", "");
+  check(dir.createDirectory(), "cannot create " + dir.getFullPathName());
+  const auto disk = dir.getChildFile("SND-A01.img");
+  check(diskFile.copyFileTo(disk), "cannot copy SND-A01 to " + disk.getFullPathName());
+  PluginStateData d;
+  d.machine = juce::MemoryBlock(booted.data(), booted.size());
+  d.diskPath = disk.getFullPathName();
+  d.diskFormat = (int)mirage::DiskFormat::Raw;
+
+  auto p = makeInstance(pluginFile);
+  setState(*p, encodePluginState(d));
+  prepare(*p);
+  render(*p, 0.5);  // publishes the display and the drive status
+  {
+    std::unique_ptr<juce::AudioProcessorEditor> editor(p->createEditorIfNeeded());
+    check(editor != nullptr, "the plugin has no editor");
+    // One pixel on screen, in the corner: a window wholly off screen is never
+    // repainted by the plugin's renderer.
+    const auto corner = [&] { editor->setTopLeftPosition(1 - editor->getWidth(), 1 - editor->getHeight()); };
+    corner();
+    editor->addToDesktop(juce::ComponentPeer::windowIsTemporary);
+    pump(300);
+    // A square: the editor's fixed aspect ratio takes it back to its own height.
+    editor->setSize(1200, 1200);
+    corner();
+    pump(700);
+    const int w = editor->getWidth(), h = editor->getHeight();
+    check(w == 1200 && h > 300 && h < 800, "the editor did not keep its aspect ratio at 1200 px wide (got " +
+                                               juce::String(w) + " x " + juce::String(h) + ")");
+    auto img = captureWindow((HWND)editor->getPeer()->getNativeHandle());
+    if (img.getWidth() != w)  // a scaled display: the capture is in physical pixels
+      img = img.rescaled(w, juce::roundToInt(img.getHeight() * (double)w / img.getWidth()),
+                         juce::Graphics::highResamplingQuality);
+    const int colours = distinctColours(img);
+    check(colours > 50, "the editor capture is blank (" + juce::String(colours) + " colours)");
+    png.deleteFile();
+    juce::FileOutputStream out(png);
+    check(out.openedOk() && juce::PNGImageFormat().writeImageToStream(img, out),
+          "cannot write " + png.getFullPathName());
+    pass("editor " + juce::String(w) + " x " + juce::String(h) + " written to " + png.getFullPathName());
+  }
+  p->releaseResources();
+  p.reset();
+  dir.deleteRecursively();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   mirage::cli::makeNonInteractive();  // a Debug assertion reports on stderr, never in a dialog
-  if (argc != 4) {
-    std::cerr << "usage: plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img>" << std::endl;
+  const bool editor = argc == 6 && std::string(argv[4]) == "--editor-png";
+  if (argc != 4 && !editor) {
+    std::cerr << "usage: plugin_host_smoke <Mirage.vst3> <rom> <SND-A01.img> [--editor-png <out.png>]"
+              << std::endl;
     return 2;
   }
   // The plugin finds its ROM through this override first (PluginSettings.h), so
@@ -305,8 +441,11 @@ int main(int argc, char** argv) {
 #endif
   juce::ScopedJuceInitialiser_GUI juce;
   try {
-    run(juce::File(juce::String::fromUTF8(argv[1])), juce::File(juce::String::fromUTF8(argv[2])),
-        juce::File(juce::String::fromUTF8(argv[3])));
+    const auto arg = [&](int i) { return juce::File(juce::String::fromUTF8(argv[i])); };
+    if (editor)
+      editorPng(arg(1), arg(2), arg(3), arg(5));
+    else
+      run(arg(1), arg(2), arg(3));
   } catch (const Failure& f) {
     std::cerr << "FAIL: " << f.why << std::endl;
     return 1;

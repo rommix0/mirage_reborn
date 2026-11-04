@@ -2,10 +2,12 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "PluginSettings.h"
@@ -56,7 +58,9 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
 
   // Builds the machine once a boot ROM is found (the constructor tries; the
   // editor calls this after setBootRom). A project state kept for want of a ROM
-  // is then restored. True when a machine exists.
+  // is then restored; when a machine exists but the project's could not be
+  // restored, it is rebuilt from the ROM found now and the restore retried.
+  // True when a machine exists.
   bool startMachine();
   // Why the project's Mirage could not be restored; empty when it was (or there
   // was nothing to restore). Any thread.
@@ -65,6 +69,30 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   // thread did not answer) and handed the DAW an older state, or none; empty
   // once a later one succeeds. Any thread.
   juce::String saveProblem() const;
+
+  // The editor's view of the processor. Message thread.
+  mirage::RealtimeHost* host() const { return host_.get(); }  // null until a ROM is found
+  // Runs `work` with the DiskSession under the state lock: now if the lock is
+  // free or this call is already inside such work, else queued for the 10 Hz
+  // timer (a state call may hold the lock for seconds; the message thread
+  // never waits for it). Dropped while there is no machine.
+  void withSession(std::function<void(mirage::DiskSession&)> work);
+  // As withSession, but only now: false (and nothing run) if it would queue.
+  bool trySession(const std::function<void(mirage::DiskSession&)>& work);
+  // A finished save's outcome, once. Kept until an editor takes it, so a save
+  // that ends while the editor is closed is reported when it next opens.
+  std::optional<mirage::SaveOutcome> takeSaveOutcome() { return std::exchange(saveOutcome_, std::nullopt); }
+  // An Import WAV's outcome (a wave write back from the audio thread), once.
+  juce::String takeImportNotice() { return std::exchange(importNotice_, {}); }
+  // Gives up the project's Mirage that could not be restored: power-cycles the
+  // machine, which runs again, then runs `then`. Through withSession.
+  void discardSavedState(std::function<void()> then);
+  int editorWidth() const { return editorW_.load(); }
+  int editorHeight() const { return editorH_.load(); }
+  void setEditorSize(int w, int h) {
+    editorW_ = w;
+    editorH_ = h;
+  }
 
   juce::AudioProcessorValueTreeState params;
 
@@ -81,10 +109,25 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   bool confirmRestores();  // frees the machines restores replaced; true when none is pending
   void finishRestore();    // a confirmed restore: no longer pending; adopt its disk identity
   void adoptIdentity();    // pendingIdentity_ into the DiskSession, unless a save is in flight
+  void setRestoreProblem(const juce::String& why);  // also silences (or not) the machine
 
   juce::SharedResourcePointer<PluginShared> shared_;
   std::unique_ptr<mirage::RealtimeHost> host_;
   std::unique_ptr<mirage::DiskSession> session_;
+  // Hosts (and their sessions) replaced by startMachine.
+  // ponytail: kept until the processor goes, since the audio thread may still
+  // hold a replaced host's pointer; a ROM change is a rare user action.
+  struct Retired {
+    std::unique_ptr<mirage::RealtimeHost> host;
+    std::unique_ptr<mirage::DiskSession> session;  // destroyed first
+  };
+  std::vector<Retired> retired_;
+  // Message thread: DiskSession work waiting for the state lock, and whether
+  // such work (or the timer) holds it now.
+  std::deque<std::function<void(mirage::DiskSession&)>> deferred_;
+  bool sessionHeld_ = false;
+  std::optional<mirage::SaveOutcome> saveOutcome_;  // message thread
+  juce::String importNotice_;                       // message thread
   // host_, published as soon as startMachine builds it (prepared first if
   // prepareToPlay already ran); read by the audio thread.
   std::atomic<mirage::RealtimeHost*> live_{nullptr};

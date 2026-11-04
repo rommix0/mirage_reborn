@@ -20,8 +20,15 @@ juce_add_plugin(MiragePlugin
 
 target_sources(MiragePlugin PRIVATE
   src/PluginProcessor.cpp
+  src/PluginEditor.cpp
   src/PluginState.cpp
-  src/PluginSettings.cpp)
+  src/PluginSettings.cpp
+  # The app's UI, shared as is (the panel artwork is finished).
+  ../app/src/PanelComponent.cpp
+  ../app/src/ImportDialog.cpp
+  ../app/src/InputMeter.cpp
+  ../app/src/DiskActions.cpp)
+target_include_directories(MiragePlugin PRIVATE ../app/src)
 
 target_compile_definitions(MiragePlugin PUBLIC
   JUCE_VST3_CAN_REPLACE_VST2=0
@@ -31,6 +38,7 @@ target_compile_definitions(MiragePlugin PUBLIC
 
 target_link_libraries(MiragePlugin
   PRIVATE
+    MirageBranding
     mirage_host
     juce::juce_audio_utils
   PUBLIC
@@ -62,3 +70,13 @@ add_test(NAME plugin_vst3_smoke
                  "-DDISK=${MIRAGE_ASSET_ROOT}/Factory Library/IMG/SND-A01.img"
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
 set_tests_properties(plugin_vst3_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+
+# The editor of a restored SND-A01, captured at 1200 px wide.
+add_test(NAME plugin_editor_png_smoke
+         COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:plugin_host_smoke>
+                 -DPLUGIN_DLL=$<TARGET_FILE:MiragePlugin_VST3>
+                 "-DROM=${MIRAGE_ROM}"
+                 "-DDISK=${MIRAGE_ASSET_ROOT}/Factory Library/IMG/SND-A01.img"
+                 -DEDITOR_PNG=${CMAKE_BINARY_DIR}/plugin_editor_smoke.png
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
+set_tests_properties(plugin_editor_png_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
