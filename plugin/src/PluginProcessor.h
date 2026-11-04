@@ -60,8 +60,11 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   // editor calls this after setBootRom). A project state kept for want of a ROM
   // is then restored; when a machine exists but the project's could not be
   // restored, it is rebuilt from the ROM found now and the restore retried.
-  // True when a machine exists.
+  // True when a machine exists. Blocks on the state lock: for the constructor.
   bool startMachine();
+  // startMachine for the message thread, which never waits for the state lock:
+  // when it is busy, the 10 Hz timer does it (false until then).
+  bool requestStartMachine();
   // Why the project's Mirage could not be restored; empty when it was (or there
   // was nothing to restore). Any thread.
   juce::String restoreProblem() const;
@@ -110,13 +113,17 @@ class MirageProcessor : public juce::AudioProcessor, public juce::VST3ClientExte
   void finishRestore();    // a confirmed restore: no longer pending; adopt its disk identity
   void adoptIdentity();    // pendingIdentity_ into the DiskSession, unless a save is in flight
   void setRestoreProblem(const juce::String& why);  // also silences (or not) the machine
+  bool startMachineLocked();  // under stateMutex_
+  void freeRetired();         // under stateMutex_, on the timer
 
   juce::SharedResourcePointer<PluginShared> shared_;
   std::unique_ptr<mirage::RealtimeHost> host_;
   std::unique_ptr<mirage::DiskSession> session_;
-  // Hosts (and their sessions) replaced by startMachine.
-  // ponytail: kept until the processor goes, since the audio thread may still
-  // hold a replaced host's pointer; a ROM change is a rare user action.
+  juce::MemoryBlock hostRom_;  // the ROM host_ was built from
+  bool startPending_ = false;  // requestStartMachine found the lock busy (message thread)
+  // Hosts (and their sessions) replaced by startMachine, kept until the audio
+  // thread has run a block on the new host (it may still hold a replaced
+  // host's pointer) and the editor shows the new one (freeRetired).
   struct Retired {
     std::unique_ptr<mirage::RealtimeHost> host;
     std::unique_ptr<mirage::DiskSession> session;  // destroyed first

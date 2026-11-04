@@ -48,6 +48,9 @@ class MirageEditor : public juce::AudioProcessorEditor,
   void resized() override;
   bool keyPressed(const juce::KeyPress&) override;
   bool keyStateChanged(bool isKeyDown) override;
+  // The host the panel and the disk actions were built for (the processor frees
+  // a replaced host only once the editor has moved on).
+  const mirage::RealtimeHost* shownHost() const { return host_; }
 
  private:
   enum CommandIds {

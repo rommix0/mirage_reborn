@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 
+#include "mirage/realtime_host.h"
 #include "mirage/wav_import.h"
 
 // The File > Import WAV... dialog (spec 6.7). It is a window of its own, so
@@ -16,6 +17,11 @@
 // the drive LED is on, or no audio device runs). It converts nothing itself:
 // Import calls onImport with the settings, and the owner converts, posts the
 // write and closes the dialog.
+// The status strip's line for a wave write back from the audio thread: where
+// it went, in pages within the half (decimal and in hex as the OS shows
+// them), or that the drive was busy. Shared by the app and the plugin.
+juce::String importNotice(const mirage::ReturnedWave& r);
+
 class ImportDialog : public juce::Component, private juce::Timer {
  public:
   static constexpr int kWidth = 760, kHeight = 520;

@@ -188,8 +188,9 @@ void MirageEditor::buildMachineView() {
   auto* host = proc_.host();
   mirage::DiskSession* session = nullptr;
   if (host != nullptr && !proc_.trySession([&](mirage::DiskSession& s) { session = &s; }))
-    return;  // a state call holds the lock: next tick
+    return updateView();  // a state call holds the lock: built on a later tick
   delete importDialog_.getComponent();  // it would write to the old host
+  releaseHeldKeys(true);                // on the old panel
   actions_.reset();
   volume_.reset();
   panel_.reset();
@@ -203,7 +204,12 @@ void MirageEditor::buildMachineView() {
         *this, *session, [this] { return diskFolder(); },
         [](const juce::File& dir) { saveFolder("lastDiskDir", dir); }, [this] { refresh(); },
         [this](std::function<void()> work) {
-          proc_.withSession([work = std::move(work)](mirage::DiskSession&) { work(); });
+          // Queued work may run after this editor has gone, or after the
+          // processor replaced the host (the view not yet rebuilt): dropped then.
+          proc_.withSession([safe = juce::Component::SafePointer<MirageEditor>(this),
+                             work = std::move(work)](mirage::DiskSession&) {
+            if (safe != nullptr && safe->host_ == safe->proc_.host()) work();
+          });
         });
   }
   blocks_ = 0;
@@ -213,17 +219,21 @@ void MirageEditor::buildMachineView() {
 }
 
 void MirageEditor::updateView() {
-  const bool showPanel = host_ != nullptr && problem_.isEmpty();
+  // The prompt follows the processor: a machine whose view is not built yet
+  // (the state lock was busy) shows neither the panel nor the ROM prompt.
+  const bool machine = proc_.host() != nullptr;
+  const bool showPanel = panel_ != nullptr && problem_.isEmpty();
+  const bool showPrompt = !machine || problem_.isNotEmpty();
   if (panel_) panel_->setVisible(showPanel);
-  message_.setVisible(!showPanel);
-  romButton_.setVisible(!showPanel);
-  if (!showPanel) {
-    releaseHeldKeys(true);
+  message_.setVisible(showPrompt);
+  romButton_.setVisible(showPrompt);
+  if (!showPanel) releaseHeldKeys(true);
+  if (showPrompt) {
     message_.setText(problem_.isNotEmpty() ? problem_
                                            : juce::String("No Mirage boot ROM was found. The plugin is silent "
                                                           "until you choose one (a 4096-byte file)."),
                      juce::dontSendNotification);
-    romButton_.setButtonText(host_ != nullptr ? "Choose ROM" : "Choose the Mirage boot ROM");
+    romButton_.setButtonText(machine ? "Choose ROM" : "Choose the Mirage boot ROM");
   }
   resized();
   repaint();
@@ -396,8 +406,9 @@ void MirageEditor::chooseRom() {
                           if (!setBootRom(file))
                             return safe->showError("Not a Mirage boot ROM",
                                                    file.getFileName() + " is not a 4096-byte boot ROM.");
-                          // ponytail: waits for the state lock, held by a state call for at most ~5 s.
-                          safe->proc_.startMachine();
+                          // Never waits for the state lock: when it is busy, the
+                          // processor's timer builds the machine and tick() sees it.
+                          safe->proc_.requestStartMachine();
                           safe->tick();
                         });
 }

@@ -358,3 +358,17 @@ void ImportDialog::resized() {
   warning_.setBounds(r.removeFromBottom(40));
   info_.setBounds(r);
 }
+
+juce::String importNotice(const mirage::ReturnedWave& r) {
+  if (r.why == mirage::WaveReturn::RefusedDriveBusy) return "Not imported: the drive was busy";
+  // Pages within the half, decimal and in hex as the OS shows them.
+  const auto& w = *r.write;
+  const int first = int(w.address & 0xFFFF) / 256;
+  const int last = int((w.address & 0xFFFF) + w.bytes.size() - 1) / 256;
+  auto hex = [](int v, int digits) {
+    return juce::String::toHexString(v).toUpperCase().paddedLeft('0', digits);
+  };
+  return "Imported " + juce::String((juce::int64)w.bytes.size()) + " bytes at $" + hex(int(w.address), 5) +
+         " (pages " + juce::String(first) + "-" + juce::String(last) + ", hex " + hex(first, 2) + "-" +
+         hex(last, 2) + ")";
+}

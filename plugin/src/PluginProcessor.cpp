@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include "ImportDialog.h"
 #include "PluginEditor.h"
 
 namespace {
@@ -64,6 +65,22 @@ MirageProcessor::~MirageProcessor() { stopTimer(); }
 
 bool MirageProcessor::startMachine() {
   const std::lock_guard lock(stateMutex_);
+  return startMachineLocked();
+}
+
+bool MirageProcessor::requestStartMachine() {
+  // Inside session work this thread holds the lock already, and the session
+  // must outlive that work: the timer starts it.
+  std::unique_lock lock(stateMutex_, std::defer_lock);
+  if (sessionHeld_ || !lock.try_lock()) {
+    startPending_ = true;
+    return false;
+  }
+  return startMachineLocked();
+}
+
+bool MirageProcessor::startMachineLocked() {
+  startPending_ = false;
   // A project's Mirage kept unrestored (silent_: no machine runs) may need
   // another ROM: rebuild from the one found now.
   const bool unrestored = !keptBlob_.isEmpty() && !restorePending_;
@@ -71,12 +88,18 @@ bool MirageProcessor::startMachine() {
   juce::File file;
   const auto rom = findBootRom(file);
   if (!rom) return host_ != nullptr;
+  if (host_ && *rom == hostRom_) {  // the same ROM (so the same SHA-1): only retry the restore
+    restoreLocked(juce::MemoryBlock(keptBlob_));
+    return true;
+  }
   if (host_) {
     live_.store(nullptr, std::memory_order_release);
     retired_.push_back({std::move(host_), std::move(session_)});
     snapshotsOut_ = restoresOut_ = 0;  // the replaced host's
     pendingIdentity_.reset();
+    deferred_.clear();  // queued for the replaced session
   }
+  hostRom_ = *rom;
   host_ = std::make_unique<mirage::RealtimeHost>(
       std::span<const uint8_t>(static_cast<const uint8_t*>(rom->getData()), rom->getSize()),
       mirage::HostOptions{.muteCalibration = true, .fastDisk = true});
@@ -393,23 +416,13 @@ void MirageProcessor::restoreLocked(const juce::MemoryBlock& blob) {
 
 void MirageProcessor::timerCallback() {
   if (host_) {
-    while (auto r = host_->takeReturnedWave()) {
-      if (r->why == mirage::WaveReturn::RefusedDriveBusy) {
-        importNotice_ = "Not imported: the drive was busy";
-        continue;
-      }
-      // Pages within the half, decimal and in hex as the OS shows them (as the app).
-      const auto& w = *r->write;
-      const int first = int(w.address & 0xFFFF) / 256;
-      const int last = int((w.address & 0xFFFF) + w.bytes.size() - 1) / 256;
-      auto hex = [](int v, int digits) { return juce::String::toHexString(v).toUpperCase().paddedLeft('0', digits); };
-      importNotice_ = "Imported " + juce::String((juce::int64)w.bytes.size()) + " bytes at $" + hex(int(w.address), 5) +
-                      " (pages " + juce::String(first) + "-" + juce::String(last) + ", hex " + hex(first, 2) + "-" +
-                      hex(last, 2) + ")";
-    }
+    while (auto r = host_->takeReturnedWave()) importNotice_ = importNotice(*r);
   }
   std::unique_lock lock(stateMutex_, std::try_to_lock);
-  if (!lock.owns_lock() || !session_) return;  // a state call is running: next tick
+  if (!lock.owns_lock()) return;  // a state call is running: next tick
+  if (startPending_) startMachineLocked();
+  freeRetired();
+  if (!session_) return;
   const juce::ScopedValueSetter held(sessionHeld_, true);
   if (auto outcome = session_->poll()) saveOutcome_ = std::move(outcome);
   // Always: this also frees restores that a later, unrestorable blob superseded.
@@ -424,6 +437,16 @@ void MirageProcessor::timerCallback() {
     deferred_.pop_front();
     work(*session_);
   }
+}
+
+void MirageProcessor::freeRetired() {
+  if (retired_.empty()) return;
+  // The audio thread has moved on to the new host once it ran a block on it
+  // (or never ran one), and the editor once it shows the new host.
+  if (preparedBlock_ > 0 && host_->status().blocks == 0) return;
+  if (auto* editor = dynamic_cast<MirageEditor*>(getActiveEditor()); editor && editor->shownHost() != host_.get())
+    return;
+  retired_.clear();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new MirageProcessor(); }

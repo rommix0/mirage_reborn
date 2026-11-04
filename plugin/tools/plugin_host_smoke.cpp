@@ -14,9 +14,9 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <set>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "PluginState.h"
@@ -36,6 +36,12 @@ void check(bool ok, const juce::String& why) {
 }
 
 void pass(const juce::String& what) { std::cout << "ok: " << what << std::endl; }
+
+// Deletes a temporary file or folder however the scope ends.
+struct TempFile {
+  juce::File file;
+  ~TempFile() { file.deleteRecursively(); }
+};
 
 constexpr double kRate = 48000.0;
 constexpr int kBlock = 512;
@@ -248,8 +254,9 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
   // 5b. The disk identity survives a restore: the state of an instance restored
   // with a disk path and format hands them back.
   {
-    const auto tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                         .getNonexistentChildFile("plugin_smoke_SND-A01", ".img");
+    const TempFile guard{juce::File::getSpecialLocation(juce::File::tempDirectory)
+                             .getNonexistentChildFile("plugin_smoke_SND-A01", ".img")};
+    const auto& tmp = guard.file;
     check(diskFile.copyFileTo(tmp), "cannot copy SND-A01 to " + tmp.getFullPathName());
     PluginStateData d;
     d.machine = juce::MemoryBlock(booted.data(), booted.size());
@@ -263,7 +270,6 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
     const auto got = decodePluginState(back.getData(), back.getSize());
     c->releaseResources();
     c.reset();
-    tmp.deleteFile();
     check(got.has_value() && got->diskPath == d.diskPath && got->diskFormat == d.diskFormat && !got->diskUntitled,
           "the disk identity did not survive (got path '" + (got ? got->diskPath : juce::String()) + "')");
     pass("disk identity survives a restore");
@@ -358,11 +364,21 @@ juce::Image captureWindow(HWND hwnd) {
   return img;
 }
 
-int distinctColours(const juce::Image& img) {
-  std::set<juce::uint32> seen;
-  for (int y = 0; y < img.getHeight(); y += 3)
-    for (int x = 0; x < img.getWidth(); x += 3) seen.insert(img.getPixelAt(x, y).getARGB());
-  return (int)seen.size();
+bool sameImage(const juce::Image& a, const juce::Image& b) {
+  if (!a.isValid() || !b.isValid() || a.getBounds() != b.getBounds()) return false;
+  for (int y = 0; y < a.getHeight(); ++y)
+    for (int x = 0; x < a.getWidth(); ++x)
+      if (a.getPixelAt(x, y) != b.getPixelAt(x, y)) return false;
+  return true;
+}
+
+// Row y is painted: under 5% of it is the black the host and the VST3
+// wrapper fill a window with before (or outside) the plugin's editor paints.
+bool rowPainted(const juce::Image& img, int y) {
+  int black = 0;
+  for (int x = 0; x < img.getWidth(); ++x)
+    if ((img.getPixelAt(x, y).getARGB() & 0xFFFFFF) == 0) ++black;
+  return black * 20 < img.getWidth();
 }
 
 // The editor of an instance restored as in run() (SND-A01 at 16 s), with the
@@ -373,8 +389,9 @@ void editorPng(const juce::File& pluginFile, const juce::File& romFile, const ju
   const auto rom = loadRom(romFile);
   const auto booted =
       bootSnapshot(std::span<const uint8_t>(static_cast<const uint8_t*>(rom.getData()), rom.getSize()), diskFile);
-  const auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                       .getNonexistentChildFile("plugin_editor_smoke", "");
+  const TempFile guard{
+      juce::File::getSpecialLocation(juce::File::tempDirectory).getNonexistentChildFile("plugin_editor_smoke", "")};
+  const auto& dir = guard.file;
   check(dir.createDirectory(), "cannot create " + dir.getFullPathName());
   const auto disk = dir.getChildFile("SND-A01.img");
   check(diskFile.copyFileTo(disk), "cannot copy SND-A01 to " + disk.getFullPathName());
@@ -395,20 +412,30 @@ void editorPng(const juce::File& pluginFile, const juce::File& romFile, const ju
     const auto corner = [&] { editor->setTopLeftPosition(1 - editor->getWidth(), 1 - editor->getHeight()); };
     corner();
     editor->addToDesktop(juce::ComponentPeer::windowIsTemporary);
-    pump(300);
     // A square: the editor's fixed aspect ratio takes it back to its own height.
     editor->setSize(1200, 1200);
     corner();
-    pump(700);
+    // Captures each 100 ms until two in a row are the same and both the menu
+    // bar (top) and the status strip (bottom) are painted: the editor has
+    // settled at its new size. A stale frame of the old size leaves the
+    // bottom rows black.
+    juce::Image img, last;
+    bool settled = false;
+    for (const auto end = juce::Time::getMillisecondCounter() + 10000;
+         !settled && juce::Time::getMillisecondCounter() < end;) {
+      pump(100);
+      last = std::exchange(img, captureWindow((HWND)editor->getPeer()->getNativeHandle()));
+      const int top = img.getHeight() * 12 / std::max(editor->getHeight(), 1);  // the menu bar's middle
+      settled = sameImage(img, last) && rowPainted(img, top) && rowPainted(img, img.getHeight() - 1 - top);
+    }
     const int w = editor->getWidth(), h = editor->getHeight();
     check(w == 1200 && h > 300 && h < 800, "the editor did not keep its aspect ratio at 1200 px wide (got " +
                                                juce::String(w) + " x " + juce::String(h) + ")");
-    auto img = captureWindow((HWND)editor->getPeer()->getNativeHandle());
+    check(settled, "the editor capture did not settle within 10 s with its menu bar and strip painted "
+                   "(a stale or blank frame)");
     if (img.getWidth() != w)  // a scaled display: the capture is in physical pixels
       img = img.rescaled(w, juce::roundToInt(img.getHeight() * (double)w / img.getWidth()),
                          juce::Graphics::highResamplingQuality);
-    const int colours = distinctColours(img);
-    check(colours > 50, "the editor capture is blank (" + juce::String(colours) + " colours)");
     png.deleteFile();
     juce::FileOutputStream out(png);
     check(out.openedOk() && juce::PNGImageFormat().writeImageToStream(img, out),
@@ -416,8 +443,6 @@ void editorPng(const juce::File& pluginFile, const juce::File& romFile, const ju
     pass("editor " + juce::String(w) + " x " + juce::String(h) + " written to " + png.getFullPathName());
   }
   p->releaseResources();
-  p.reset();
-  dir.deleteRecursively();
 }
 
 }  // namespace
