@@ -2114,7 +2114,7 @@ TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
   RealtimeHost host(kIdleRom);
   host.prepare(256, 48000);
   std::atomic<bool> stop{false};
-  uint64_t prepares = 0;  // Catch2 is not thread-safe: the worker only counts
+  std::atomic<uint64_t> prepares{0};  // Catch2 is not thread-safe: the worker only counts
   std::thread device([&] {
     for (uint64_t i = 0; !stop.load(); ++i) {
       // Growing sizes: every prepare() reallocates the buffers a pump reads or writes.
@@ -2132,9 +2132,12 @@ TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
       if (!r->ok) ++notOk;
     }
   };
-  // 1000 rounds, or 10 s at most.
+  // 1000 rounds and until the device has prepared more than 10 times (a
+  // Release build runs the rounds in ~0.1 s, and Windows sleeps in ~15 ms
+  // steps), or 10 s at most.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  for (int i = 0; i < 1000 && std::chrono::steady_clock::now() < deadline; ++i) {
+  for (int i = 0;
+       (i < 1000 || prepares.load() <= 10) && std::chrono::steady_clock::now() < deadline; ++i) {
     if (host.postSnapshot(reservedBuffer(1 << 20))) ++posted;
     if (host.pumpWhileIdle()) ++pumped;
     drain();
@@ -2145,7 +2148,7 @@ TEST_CASE("host: prepare waits out pumpWhileIdle on another thread") {
     REQUIRE(host.pumpWhileIdle());
     drain();
   }
-  INFO("posted " << posted << " pumped " << pumped << " prepares " << prepares);
+  INFO("posted " << posted << " pumped " << pumped << " prepares " << prepares.load());
   CHECK(posted > 100);
   CHECK(returned == posted);
   CHECK(notOk == 0);

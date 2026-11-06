@@ -71,7 +71,8 @@ add_test(NAME plugin_vst3_smoke
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
 set_tests_properties(plugin_vst3_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
 
-# The editor of a restored SND-A01, captured at 1200 px wide.
+# The editor of a restored SND-A01, captured at 1200 px wide (a Win32 window capture).
+if(WIN32)
 add_test(NAME plugin_editor_png_smoke
          COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:plugin_host_smoke>
                  -DPLUGIN_DLL=$<TARGET_FILE:MiragePlugin_VST3>
@@ -80,6 +81,7 @@ add_test(NAME plugin_editor_png_smoke
                  -DEDITOR_PNG=${CMAKE_BINARY_DIR}/plugin_editor_smoke.png
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/plugin_smoke.cmake)
 set_tests_properties(plugin_editor_png_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: missing asset")
+endif()
 
 # MIDI out from a synthetic ROM, in a run of its own (the plugin caches its ROM
 # per process): whole messages, in order, at their frames.

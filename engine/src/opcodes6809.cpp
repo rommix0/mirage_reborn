@@ -1,6 +1,7 @@
 #include "opcodes6809.h"
 
 #include <array>
+#include <cstddef>
 
 namespace mirage {
 namespace {

@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(mirage_emulator LANGUAGES CXX)
+project(mirage_emulator LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# The static engine and host link into the VST3 shared object.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # The user's disk image library and boot ROM (never copied into this repo).
 set(MIRAGE_ASSET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../disks and manuals" CACHE PATH

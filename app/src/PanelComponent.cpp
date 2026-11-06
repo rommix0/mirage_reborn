@@ -25,9 +25,21 @@ constexpr float kSlant = 0.07f;  // the 7-segment digits lean right by this much
 
 Rectangle<float> toRect(const mirage::PanelRect& r) { return {r.x, r.y, r.w, r.h}; }
 
+// Arial, else its metric twin Liberation Sans (Linux), else the default sans
+// serif: JUCE has no fallback for a missing name and crashes drawing with it.
+const juce::String& panelTypeface() {
+  static const juce::String name = [] {
+    const auto installed = juce::Font::findAllTypefaceNames();
+    for (const auto* n : {"Arial", "Liberation Sans"})
+      if (installed.contains(n)) return juce::String(n);
+    return juce::Font::getDefaultSansSerifFontName();
+  }();
+  return name;
+}
+
 juce::Font panelFont(float height, bool bold = false) {
   return juce::Font(
-      juce::FontOptions("Arial", height, bold ? juce::Font::bold : juce::Font::plain));
+      juce::FontOptions(panelTypeface(), height, bold ? juce::Font::bold : juce::Font::plain));
 }
 
 juce::String labelOf(const mirage::PanelButton& b) {

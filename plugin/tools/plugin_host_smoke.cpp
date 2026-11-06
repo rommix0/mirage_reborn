@@ -310,6 +310,9 @@ void run(const juce::File& pluginFile, const juce::File& romFile, const juce::Fi
   a->releaseResources();
 }
 
+// The editor capture is Win32 (window messages, PrintWindow); other platforms
+// skip --editor-png. ponytail: an X11 capture would bring it to Linux.
+#ifdef _WIN32
 // Dispatches this thread's window messages for `ms`. Both JUCE copies, the
 // tool's and the plugin's, post theirs to this thread.
 void pump(int ms) {
@@ -447,6 +450,7 @@ void editorPng(const juce::File& pluginFile, const juce::File& romFile, const ju
   }
   p->releaseResources();
 }
+#endif  // _WIN32
 
 // The synthetic ROM of --midi-out. It transmits, as fast as the ACIA takes
 // them (one byte per 640 cycles), kMidiOutHead, a SysEx of 65,535 bytes (the
@@ -612,7 +616,11 @@ int main(int argc, char** argv) {
     if (midi)
       midiOut(arg(1));
     else if (editor)
+#ifdef _WIN32
       editorPng(arg(1), arg(2), arg(3), arg(5));
+#else
+      throw Failure{"--editor-png is Windows only"};
+#endif
     else
       run(arg(1), arg(2), arg(3));
   } catch (const Failure& f) {
