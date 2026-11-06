@@ -19,17 +19,17 @@ Disk images for use with this emulator can be grabbed here:
 
 This is an early release, and a program created with the assistance of Claude.
 If you notice anything off, please raise an issue. Pull requests are also
-welcome. Windows only so far.
+welcome.
 
-| Part               | What it is                                                                                    |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| `engine/`          | `mirage_engine`: the chips and the machine, JUCE-free and deterministic, with exact snapshots |
-| `host/`            | `mirage_host`: real-time host (`RealtimeHost`), disk sessions, MIDI input feeding; JUCE-free  |
-| `app/`             | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel ([`docs/app.md`](docs/app.md)) |
+| Part               | What it is                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| `engine/`          | `mirage_engine`: the chips and the machine, JUCE-free and deterministic, with exact snapshots             |
+| `host/`            | `mirage_host`: real-time host (`RealtimeHost`), disk sessions, MIDI input feeding; JUCE-free              |
+| `app/`             | the JUCE 8 standalone, `Mirage.exe`, with a replica front panel ([`docs/app.md`](docs/app.md))            |
 | `plugin/`          | the JUCE 8 VST3 plugin, `Mirage.vst3`, the same machine inside a DAW ([`docs/plugin.md`](docs/plugin.md)) |
-| `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys                                |
-| `tests/`           | Catch2 unit and end-to-end tests (`ctest`)                                                    |
-| `docs/`            | the design specs, the plans, the hardware notes and the guides                                |
+| `tools/mirage_cli` | headless runs, disassembly, WAV rendering, scripted panel keys                                            |
+| `tests/`           | Catch2 unit and end-to-end tests (`ctest`)                                                                |
+| `docs/`            | the design specs, the plans, the hardware notes and the guides                                            |
 
 ## Running a release
 
