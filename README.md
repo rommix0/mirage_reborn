@@ -219,6 +219,28 @@ cp ../../docs/app.md "Mirage guide.md" && cp ../../docs/plugin.md "Mirage plugin
 cd .. && powershell -Command "Compress-Archive -Path Mirage-$V-win64 -DestinationPath Mirage-$V-win64.zip -Force"
 ```
 
+The Linux tarball is built in WSL on **Ubuntu 22.04** (glibc 2.35, GCC 11),
+not on a newer distro: Linux binaries only load where glibc and libstdc++ are
+at least as new as the build machine's, and a 24.04 build needs glibc 2.38,
+which Debian 12 and Ubuntu 22.04 don't have (the app exits at once and hosts
+can't load the plugin). A separate distro keeps the main one untouched:
+
+```
+wsl --import MirageBuild2204 C:\WSL\MirageBuild2204 ubuntu-jammy-wsl-amd64-ubuntu22.04lts.rootfs.tar.gz
+wsl -d MirageBuild2204 -u root -- apt-get install -y g++ cmake ninja-build git pkg-config libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxcomposite-dev libxss-dev
+```
+
+(the rootfs is from <https://cloud-images.ubuntu.com/wsl/jammy/current/>). Inside it,
+clone, then build with `cmake -G Ninja -DCMAKE_BUILD_TYPE=Release` and the same three targets,
+and lay out `Mirage-$V-linux-x64` like the win64 folder (`Mirage`, `mirage_cli`,
+`Mirage.vst3` from `MiragePlugin_artefacts/Release/VST3`) and `tar -czf` it. Before
+uploading, check that nothing needs more than glibc 2.35 or GLIBCXX 3.4.30
+(Debian 12's libstdc++); the newest versions printed must not be higher:
+
+```
+for f in Mirage mirage_cli Mirage.vst3/Contents/x86_64-linux/Mirage.so; do objdump -T "$f" | grep -oE 'GLIBC(XX)?_[0-9.]+' | sort -uV | awk -F_ '{m[$1]=$0} END {for (k in m) print m[k]}'; done
+```
+
 `LICENSE` goes with the binaries as the AGPL requires, and `OFL-Michroma.txt`
 because the panel font embedded in the exe asks for its licence to travel with
 it.
